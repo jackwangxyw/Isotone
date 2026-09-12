@@ -462,6 +462,21 @@ occupies, and warn when the same CLSID appears in more than one.
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
 | 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 |
 
+CI is green on GitHub for all three jobs: `core (windows-latest)`,
+`core (ubuntu-latest)` and `reference data is reproducible`. The first push
+failed two of them, both environmental:
+
+- The reference-data job compared regenerated files with `git diff`. Two scipy or
+  libm builds disagree in the last bit or two of a 17-significant-digit double,
+  so a textual comparison fails anywhere but the machine that generated the
+  files. `gen_reference.py --check` now compares numerically at 1e-9 dB, five
+  orders of magnitude tighter than the 0.01 dB the C++ tests assert. Confirmed it
+  still catches a deliberate 1e-6 dB perturbation and names the case and field.
+- The APO self test looked for its exe at a fixed path. The Windows runner uses a
+  multi-config generator, which adds a per-config subdirectory. The exe is now
+  located rather than assumed, and run from its own directory so `LoadLibrary`
+  finds `IsoAPO.dll` beside it.
+
 ## What exists
 
 ```
