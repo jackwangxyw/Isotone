@@ -1,0 +1,82 @@
+# Local docs. Contents ignored, but individual files can be re-included below.
+# (Git cannot re-include a file whose parent DIRECTORY is excluded, hence /docs/*
+# rather than /docs/.)
+/docs/*
+!/docs/decisions.md
+
+# Snapshot of the owner's live Equalizer APO state. Personal settings, not tracked.
+/sim/reference/
+
+# Per-machine endpoint registry backups written by windows/apo/install.ps1.
+# These are local safety copies of one machine's audio configuration, not
+# project data, and restoring one onto a different machine would be wrong.
+/windows/apo/IsoAPO-backup-*.reg
+
+# CMake
+build/
+build-*/
+out/
+cmake-build*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+
+# MSVC / Visual Studio
+.vs/
+Debug/
+Release/
+x64/
+x86/
+*.user
+*.suo
+*.aps
+*.VC.db
+*.VC.opendb
+
+# Build output
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.dll
+*.so
+*.exe
+*.node
+
+# Node / Electron / Vite
+node_modules/
+dist/
+dist-electron/
+release/
+.vite/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-error.log*
+
+# Python (/tools)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local config
+.env
+.env.*
+!.env.example
+*.local
+
+# OS / OneDrive / editors
+desktop.ini
+Thumbs.db
+~$*
+.DS_Store
+.idea/
+*.swp

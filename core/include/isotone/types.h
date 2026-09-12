@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 The Isotone authors
+//
+// Band and EqState: the model every host, the addon and the UI share.
+
+#pragma once
+
+#include <cstdint>
+#include <vector>
+
+namespace isotone {
+
+// Kernel filter types. These are the eight distinct biquad designs; the richer
+// set of Equalizer APO config tokens (PK/PEQ/Modal, LS/LSC, LP/LPQ, ...) maps
+// onto these eight plus the WidthMode and shelf_corner fields below.
+// Matches upstream Equalizer APO's BiQuad::Type set (filters/BiQuad.h).
+enum class FilterType : uint8_t {
+    Peaking = 0,
+    LowPass,
+    HighPass,
+    BandPass,
+    Notch,
+    AllPass,
+    LowShelf,
+    HighShelf,
+};
+
+// How the `width` field of a Band is interpreted. Equalizer APO accepts all
+// three spellings in a config file and they produce different alpha terms
+// (verified in upstream filters/BiQuad.cpp).
+enum class WidthMode : uint8_t {
+    Q = 0,          // alpha = sin(w0) / (2Q)
+    BandwidthOct,   // alpha = sin(w0) * sinh(ln2/2 * BW * w0/sin(w0))
+    SlopeDb,        // shelves only; S = slope/12, alpha = sin(w0)/2 * sqrt((A+1/A)(1/S-1)+2)
+};
+
+// Bitmask over output channels. 0 means "all channels".
+using ChannelMask = uint32_t;
+inline constexpr ChannelMask kAllChannels = 0;
+
+inline constexpr uint32_t kMaxChannels = 8;
+
+struct Band {
+    uint32_t    id       = 0;                       // stable across edits, for UI handles and undo
+    FilterType  type     = FilterType::Peaking;
+    double      fc       = 1000.0;                  // Hz, clamped at design time
+    double      gain_db  = 0.0;                     // PK, LS, HS only
+    double      width    = 1.0;                     // Q, bandwidth in octaves, or slope in dB
+    WidthMode   width_mode = WidthMode::Q;
+    // Shelves only. True reproduces Equalizer APO's `LS`/`HS` tokens, which
+    // shift the design frequency away from fc (the DCX2496 correction in
+    // upstream BiQuadFilter::initialize). False is the `LSC`/`HSC` behaviour,
+    // which uses fc directly. AutoEq emits LSC/HSC, so false.
+    bool        shelf_corner = false;
+    ChannelMask channels = kAllChannels;
+    bool        enabled  = true;
+};
+
+struct EqState {
+    bool              bypass      = false;
+    double            preamp_db   = 0.0;
+    bool              auto_preamp = false;          // computed UI-side, see plan 4.6
+    std::vector<Band> bands;                        // unbounded in the core
+    double            channel_gain_db[kMaxChannels] = {0, 0, 0, 0, 0, 0, 0, 0};
+    bool              mute        = false;
+    bool              mono        = false;
+};
+
+// True if `band` contributes to output channel `channel`.
+inline bool band_affects_channel(const Band& band, uint32_t channel) {
+    return band.channels == kAllChannels || (band.channels & (ChannelMask{1} << channel)) != 0;
+}
+
+}  // namespace isotone
