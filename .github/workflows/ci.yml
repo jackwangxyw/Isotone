@@ -31,10 +31,20 @@ jobs:
       # proving the COM lifecycle and the audio path in CI, where a fault is an
       # exit code rather than a machine with no sound. This registers nothing and
       # opens no audio device, so it runs fine on a headless runner.
+      # The exe location depends on the generator: single-config puts it in
+      # build/windows/apo, multi-config (the Visual Studio default on the Windows
+      # runner) adds a per-config subdirectory. Find it rather than guess, and
+      # run from its own directory so LoadLibrary finds IsoAPO.dll beside it.
       - name: APO self test
         if: runner.os == 'Windows'
-        working-directory: build/windows/apo
-        run: ./isotone-apo-selftest.exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter isotone-apo-selftest.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "isotone-apo-selftest.exe was not built" }
+          Push-Location $exe.DirectoryName
+          ./isotone-apo-selftest.exe
+          exit $LASTEXITCODE
 
   reference-data:
     name: reference data is reproducible
@@ -49,10 +59,13 @@ jobs:
       - name: Install scipy
         run: python -m pip install --quiet numpy scipy
 
-      # The checked-in reference files must be exactly what the generator
-      # produces, or the cross-check against scipy is checking stale data.
-      # The scipy version line is allowed to differ between runners.
-      - name: Regenerate and compare
-        run: |
-          python tools/gen_reference.py
-          git diff --exit-code -I '^# scipy ' -- core/tests/reference/
+      # The checked-in reference files must still be what the generator
+      # produces, or the cross-check against scipy is validating stale data.
+      #
+      # Compared numerically, not textually: two scipy or libm builds disagree in
+      # the last bit of a 17-digit double, so `git diff` fails on a different
+      # machine for reasons that say nothing about correctness. The tolerance is
+      # 1e-9 dB, five orders of magnitude tighter than the 0.01 dB the C++ tests
+      # assert, so a real change cannot slip through.
+      - name: Check the reference data still matches
+        run: python tools/gen_reference.py --check

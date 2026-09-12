@@ -12,13 +12,22 @@ evidence. If they were the same code twice, it would not be.
 Output: core/tests/reference/*.txt, checked in, so the C++ tests need no Python
 at run time and CI stays hermetic.
 
-Usage:  python tools/gen_reference.py
+Usage:
+    python tools/gen_reference.py            regenerate the checked-in files
+    python tools/gen_reference.py --check    verify them without writing
+
+--check compares numerically with a tolerance rather than byte for byte. Two
+scipy or libm versions disagree in the last bit or two of a 17-digit double, so
+a textual diff fails on a different machine for reasons that say nothing about
+correctness. A 1e-9 dB tolerance is still five orders of magnitude tighter than
+the 0.01 dB the C++ tests assert, so a real change in the maths cannot slip past.
 """
 
 from __future__ import annotations
 
 import math
 import pathlib
+import sys
 
 import numpy as np
 from scipy import signal
@@ -159,7 +168,113 @@ CASES = [
 ]
 
 
+# Agreement required between a regenerated value and the checked-in one. Not
+# zero: see the note in the module docstring.
+CHECK_TOLERANCE = 1e-9
+
+
+def parse_reference(path: pathlib.Path) -> dict:
+    """Reads a reference file back into {case name: {"magnitude_db": [...], ...}}."""
+    tokens = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            continue
+        tokens.extend(line.split())
+
+    out, i = {}, 0
+    points = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "points":
+            points = int(tokens[i + 1]); i += 2
+        elif tok == "case":
+            name = tokens[i + 1]
+            i += 8  # case <name> <type> <fc> <gain> <width> <mode> <corner>
+            assert tokens[i] == "coeffs", tokens[i]
+            coeffs = [float(v) for v in tokens[i + 1:i + 6]]
+            i += 6
+            assert tokens[i] == "magnitude_db", tokens[i]
+            mag = [float(v) for v in tokens[i + 1:i + 1 + points]]
+            i += 1 + points
+            assert tokens[i] == "phase_deg", tokens[i]
+            phase = [float(v) for v in tokens[i + 1:i + 1 + points]]
+            i += 1 + points
+            out[name] = {"coeffs": coeffs, "magnitude_db": mag, "phase_deg": phase}
+        else:
+            i += 1
+    return out
+
+
+def check(payloads: dict) -> int:
+    """Compares freshly computed values against the checked-in files."""
+    worst, worst_where, failures = 0.0, "", 0
+    for fs, cases in payloads.items():
+        path = OUT_DIR / f"response_{int(fs)}.txt"
+        if not path.exists():
+            print(f"MISSING {path.name}")
+            failures += 1
+            continue
+        stored = parse_reference(path)
+
+        for c in cases:
+            if c["name"] not in stored:
+                print(f"MISSING case {c['name']} in {path.name}")
+                failures += 1
+                continue
+            have = stored[c["name"]]
+            k = c["coeffs"]
+            pairs = [
+                ("coeffs", [k["b0"], k["b1"], k["b2"], k["a1"], k["a2"]], have["coeffs"]),
+                ("magnitude_db", c["magnitude_db"], have["magnitude_db"]),
+                ("phase_deg", c["phase_deg"], have["phase_deg"]),
+            ]
+            for field, fresh, old in pairs:
+                if len(fresh) != len(old):
+                    print(f"LENGTH {path.name} {c['name']} {field}")
+                    failures += 1
+                    continue
+                for a, b in zip(fresh, old):
+                    d = abs(a - b)
+                    if d > worst:
+                        worst, worst_where = d, f"{path.name} {c['name']} {field}"
+                    if d > CHECK_TOLERANCE:
+                        failures += 1
+
+    print(f"largest difference {worst:.3e} at {worst_where}")
+    print(f"tolerance {CHECK_TOLERANCE:.0e}")
+    if failures:
+        print(f"FAIL: {failures} value(s) outside tolerance")
+        return 1
+    print("OK: checked-in reference data matches a fresh computation")
+    return 0
+
+
+def compute() -> dict:
+    """Returns {sample_rate: [case dicts]} without touching the filesystem."""
+    payloads = {}
+    for fs in SAMPLE_RATES:
+        f_hi = fs * 0.5 * 0.95
+        freqs = np.logspace(math.log10(GRID_LO), math.log10(f_hi), GRID_POINTS)
+        cases = []
+        for name, ftype, fc, gain, width, mode, corner in CASES:
+            b, a = design(ftype, fc, gain, width, mode, fs, corner)
+            _, h = signal.freqz(b, a, worN=freqs, fs=fs)
+            cases.append({
+                "name": name, "type": ftype, "fc": fc, "gain_db": gain,
+                "width": width, "width_mode": mode, "shelf_corner": corner,
+                "coeffs": {"b0": b[0], "b1": b[1], "b2": b[2], "a1": a[1], "a2": a[2]},
+                "magnitude_db": [float(v) for v in 20.0 * np.log10(np.abs(h))],
+                "phase_deg": [float(v) for v in np.degrees(np.angle(h))],
+                "freqs": [float(v) for v in freqs],
+            })
+        payloads[fs] = cases
+    return payloads
+
+
 def main() -> None:
+    if "--check" in sys.argv:
+        raise SystemExit(check(compute()))
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     written = 0
 
