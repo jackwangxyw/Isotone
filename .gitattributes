@@ -1,0 +1,16 @@
+# Normalise line endings in the repository to LF, and check everything out as
+# LF regardless of platform.
+#
+# This is not cosmetic. tools/gen_reference.py writes the checked-in reference
+# data with explicit LF, and the CI job that regenerates it compares the result
+# with `git diff --exit-code`. Without this file, a Windows checkout with
+# core.autocrlf=true would produce CRLF working copies and that job would fail
+# on every line of every reference file. It also keeps the shell scripts and
+# the .ps1 installer stable across platforms.
+* text=auto eol=lf
+
+# Anything that must stay byte-exact.
+*.png binary
+*.wav binary
+*.dll binary
+*.reg binary
