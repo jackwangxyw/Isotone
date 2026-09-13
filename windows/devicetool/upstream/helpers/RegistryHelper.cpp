@@ -31,6 +31,7 @@ using namespace std;
 
 DWORD RegistryHelper::windowsVersion = 0;
 RegistryDryRun* RegistryHelper::dryRun = NULL;   // Isotone modification
+RegistryLog* RegistryHelper::log = NULL;   // Isotone modification
 
 wstring RegistryHelper::readValue(wstring key, wstring valuename)
 {
@@ -208,6 +209,7 @@ vector<unsigned char> RegistryHelper::readBinaryValue(wstring key, wstring value
 void RegistryHelper::writeValue(wstring key, wstring valuename, wstring value)
 {
 	if (dryRun) { dryRun->write(L"set REG_SZ", key, valuename, value); return; }   // Isotone modification
+	RegistryWriteReport report(L"set REG_SZ", key, valuename, value);   // Isotone modification
 	HKEY keyHandle = openKey(key, KEY_SET_VALUE | KEY_WOW64_64KEY);
 
 	LSTATUS status = RegSetValueExW(keyHandle, valuename.c_str(), 0, REG_SZ, (const BYTE*)value.c_str(), (DWORD)((value.size() + 1) * sizeof(wchar_t)));
@@ -221,6 +223,7 @@ void RegistryHelper::writeValue(wstring key, wstring valuename, wstring value)
 void RegistryHelper::writeDWORDValue(wstring key, wstring valuename, unsigned long value)
 {
 	if (dryRun) { dryRun->write(L"set REG_DWORD", key, valuename, to_wstring(value)); return; }   // Isotone modification
+	RegistryWriteReport report(L"set REG_DWORD", key, valuename, to_wstring(value));   // Isotone modification
 	HKEY keyHandle = openKey(key, KEY_SET_VALUE | KEY_WOW64_64KEY);
 
 	LSTATUS status = RegSetValueExW(keyHandle, valuename.c_str(), 0, REG_DWORD, (const BYTE*)&value, sizeof(unsigned long));
@@ -234,6 +237,7 @@ void RegistryHelper::writeDWORDValue(wstring key, wstring valuename, unsigned lo
 void RegistryHelper::writeMultiValue(wstring key, wstring valuename, wstring value)
 {
 	if (dryRun) { dryRun->write(L"set REG_MULTI_SZ", key, valuename, value); return; }   // Isotone modification
+	RegistryWriteReport report(L"set REG_MULTI_SZ", key, valuename, value);   // Isotone modification
 	HKEY keyHandle = openKey(key, KEY_SET_VALUE | KEY_WOW64_64KEY);
 
 	wchar_t* data = new wchar_t[value.size() + 2];
@@ -254,6 +258,7 @@ void RegistryHelper::writeMultiValue(wstring key, wstring valuename, wstring val
 void RegistryHelper::writeMultiValue(wstring key, wstring valuename, vector<wstring> values)
 {
 	if (dryRun) { dryRun->write(L"set REG_MULTI_SZ", key, valuename, StringHelper::join(values, L"|")); return; }   // Isotone modification
+	RegistryWriteReport report(L"set REG_MULTI_SZ", key, valuename, StringHelper::join(values, L"|"));   // Isotone modification
 	HKEY keyHandle = openKey(key, KEY_SET_VALUE | KEY_WOW64_64KEY);
 
 	size_t size = 1;
@@ -283,6 +288,7 @@ void RegistryHelper::writeMultiValue(wstring key, wstring valuename, vector<wstr
 void RegistryHelper::deleteValue(wstring key, wstring valuename)
 {
 	if (dryRun) { dryRun->write(L"delete value", key, valuename, L""); return; }   // Isotone modification
+	RegistryWriteReport report(L"delete value", key, valuename, L"");   // Isotone modification
 	HKEY keyHandle = openKey(key, KEY_SET_VALUE | KEY_WOW64_64KEY);
 
 	LSTATUS status = RegDeleteValueW(keyHandle, valuename.c_str());
@@ -296,6 +302,7 @@ void RegistryHelper::deleteValue(wstring key, wstring valuename)
 void RegistryHelper::createKey(wstring key)
 {
 	if (dryRun) { dryRun->write(L"create key", key, L"", L""); return; }   // Isotone modification
+	RegistryWriteReport report(L"create key", key, L"", L"");   // Isotone modification
 	HKEY rootKey;
 	wstring subKey = splitKey(key, &rootKey);
 
@@ -310,6 +317,7 @@ void RegistryHelper::createKey(wstring key)
 void RegistryHelper::deleteKey(wstring key)
 {
 	if (dryRun) { dryRun->write(L"delete key", key, L"", L""); return; }   // Isotone modification
+	RegistryWriteReport report(L"delete key", key, L"", L"");   // Isotone modification
 	HKEY rootKey;
 	wstring subKey = splitKey(key, &rootKey);
 
@@ -321,6 +329,7 @@ void RegistryHelper::deleteKey(wstring key)
 void RegistryHelper::makeWritable(wstring key)
 {
 	if (dryRun) { dryRun->write(L"grant Administrators KEY_ALL_ACCESS", key, L"", L""); return; }   // Isotone modification
+	RegistryWriteReport report(L"grant Administrators KEY_ALL_ACCESS", key, L"", L"");   // Isotone modification
 	HKEY keyHandle = openKey(key, READ_CONTROL | WRITE_DAC | KEY_WOW64_64KEY);
 
 	DWORD descriptorSize = 0;
@@ -377,6 +386,7 @@ void RegistryHelper::makeWritable(wstring key)
 void RegistryHelper::takeOwnership(wstring key)
 {
 	if (dryRun) { dryRun->write(L"take ownership for Administrators", key, L"", L""); return; }   // Isotone modification
+	RegistryWriteReport report(L"take ownership for Administrators", key, L"", L"");   // Isotone modification
 	HANDLE tokenHandle;
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle))
 		throw RegistryException(L"Error in OpenProcessToken while taking ownership");
@@ -558,6 +568,7 @@ bool RegistryHelper::keyEmpty(wstring key)
 void RegistryHelper::saveToFile(wstring key, vector<wstring> valuenames, wstring filepath)
 {
 	if (dryRun) { dryRun->write(L"back up values to file", key, StringHelper::join(valuenames, L"|"), filepath); return; }   // Isotone modification
+	RegistryWriteReport report(L"back up values to file", key, StringHelper::join(valuenames, L"|"), filepath);   // Isotone modification
 	wofstream stream(filepath);
 	if (!stream.good())
 		throw RegistryException(L"Error while opening file " + filepath + L" for writing");

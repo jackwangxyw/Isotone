@@ -42,8 +42,10 @@
 #include "helpers/RegistryHelper.h"
 
 using isotone::devicetool::DryRunRegistry;
+using isotone::devicetool::OperationLog;
 using isotone::devicetool::RegistryOperation;
 using isotone::devicetool::ScopedDryRun;
+using isotone::devicetool::ScopedLog;
 
 namespace {
 
@@ -72,10 +74,15 @@ const SlotName kEffectSlots[] = {
 // REG_MULTI_SZ lists of additional effects (upstream's multiSfx/multiMfx/
 // multiEfx value names). Upstream only checks whether they exist when choosing
 // an install mode and never changes them, so their APOs keep running.
+// ,19 and ,20 are PKEY_CompositeFX_Offload_StreamEffectClsid and
+// _ModeEffectClsid (Windows SDK), the lists for hardware-offloaded streams;
+// Realtek drivers fill them. Reported only, never written.
 const SlotName kEffectLists[] = {
     {"SFX_LIST", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13"},
     {"MFX_LIST", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14"},
     {"EFX_LIST", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15"},
+    {"SFX_OFFLOAD_LIST", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},19"},
+    {"MFX_OFFLOAD_LIST", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},20"},
 };
 const SlotName kModeSlots[] = {
     {"SFX", L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},5"},
@@ -616,6 +623,24 @@ void select_post_mix_only(DeviceAPOInfo* info, DeviceAPOInfo::InstallMode mode) 
     s.useOriginalAPOPostMix = !original.empty() && classify(original) == std::string("other");
 }
 
+// With --replace-equalizerapo, after upstream's install: deletes Equalizer APO's
+// classes from the effect slots the install did not write, so the endpoint has
+// one EQ. Upstream's install has already recorded every slot's original value,
+// and its uninstall writes each one back, so Equalizer APO returns on uninstall.
+// Returns how many slots it cleared.
+int remove_equalizerapo(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    int removed = 0;
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring clsid;
+        if (try_read_string(fx, slot.value, &clsid) && std::string(classify(clsid)).rfind("equalizerapo", 0) == 0) {
+            RegistryHelper::deleteValue(fx, slot.value);
+            ++removed;
+        }
+    }
+    return removed;
+}
+
 // Where upstream's install writes its .reg backup: the working directory.
 std::wstring backup_directory() {
     wchar_t* base = nullptr;
@@ -673,38 +698,46 @@ int cmd_install(const Endpoint& e, DeviceAPOInfo::InstallMode mode, bool replace
     const std::wstring child = selected.useOriginalAPOPostMix ? info.getOriginalAPOPostMix() : L"";
 
     std::vector<std::string> warnings;
-    if (slots.equalizerapo)
-        warnings.push_back("Equalizer APO stays in any slot this install does not write; the endpoint will still report a conflict");
     if (!child.empty())
         warnings.push_back("the replaced APO " + utf8(child) + " is recorded as the child, but IsoAPO does not wrap child APOs yet, so its processing stops while IsoAPO is installed");
     warnings.insert(warnings.end(), slots.warnings.begin(), slots.warnings.end());
 
     const std::wstring backups = backup_directory();
     DryRunRegistry dry;
+    OperationLog log;
+    int eapo_removed = 0;
     try {
         if (dry_run) {
             ScopedDryRun scope(&dry);
             info.install();
+            if (replace_eapo) eapo_removed = remove_equalizerapo(e);
         } else {
             CreateDirectoryW((backups.substr(0, backups.rfind(L'\\'))).c_str(), nullptr);
             CreateDirectoryW(backups.c_str(), nullptr);
             if (!SetCurrentDirectoryW(backups.c_str()))
                 return fail("install", "cannot use backup directory " + utf8(backups));
+            ScopedLog scope(&log);
             info.install();
+            if (replace_eapo) eapo_removed = remove_equalizerapo(e);
         }
     } catch (RegistryException& ex) {
-        return fail("install", utf8(ex.getMessage()));
+        return fail("install", utf8(ex.getMessage()), ",\"operations\":" + operations_json(log.operations()));
     }
 
-    std::string verified = "null";
-    if (!dry_run) verified = boolean(read_slots(e).isoapo);
+    std::string verified = "null", eapo_left = "null";
+    if (!dry_run) {
+        const Slots after = read_slots(e);
+        verified = boolean(after.isoapo);
+        eapo_left = boolean(after.equalizerapo);
+    }
 
     std::printf("{\"command\":\"install\",\"ok\":true,\"dry_run\":%s,\"mode\":%s,\"child\":%s,"
-                "\"backup_directory\":%s,\"checks\":%s,\"operations\":%s,\"verified_in_slot\":%s,\"warnings\":%s}\n",
+                "\"backup_directory\":%s,\"checks\":%s,\"equalizerapo_slots_removed\":%d,\"operations\":%s,"
+                "\"verified_in_slot\":%s,\"equalizerapo_still_in_slots\":%s,\"warnings\":%s}\n",
                 boolean(dry_run), quote(mode_name(mode)).c_str(),
                 child.empty() ? "null" : quote(child).c_str(), quote(backups).c_str(), checks.c_str(),
-                operations_json(dry.operations()).c_str(), verified.c_str(),
-                string_array(warnings).c_str());
+                eapo_removed, operations_json(dry_run ? dry.operations() : log.operations()).c_str(),
+                verified.c_str(), eapo_left.c_str(), string_array(warnings).c_str());
     return 0;
 }
 
@@ -723,19 +756,22 @@ int cmd_uninstall(const Endpoint& e, bool dry_run) {
 
     DeviceAPOInfo info;
     DryRunRegistry dry;
+    OperationLog log;
     try {
         if (!info.load(e.guid)) return fail("uninstall", "endpoint is not present");
         if (dry_run) {
             ScopedDryRun scope(&dry);
             info.uninstall();
         } else {
+            ScopedLog scope(&log);
             info.uninstall();
         }
     } catch (RegistryException& ex) {
-        return fail("uninstall", utf8(ex.getMessage()));
+        return fail("uninstall", utf8(ex.getMessage()), ",\"operations\":" + operations_json(log.operations()));
     }
     std::printf("{\"command\":\"uninstall\",\"ok\":true,\"dry_run\":%s,\"record\":%s,\"operations\":%s}\n",
-                boolean(dry_run), record.json.c_str(), operations_json(dry.operations()).c_str());
+                boolean(dry_run), record.json.c_str(),
+                operations_json(dry_run ? dry.operations() : log.operations()).c_str());
     return 0;
 }
 
@@ -768,9 +804,11 @@ int cmd_repair(DeviceAPOInfo::InstallMode mode, bool dry_run) {
         if (!record.exists || read_slots(e).isoapo) continue;
 
         DryRunRegistry dry;
+        OperationLog log;
         std::string error;
         try {
             ScopedDryRun scope(dry_run ? &dry : nullptr);
+            ScopedLog logged(dry_run ? nullptr : &log);
             reattach(g, mode);
         } catch (RegistryException& ex) {
             error = utf8(ex.getMessage());
@@ -778,7 +816,7 @@ int cmd_repair(DeviceAPOInfo::InstallMode mode, bool dry_run) {
         }
         devices += std::string(first ? "" : ",") + "{\"guid\":" + quote(g) + ",\"ok\":" +
                    boolean(error.empty()) + (error.empty() ? "" : ",\"error\":" + quote(error)) +
-                   ",\"operations\":" + operations_json(dry.operations()) + "}";
+                   ",\"operations\":" + operations_json(dry_run ? dry.operations() : log.operations()) + "}";
         first = false;
     }
     std::printf("{\"command\":\"repair\",\"ok\":%s,\"dry_run\":%s,\"mode\":%s,\"repaired\":%s]}\n",
@@ -788,8 +826,9 @@ int cmd_repair(DeviceAPOInfo::InstallMode mode, bool dry_run) {
 
 // Always a dry run: install, then uninstall, both against one DryRunRegistry,
 // and compare the effect slots before and after. Proves upstream's uninstall
-// restores what install replaced, without touching the registry.
-int cmd_roundtrip(const Endpoint& e, DeviceAPOInfo::InstallMode mode) {
+// restores what install replaced, without touching the registry. With
+// replace_eapo the install also removes Equalizer APO, as install does.
+int cmd_roundtrip(const Endpoint& e, DeviceAPOInfo::InstallMode mode, bool replace_eapo) {
     if (e.input) return fail("roundtrip", "capture endpoints are not supported: IsoAPO is an output EQ");
     const std::wstring fx = e.key + L"\\FxProperties";
     const auto slot_values = [&]() {
@@ -829,6 +868,7 @@ int cmd_roundtrip(const Endpoint& e, DeviceAPOInfo::InstallMode mode) {
         if (first.isInstalled()) return fail("roundtrip", "IsoAPO is already in a slot on this endpoint");
         select_post_mix_only(&first, mode);
         first.install();
+        if (replace_eapo) remove_equalizerapo(e);
         installed = slot_values();
 
         DeviceAPOInfo second;
@@ -860,12 +900,18 @@ int cmd_roundtrip(const Endpoint& e, DeviceAPOInfo::InstallMode mode) {
     }
 
     const bool restored = before == after;
+    const auto holds_eapo = [&](const std::vector<std::wstring>& v) {
+        return std::any_of(v.begin(), v.end(), [](const std::wstring& c) {
+            return std::string(classify(c)).rfind("equalizerapo", 0) == 0;
+        });
+    };
     const bool ok = restored && holds_isoapo(installed) && reloaded_installed && detach_seen &&
-                    !holds_isoapo(detached) && holds_isoapo(repaired);
-    std::printf("{\"command\":\"roundtrip\",\"ok\":%s,\"mode\":%s,\"before\":%s,\"after_install\":%s,"
+                    !holds_isoapo(detached) && holds_isoapo(repaired) &&
+                    (!replace_eapo || !holds_eapo(installed));
+    std::printf("{\"command\":\"roundtrip\",\"ok\":%s,\"mode\":%s,\"replace_equalizerapo\":%s,\"before\":%s,\"after_install\":%s,"
                 "\"reload_sees_install\":%s,\"after_simulated_driver_update\":%s,\"detach_seen\":%s,"
                 "\"after_repair\":%s,\"after_uninstall\":%s,\"restored\":%s,\"operations\":%s}\n",
-                boolean(ok), quote(mode_name(mode)).c_str(), slots_json(before).c_str(),
+                boolean(ok), quote(mode_name(mode)).c_str(), boolean(replace_eapo), slots_json(before).c_str(),
                 slots_json(installed).c_str(), boolean(reloaded_installed), slots_json(detached).c_str(),
                 boolean(detach_seen), slots_json(repaired).c_str(), slots_json(after).c_str(),
                 boolean(restored), operations_json(dry.operations()).c_str());
@@ -928,6 +974,6 @@ int main(int argc, char** argv) {
     if (command == "status") return cmd_status(endpoint);
     if (command == "install") return cmd_install(endpoint, mode, replace_eapo, dry_run);
     if (command == "uninstall") return cmd_uninstall(endpoint, dry_run);
-    if (command == "roundtrip") return cmd_roundtrip(endpoint, mode);
+    if (command == "roundtrip") return cmd_roundtrip(endpoint, mode, replace_eapo);
     return cmd_test(endpoint);
 }

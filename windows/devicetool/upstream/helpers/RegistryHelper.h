@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <exception>   // Isotone modification
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -58,10 +59,21 @@ public:
 	virtual bool keyEmpty(const std::wstring& key, bool* result) = 0;
 };
 
+// Isotone modification: while a RegistryLog is installed, each real write is
+// reported to it once it has succeeded, so a real install can say what it changed.
+class RegistryLog
+{
+public:
+	virtual ~RegistryLog() {}
+	virtual void write(const std::wstring& operation, const std::wstring& key,
+		const std::wstring& valuename, const std::wstring& data) = 0;
+};
+
 class RegistryHelper
 {
 public:
 	static RegistryDryRun* dryRun;
+	static RegistryLog* log;   // Isotone modification
 
 	static std::wstring readValue(std::wstring key, std::wstring valuename);
 	static unsigned long readDWORDValue(std::wstring key, std::wstring valuename);
@@ -105,4 +117,26 @@ public:
 
 private:
 	std::wstring message;
+};
+
+// Isotone modification: declared at the top of a write, reports that write to
+// RegistryHelper::log when the function returns without throwing.
+class RegistryWriteReport
+{
+public:
+	RegistryWriteReport(const std::wstring& operation, const std::wstring& key,
+		const std::wstring& valuename, const std::wstring& data)
+		: operation(operation), key(key), valuename(valuename), data(data),
+		exceptions(std::uncaught_exceptions()) {}
+	~RegistryWriteReport()
+	{
+		if (RegistryHelper::log && std::uncaught_exceptions() == exceptions)
+			RegistryHelper::log->write(operation, key, valuename, data);
+	}
+	RegistryWriteReport(const RegistryWriteReport&) = delete;
+	RegistryWriteReport& operator=(const RegistryWriteReport&) = delete;
+
+private:
+	std::wstring operation, key, valuename, data;
+	int exceptions;
 };

@@ -32,8 +32,10 @@ to LF to match the repository; nothing else changed except as listed.
   `writeDWORDValue`, both `writeMultiValue`s, `deleteValue`, `createKey`,
   `deleteKey`, `makeWritable`, `takeOwnership` and `saveToFile` report to it
   and return without touching the registry or the file system; `readValue`,
-  `keyExists`, `valueExists` and `keyEmpty` ask it first. Each line is marked
-  `Isotone modification`.
+  `keyExists`, `valueExists` and `keyEmpty` ask it first. Each of those writes
+  also reports itself to `RegistryHelper::log`, when one is installed, after it
+  returns without throwing (`RegistryWriteReport`, `RegistryLog`). Each line is
+  marked `Isotone modification`.
 - `DeviceAPOInfo.cpp`:
   - `EQUALIZERAPO_PRE_MIX_GUID` / `EQUALIZERAPO_POST_MIX_GUID` replaced by the
     `ISOAPO_*` GUIDs throughout (install detection, the values written, and

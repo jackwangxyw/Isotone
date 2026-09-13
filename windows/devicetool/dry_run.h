@@ -48,6 +48,29 @@ private:
     std::map<std::wstring, Value> values_;
 };
 
+// Records the writes a real run made, in order. Only writes that succeeded are
+// listed, so after a failure it is exactly what changed.
+class OperationLog : public RegistryLog {
+public:
+    void write(const std::wstring& operation, const std::wstring& key,
+               const std::wstring& valuename, const std::wstring& data) override {
+        operations_.push_back({operation, key, valuename, data});
+    }
+    const std::vector<RegistryOperation>& operations() const { return operations_; }
+
+private:
+    std::vector<RegistryOperation> operations_;
+};
+
+// While alive, reports RegistryHelper's real writes to `log`.
+class ScopedLog {
+public:
+    explicit ScopedLog(RegistryLog* log) { RegistryHelper::log = log; }
+    ~ScopedLog() { RegistryHelper::log = nullptr; }
+    ScopedLog(const ScopedLog&) = delete;
+    ScopedLog& operator=(const ScopedLog&) = delete;
+};
+
 // While alive, routes RegistryHelper through `registry`.
 class ScopedDryRun {
 public:
