@@ -21,7 +21,8 @@ std::wstring mapping_name(const wchar_t* object_namespace, const std::wstring& e
     return name;
 }
 
-DWORD SharedMapping::create_or_open(const std::wstring& name) {
+DWORD SharedMapping::create_or_open(const std::wstring& name, void (*seed)(ParamBlock* block, void* context),
+                                    void* context) {
     // Open first. CreateFileMappingW on an object that already exists asks for
     // full access, which kMappingSddl grants only to SYSTEM and LocalService;
     // opening needs just the read and write every host actually uses.
@@ -60,7 +61,7 @@ DWORD SharedMapping::create_or_open(const std::wstring& name) {
         }
         // A new mapping is zero-filled by the system, so the region only needs
         // its headers written.
-        init_shared_region(view_);
+        init_shared_region(view_, seed, context);
         created_ = true;
         return ERROR_SUCCESS;
     }
@@ -87,11 +88,11 @@ DWORD SharedMapping::map_existing() {
     const size_t bytes = VirtualQuery(view_, &info, sizeof(info)) != 0 ? info.RegionSize : 0;
 
     // The creator may still be writing the headers. It writes the magic last,
-    // so a zero magic means "not finished yet" rather than "wrong layout".
-    for (int attempt = 0; attempt < 200; ++attempt) {
-        if (bytes >= sizeof(ParamBlock) && params()->hdr.magic != 0) {
-            break;
-        }
+    // so a zero magic means "not finished yet" rather than "wrong layout". The
+    // creator finishes within microseconds; a magic still zero after 50 ms was
+    // zeroed by someone else, and waiting longer would only stall the caller.
+    const ULONGLONG deadline = GetTickCount64() + 50;
+    while (bytes >= sizeof(ParamBlock) && params()->hdr.magic == 0 && GetTickCount64() < deadline) {
         Sleep(1);
     }
     if (!shared_region_valid(view_, bytes)) {

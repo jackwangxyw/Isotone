@@ -9,7 +9,13 @@
 // every process call, writes post-EQ audio to the ring, and bumps the
 // heartbeat. When this instance creates the region it seeds it from a file
 // under ProgramData, the only place audiodg can read since it runs as
-// LocalService. Not done yet: wrapping a device's existing APO as a child.
+// LocalService.
+//
+// The APO an install replaced keeps running inside IsoAPO as its child, as in
+// upstream: install records its CLSID, Initialize creates it, format
+// negotiation and lock/unlock go to it, and each process call runs it first and
+// IsoAPO's processor on its output. A child that fails any step is dropped and
+// IsoAPO runs alone.
 //
 // Structure follows upstream Equalizer APO's EqualizerAPO.cpp, which is the
 // known-good shape for this interface, with its FilterEngine replaced by
@@ -89,19 +95,28 @@ public:
 private:
     void load_parameters();
     void open_shared_region(const std::wstring& endpoint_guid);
+    static void seed_region(isotone::ParamBlock* block, void* self);
+    HRESULT lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT32 outputCount,
+                 APO_CONNECTION_DESCRIPTOR** outputs);
+    void create_child(const std::wstring& endpoint_guid, const CLSID& own_clsid, UINT32 size, BYTE* data);
+    void reset_child();
 
     long      refCount_ = 1;
     IUnknown* outer_    = nullptr;
 
     isotone::Processor processor_;
     isotone::EqState   state_;
-    uint32_t           channels_       = 0;
+    uint32_t           channels_       = 0;   // processed: the output format's
+    uint32_t           input_channels_ = 0;
     bool               locked_         = false;
-    bool               denormals_set_  = false;
 
     isotone::win::SharedMapping mapping_;
     isotone::AudioRingWriter    ring_;
     uint64_t                    ring_token_  = 0;    // process id << 32 | instance serial
     uint32_t                    applied_seq_ = 0;    // seq of the block last applied
     isotone::ParamBlock         block_{};            // private copy taken under the seqlock
+
+    IAudioProcessingObject*              child_     = nullptr;
+    IAudioProcessingObjectRT*            child_rt_  = nullptr;
+    IAudioProcessingObjectConfiguration* child_cfg_ = nullptr;
 };

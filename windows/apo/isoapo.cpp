@@ -11,6 +11,7 @@
 #include <mmdeviceapi.h>
 #include <shlobj.h>
 
+#include <cmath>
 #include <fstream>
 #include <new>
 #include <sstream>
@@ -48,6 +49,42 @@ constexpr wchar_t kObjectNamespace[] = L"Local\\";
 constexpr wchar_t kObjectNamespace[] = L"Global\\";
 #endif
 
+// Where devicetool (upstream's install) records the replaced APO:
+// <root>\<key>\{endpoint-guid}, values PreMixChild and PostMixChild. The
+// self-test build reads a per-user copy it can write without elevation.
+#ifdef ISOAPO_SELFTEST_LOCAL_NAMESPACE
+HKEY child_root() { return HKEY_CURRENT_USER; }
+constexpr wchar_t kChildApoKey[] = L"Software\\IsoAPO-selftest\\Child APOs";
+#else
+HKEY child_root() { return HKEY_LOCAL_MACHINE; }
+constexpr wchar_t kChildApoKey[] = L"SOFTWARE\\IsoAPO\\Child APOs";
+#endif
+
+// The recorded child CLSID. Upstream's placeholders (!VALUE, !KEY) and an empty
+// string are not CLSIDs and count as no child.
+bool recorded_child(const std::wstring& endpoint_guid, bool pre_mix, CLSID* clsid) {
+    const std::wstring key = std::wstring(kChildApoKey) + L"\\" + endpoint_guid;
+    wchar_t value[64] = {};
+    DWORD bytes = sizeof(value);
+    if (RegGetValueW(child_root(), key.c_str(), pre_mix ? L"PreMixChild" : L"PostMixChild",
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value, &bytes) != ERROR_SUCCESS) {
+        return false;
+    }
+    return value[0] == L'{' && SUCCEEDED(CLSIDFromString(value, clsid));
+}
+
+// Equalizer APO's own classes. Hosting one would put two EQs on the endpoint,
+// and if Equalizer APO's record names IsoAPO in turn, each would create the
+// other until the stack runs out.
+const CLSID kEqualizerApoPreMix  = {0xeacd2258, 0xfcac, 0x4ff4, {0xb3, 0x6d, 0x41, 0x9e, 0x92, 0x4a, 0x6d, 0x79}};
+const CLSID kEqualizerApoPostMix = {0xec1cc9ce, 0xfaed, 0x4822, {0x82, 0x8a, 0x82, 0xa8, 0x1a, 0x6f, 0x01, 0x8f}};
+
+void debug_line(const wchar_t* text, HRESULT hr) {
+    wchar_t message[256];
+    swprintf_s(message, L"IsoAPO: %ls (0x%08lx)\n", text, static_cast<unsigned long>(hr));
+    OutputDebugStringW(message);
+}
+
 std::atomic<uint32_t> g_instance_serial{0};
 
 // audiodg runs as LocalService and cannot read user directories, so the only
@@ -74,6 +111,7 @@ IsoApo::IsoApo(IUnknown* outer) : CBaseAudioProcessingObject(regPostMixPropertie
 }
 
 IsoApo::~IsoApo() {
+    reset_child();
     ring_.release();
     InterlockedDecrement(&instanceCount);
 }
@@ -122,12 +160,19 @@ HRESULT IsoApo::GetLatency(HNSTIME* time) {
         return E_POINTER;
     }
     // A cascade of biquads is a zero-latency structure: no lookahead, no
-    // buffering. Phase shift is not latency.
+    // buffering. Phase shift is not latency. A child's latency is the chain's.
     *time = 0;
+    if (child_ != nullptr) {
+        child_->GetLatency(time);
+    }
     return S_OK;
 }
 
 HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
+    if (locked_) {
+        // Re-initializing would drop the child while the audio thread may be using it.
+        return APOERR_ALREADY_INITIALIZED;
+    }
     // Same acceptance as upstream EqualizerAPO::Initialize, which reads the
     // endpoint GUID the same way. APOInitSystemEffects2 begins with the same
     // fields, so it is read through the smaller struct.
@@ -153,10 +198,12 @@ HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
         return E_UNEXPECTED;
     }
 
+    reset_child();
     try {
         const std::wstring guid = var.pwszVal;
         PropVariantClear(&var);
         open_shared_region(guid);
+        create_child(guid, init->APOInit.clsid, size, data);
     } catch (const std::bad_alloc&) {
         PropVariantClear(&var);
         return E_OUTOFMEMORY;
@@ -164,10 +211,50 @@ HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
     return S_OK;
 }
 
+// Upstream EqualizerAPO::Initialize: every failure drops the child and leaves
+// IsoAPO running alone, so a broken vendor APO cannot take the endpoint down.
+void IsoApo::create_child(const std::wstring& endpoint_guid, const CLSID& own_clsid, UINT32 size,
+                          BYTE* data) {
+    CLSID clsid{};
+    if (!recorded_child(endpoint_guid, own_clsid == ISOAPO_PRE_MIX_GUID, &clsid)) {
+        return;
+    }
+    // Hosting ourselves would recurse until the stack runs out.
+    if (clsid == ISOAPO_POST_MIX_GUID || clsid == ISOAPO_PRE_MIX_GUID || clsid == kEqualizerApoPreMix ||
+        clsid == kEqualizerApoPostMix) {
+        return;
+    }
+    HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IAudioProcessingObject),
+                                  reinterpret_cast<void**>(&child_));
+    if (SUCCEEDED(hr)) {
+        hr = child_->QueryInterface(__uuidof(IAudioProcessingObjectRT), reinterpret_cast<void**>(&child_rt_));
+    }
+    if (SUCCEEDED(hr)) {
+        hr = child_->QueryInterface(__uuidof(IAudioProcessingObjectConfiguration),
+                                    reinterpret_cast<void**>(&child_cfg_));
+    }
+    if (SUCCEEDED(hr)) {
+        hr = child_->Initialize(size, data);
+    }
+    if (FAILED(hr)) {
+        debug_line(L"child APO could not be created or initialized; running without it", hr);
+        reset_child();
+    }
+}
+
+void IsoApo::reset_child() {
+    if (child_cfg_ != nullptr) child_cfg_->Release();
+    if (child_rt_ != nullptr) child_rt_->Release();
+    if (child_ != nullptr) child_->Release();
+    child_cfg_ = nullptr;
+    child_rt_ = nullptr;
+    child_ = nullptr;
+}
+
 void IsoApo::open_shared_region(const std::wstring& endpoint_guid) {
     ring_.release();
     const std::wstring name = isotone::win::mapping_name(kObjectNamespace, endpoint_guid);
-    const DWORD error = mapping_.create_or_open(name);
+    const DWORD error = mapping_.create_or_open(name, &IsoApo::seed_region, this);
     if (error != ERROR_SUCCESS) {
         // Audio keeps flowing on the file-seeded parameters; failing Initialize
         // would take the endpoint's effects down with it. The UI sees no region
@@ -179,15 +266,16 @@ void IsoApo::open_shared_region(const std::wstring& endpoint_guid) {
         return;
     }
 
-    // Seed only a region this instance created. An existing one already holds
-    // what the UI or a sibling instance put there, and that wins.
-    if (mapping_.created()) {
-        load_parameters();
-        isotone::param_block_write(mapping_.params(), [&](isotone::ParamBlock* b) {
-            isotone::to_param_block(state_, b);
-        });
-    }
+    // A region this instance created was seeded by seed_region before it became
+    // visible. An existing one already holds what the UI or a sibling instance
+    // put there, and that wins.
     ring_.attach(mapping_.ring(), isotone::kRingCapacityFrames);
+}
+
+void IsoApo::seed_region(isotone::ParamBlock* block, void* self) {
+    auto* apo = static_cast<IsoApo*>(self);
+    apo->load_parameters();
+    isotone::param_block_write(block, [&](isotone::ParamBlock* b) { isotone::to_param_block(apo->state_, b); });
 }
 
 void IsoApo::load_parameters() {
@@ -225,26 +313,41 @@ HRESULT IsoApo::IsInputFormatSupported(IAudioMediaType* output, IAudioMediaType*
         return E_POINTER;
     }
 
+    // With a child, the child decides: it may convert the format, and IsoAPO
+    // processes whatever it outputs. A refusal is an answer to this one probe,
+    // not a failure: the engine goes on to try other formats, so the child stays.
+    if (child_ != nullptr) {
+        return child_->IsInputFormatSupported(output, requested, supported);
+    }
+
+    IAudioMediaType* base_supported = nullptr;
+    HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(output, requested, &base_supported);
+    if (hr != S_OK || output == nullptr) {
+        if (supported != nullptr) *supported = base_supported;
+        else if (base_supported != nullptr) base_supported->Release();
+        return hr;
+    }
     UNCOMPRESSEDAUDIOFORMAT in{};
-    HRESULT hr = requested->GetUncompressedAudioFormat(&in);
-    if (FAILED(hr)) {
-        return hr;
-    }
     UNCOMPRESSEDAUDIOFORMAT out{};
-    hr = output->GetUncompressedAudioFormat(&out);
-    if (FAILED(hr)) {
+    if (FAILED(requested->GetUncompressedAudioFormat(&in)) || FAILED(output->GetUncompressedAudioFormat(&out))) {
+        if (supported != nullptr) *supported = base_supported;
+        else if (base_supported != nullptr) base_supported->Release();
         return hr;
     }
-
-    hr = CBaseAudioProcessingObject::IsInputFormatSupported(output, requested, supported);
-
-    // Downmixing is out of scope, same as upstream: refuse a format with more
-    // input channels than output channels.
-    if (hr == S_OK && in.dwSamplesPerFrame > 2 && in.dwSamplesPerFrame > out.dwSamplesPerFrame) {
-        CreateAudioMediaTypeFromUncompressedAudioFormat(&out, supported);
-        hr = S_FALSE;
+    // Alone, IsoAPO filters in place and cannot change the channel count, so it
+    // asks for input in the output's layout and lets the engine convert.
+    if (in.dwSamplesPerFrame != out.dwSamplesPerFrame) {
+        if (base_supported != nullptr) base_supported->Release();
+        if (supported == nullptr) return E_POINTER;
+        UNCOMPRESSEDAUDIOFORMAT suggestion = in;
+        suggestion.dwSamplesPerFrame = out.dwSamplesPerFrame;
+        suggestion.dwChannelMask = out.dwChannelMask;
+        const HRESULT created = CreateAudioMediaTypeFromUncompressedAudioFormat(&suggestion, supported);
+        return FAILED(created) ? created : S_FALSE;
     }
-    return hr;
+    if (supported != nullptr) *supported = base_supported;
+    else if (base_supported != nullptr) base_supported->Release();
+    return S_OK;
 }
 
 HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs,
@@ -252,21 +355,76 @@ HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** in
     if (inputs == nullptr || outputs == nullptr || inputCount == 0 || outputCount == 0) {
         return E_INVALIDARG;
     }
+    // Nothing may throw into audiodg (plan 5.3). Allocation here is the delay
+    // lines and band storage, and it can fail under memory pressure.
+    try {
+        return lock(inputCount, inputs, outputCount, outputs);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
 
+HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT32 outputCount,
+                     APO_CONNECTION_DESCRIPTOR** outputs) {
     UNCOMPRESSEDAUDIOFORMAT format{};
     HRESULT hr = inputs[0]->pFormat->GetUncompressedAudioFormat(&format);
     if (FAILED(hr)) {
         return hr;
     }
-
-    hr = CBaseAudioProcessingObject::LockForProcess(inputCount, inputs, outputCount, outputs);
+    UNCOMPRESSEDAUDIOFORMAT out_format{};
+    hr = outputs[0]->pFormat->GetUncompressedAudioFormat(&out_format);
     if (FAILED(hr)) {
         return hr;
     }
 
+    bool child_locked = false;
+    if (child_cfg_ != nullptr) {
+        hr = child_cfg_->LockForProcess(inputCount, inputs, outputCount, outputs);
+        if (FAILED(hr)) {
+            debug_line(L"child APO failed LockForProcess; running without it", hr);
+            reset_child();
+        } else {
+            child_locked = true;
+        }
+    }
+    // IsoAPO processes the child's output, so with a child the output format is
+    // the one to process. Alone it filters in place and cannot change the
+    // channel count.
+    if (child_ != nullptr) {
+        format = out_format;
+    } else if (format.dwSamplesPerFrame != out_format.dwSamplesPerFrame) {
+        return APOERR_FORMAT_NOT_SUPPORTED;
+    }
+
+    hr = CBaseAudioProcessingObject::LockForProcess(inputCount, inputs, outputCount, outputs);
+    if (FAILED(hr)) {
+        if (child_locked) {
+            child_cfg_->UnlockForProcess();
+        }
+        return hr;
+    }
+
+    // From here on a failure must leave nothing locked.
+    struct Undo {
+        IsoApo* apo;
+        bool child;
+        bool armed = true;
+        ~Undo() {
+            if (!armed) return;
+            if (child && apo->child_cfg_ != nullptr) apo->child_cfg_->UnlockForProcess();
+            apo->CBaseAudioProcessingObject::UnlockForProcess();
+        }
+    } undo{this, child_locked};
+
     // Windows tears down and recreates an APO whenever the device format
     // changes, so every LockForProcess is a cold start (plan 5.4).
     channels_ = format.dwSamplesPerFrame;
+    UNCOMPRESSEDAUDIOFORMAT in_format{};
+    input_channels_ = SUCCEEDED(inputs[0]->pFormat->GetUncompressedAudioFormat(&in_format))
+                          ? in_format.dwSamplesPerFrame
+                          : channels_;
     // A stream that reports no mask gets upstream's default for its channel
     // count, which is also what the processor assumes for 0.
     const uint32_t speaker_mask =
@@ -297,6 +455,7 @@ HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** in
         ring_.claim(ring_token_);
     }
 
+    undo.armed = false;
     locked_ = true;
     return S_OK;
 }
@@ -304,20 +463,17 @@ HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** in
 HRESULT IsoApo::UnlockForProcess() {
     locked_ = false;
     ring_.release();
+    if (child_cfg_ != nullptr) {
+        const HRESULT hr = child_cfg_->UnlockForProcess();
+        if (FAILED(hr)) debug_line(L"child APO failed UnlockForProcess", hr);
+    }
     return CBaseAudioProcessingObject::UnlockForProcess();
 }
 
-void IsoApo::APOProcess(UINT32 /*inputCount*/, APO_CONNECTION_PROPERTY** inputs,
-                        UINT32 /*outputCount*/, APO_CONNECTION_PROPERTY** outputs) {
+void IsoApo::APOProcess(UINT32 inputCount, APO_CONNECTION_PROPERTY** inputs,
+                        UINT32 outputCount, APO_CONNECTION_PROPERTY** outputs) {
     if (!locked_ || inputs == nullptr || outputs == nullptr) {
         return;
-    }
-
-    // MXCSR is per thread, and this is the only place we are guaranteed to be on
-    // audiodg's real-time thread.
-    if (!denormals_set_) {
-        isotone::enable_denormal_flushing();
-        denormals_set_ = true;
     }
 
     if (mapping_.is_open()) {
@@ -346,22 +502,46 @@ void IsoApo::APOProcess(UINT32 /*inputCount*/, APO_CONNECTION_PROPERTY** inputs,
     float* out = reinterpret_cast<float*>(outputs[0]->pBuffer);
     const UINT32 frames = inputs[0]->u32ValidFrameCount;
 
+    // A silent buffer's contents are undefined; make them the silence they
+    // stand for before anything reads them, as upstream does.
+    const size_t in_samples = static_cast<size_t>(frames) *
+                              (child_rt_ != nullptr ? input_channels_ : channels_);
     if (flags == BUFFER_SILENT) {
-        // Silence in, silence out. Running the filters over zeros would only
-        // burn cycles and let the tail ring on.
-        memset(out, 0, static_cast<size_t>(frames) * channels_ * sizeof(float));
-        outputs[0]->u32ValidFrameCount = frames;
-        outputs[0]->u32BufferFlags = BUFFER_SILENT;
-        ring_.write(nullptr, channels_, frames);
-        return;
+        memset(in, 0, in_samples * sizeof(float));
     }
 
-    if (in != out) {
+    // The child runs first, on silent buffers too so its own state stays
+    // continuous, and writes the output buffer IsoAPO then processes.
+    bool silent = flags == BUFFER_SILENT;
+    if (child_rt_ != nullptr) {
+        child_rt_->APOProcess(inputCount, inputs, outputCount, outputs);
+        if (outputs[0]->u32BufferFlags == BUFFER_SILENT) {
+            memset(out, 0, static_cast<size_t>(frames) * channels_ * sizeof(float));
+            silent = true;
+        }
+    } else if (in != out) {
         memcpy(out, in, static_cast<size_t>(frames) * channels_ * sizeof(float));
     }
+
+    // MXCSR is per thread, and a child may have changed it, so flush-to-zero is
+    // set again on every call, after the child.
+    isotone::enable_denormal_flushing();
+
+    // Silence goes through the processor too: its delay lines and filters keep
+    // moving, so a delayed tail plays out and nothing stale waits in them for
+    // the next sound.
     processor_.process_interleaved(out, frames);
     ring_.write(out, channels_, frames);
 
+    bool audible = !silent;
+    if (silent) {
+        const size_t samples = static_cast<size_t>(frames) * channels_;
+        for (size_t i = 0; i < samples && !audible; ++i) {
+            audible = std::fabs(out[i]) > 1e-10f;
+        }
+    }
     outputs[0]->u32ValidFrameCount = frames;
-    outputs[0]->u32BufferFlags = BUFFER_VALID;
+    // BUFFER_SILENT matters to some drivers, so it is kept unless there really
+    // is audio, such as a delay's tail.
+    outputs[0]->u32BufferFlags = audible ? BUFFER_VALID : BUFFER_SILENT;
 }

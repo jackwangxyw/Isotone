@@ -107,12 +107,8 @@ std::vector<std::string> split_lines(const std::string& text) {
     return lines;
 }
 
-// 12 significant digits, as format_apo_config uses.
-std::string num(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.12g", v);
-    return buf;
-}
+// 12 significant digits and a period whatever the locale, as format_apo_config uses.
+std::string num(double v) { return format_apo_number(v); }
 
 std::string hex(uint32_t v) {
     char buf[16];
@@ -139,7 +135,7 @@ double bass_hz(double hz, double fallback) {
 
 // One 24 dB/oct Linkwitz-Riley filter: two second-order Butterworth sections.
 std::string lr4_lines(const char* token, double hz) {
-    const std::string line = std::string("Filter: ON ") + token + " Fc " + num(hz) + " Hz Q " +
+    const std::string line = std::string("Filter: ON ") + token + " Fc " + format_apo_frequency(hz) + " Hz Q " +
                              num(std::sqrt(0.5)) + "\n";
     return line + line;
 }
@@ -221,7 +217,19 @@ std::string output_lines(const SpeakerSetup& sp, const ChannelLayout& layout,
 
 }  // namespace
 
-std::string format_device_block(const DeviceConfig& device) {
+// A layout with no speaker mask gets the default for its channel count, as
+// upstream's FilterEngine and the processor both do, so speaker positions (and
+// with them swaps, upmix and bass management) are found.
+static ChannelLayout with_mask(ChannelLayout layout) {
+    if (layout.speaker_mask == 0) {
+        layout.speaker_mask = default_speaker_mask(layout.channels);
+    }
+    return layout;
+}
+
+std::string format_device_block(const DeviceConfig& given) {
+    DeviceConfig device = given;
+    device.layout = with_mask(given.layout);
     const SpeakerSetup& sp = device.state.speakers;
     const std::vector<std::string> names = apo_channel_names(device.layout);
     std::ostringstream body;
@@ -248,7 +256,13 @@ std::string format_device_block(const DeviceConfig& device) {
     }
 
     if (device.state.mute) {
-        body << kMuteMarker << "\nChannel: all\nPreamp: -100 dB\n";
+        // Silence, as the processor's mute is: every output channel copied from
+        // nothing, after everything else.
+        std::string copy = "Copy:";
+        for (uint32_t c = 0; c < device.layout.channels && c < names.size(); ++c) {
+            copy += " " + names[c] + "=0";
+        }
+        body << kMuteMarker << "\nChannel: all\n" << copy << "\n";
     }
 
     std::string out = "Device: " + apo_device_pattern_for_guid(device.endpoint_guid) + "\n" +
@@ -337,8 +351,10 @@ std::vector<ParsedDevice> parse_isotone_file(
             }
             if (t == kMuteMarker) {
                 mute = true;
+                // The silence that follows the marker: Copy zeros now, a
+                // -100 dB preamp in files written before.
                 if (k + 2 < lines.size() && trim(lines[k + 1]) == "Channel: all" &&
-                    trim(lines[k + 2]) == "Preamp: -100 dB") {
+                    (trim(lines[k + 2]).rfind("Copy:", 0) == 0 || trim(lines[k + 2]) == "Preamp: -100 dB")) {
                     k += 2;
                 }
                 continue;
@@ -346,7 +362,7 @@ std::vector<ParsedDevice> parse_isotone_file(
             curve += lines[k] + "\n";
         }
 
-        const ApoParseResult parsed = parse_apo_config(curve, layout_for(d.endpoint_guid));
+        const ApoParseResult parsed = parse_apo_config(curve, with_mask(layout_for(d.endpoint_guid)));
         d.state = parsed.state;
         d.state.mute = mute;
         d.state.bypass = bypass;

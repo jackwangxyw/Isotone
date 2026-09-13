@@ -208,6 +208,18 @@ TEST_CASE("swaps move whole speakers: left with right, front with rear") {
         CHECK(out[BR][500] == doctest::Approx(level(FR)));
         CHECK(out[SL][500] == doctest::Approx(level(SL)));
     }
+    SUBCASE("front and rear on a 5.1 with side surrounds") {
+        // Windows' default 6-channel layout: FL FR FC LFE SL SR.
+        enum { L5, R5, C5, LFE5, SL5, SR5 };
+        EqState s;
+        s.speakers.swap_front_rear = true;
+        Processor p = make(6, 0x60F, s);
+        const auto out = run(p, 512, ident);
+        CHECK(out[L5][500] == doctest::Approx(level(SL5)));
+        CHECK(out[SR5][500] == doctest::Approx(level(R5)));
+        CHECK(out[C5][500] == doctest::Approx(level(C5)));
+        CHECK(out[LFE5][500] == doctest::Approx(level(LFE5)));
+    }
     SUBCASE("both") {
         EqState s;
         s.speakers.swap_left_right = true;

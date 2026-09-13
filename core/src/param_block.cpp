@@ -18,7 +18,7 @@ void init_param_block(ParamBlock* block) {
     block->hdr.host_state = static_cast<uint32_t>(HostState::NotLoaded);
 }
 
-void init_shared_region(void* base) {
+void init_shared_region(void* base, void (*seed)(ParamBlock* block, void* context), void* context) {
     if (base == nullptr) {
         return;
     }
@@ -26,6 +26,9 @@ void init_shared_region(void* base) {
     init_param_block(block);
     block->hdr.magic = 0;
     audio_ring_init(region_ring(base), kRingCapacityFrames);
+    if (seed != nullptr) {
+        seed(block, context);
+    }
     block->hdr.magic = kParamMagic;
 }
 

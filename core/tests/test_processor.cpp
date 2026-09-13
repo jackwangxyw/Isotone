@@ -548,13 +548,37 @@ TEST_CASE("output stays bounded under random parameter jumps") {
         }
         p.process(ptr, 256);
 
+        // Eight bands of up to +24 dB at Q up to 24 can legitimately stack past
+        // 60 dB where their peaks overlap, so the bound is only there to catch a
+        // runaway; the settle check below is what proves nothing was left
+        // unstable.
         for (size_t i = 0; i < l.size(); ++i) {
             REQUIRE(std::isfinite(l[i]));
             REQUIRE(std::isfinite(r[i]));
-            REQUIRE(std::abs(l[i]) < 1000.0f);
-            REQUIRE(std::abs(r[i]) < 1000.0f);
+            REQUIRE(std::abs(l[i]) < 1e5f);
+            REQUIRE(std::abs(r[i]) < 1e5f);
         }
     }
+
+    // Flat again: after the fades and smoothing finish, a unit sine must come
+    // out at unit level, with nothing ringing on from the abuse.
+    for (Band& band : s.bands) {
+        band = peaking(1000.0, 0.0, 1.0);
+    }
+    p.set_target(s);
+    double peak = 0.0;
+    for (int b = 0; b < static_cast<int>(kFs * 2.0 / 256.0); ++b) {
+        for (size_t i = 0; i < l.size(); ++i) {
+            l[i] = r[i] = static_cast<float>(std::sin(2.0 * kPi * 1000.0 * (b * 256.0 + i) / kFs));
+        }
+        p.process(ptr, 256);
+        if (b >= static_cast<int>(kFs * 1.0 / 256.0)) {
+            for (size_t i = 0; i < l.size(); ++i) {
+                peak = std::max(peak, static_cast<double>(std::abs(l[i])));
+            }
+        }
+    }
+    CHECK(peak == doctest::Approx(1.0).epsilon(1e-3));
 }
 
 TEST_CASE("a band appearing or disappearing does not click") {

@@ -21,6 +21,7 @@ namespace {
 
 HINSTANCE g_module = nullptr;
 long g_lockCount = 0;
+long g_factoryCount = 0;   // live class factories: their code is in this DLL
 
 std::wstring guid_string(REFGUID guid) {
     wchar_t buffer[64] = {};
@@ -64,7 +65,8 @@ void unregister_clsid(REFGUID clsid) {
 
 class ClassFactory : public IClassFactory {
 public:
-    explicit ClassFactory(REFCLSID clsid) : clsid_(clsid) {}
+    explicit ClassFactory(REFCLSID clsid) : clsid_(clsid) { InterlockedIncrement(&g_factoryCount); }
+    ~ClassFactory() { InterlockedDecrement(&g_factoryCount); }
 
     HRESULT __stdcall QueryInterface(const IID& iid, void** ppv) override {
         if (ppv == nullptr) {
@@ -133,7 +135,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, void* /*reserved*/) {
 }
 
 STDAPI DllCanUnloadNow() {
-    return (IsoApo::instanceCount == 0 && g_lockCount == 0) ? S_OK : S_FALSE;
+    return (IsoApo::instanceCount == 0 && g_lockCount == 0 && g_factoryCount == 0) ? S_OK : S_FALSE;
 }
 
 STDAPI DllGetClassObject(const CLSID& clsid, const IID& iid, void** ppv) {

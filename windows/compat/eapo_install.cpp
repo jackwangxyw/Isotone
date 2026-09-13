@@ -44,6 +44,10 @@ EqualizerApoInstall locate_equalizer_apo() {
     r.error = read_string(key, L"ConfigPath", &config);
     if (r.error == ERROR_SUCCESS) r.config_path = config;
     RegCloseKey(key);
+    if (r.error != ERROR_SUCCESS && !r.install_path.empty()) {
+        // The install is there even though ConfigPath could not be read.
+        r.config_path = r.install_path / "config";
+    }
     return r;
 }
 
@@ -93,9 +97,17 @@ bool path_is_inside(const std::filesystem::path& candidate, const std::filesyste
 }
 
 bool is_live_install_path(const std::filesystem::path& dir) {
+    // Whatever part of the registration can be read is protected: a missing
+    // ConfigPath must not open the guard while InstallPath still says where the
+    // install is.
     const EqualizerApoInstall install = locate_equalizer_apo();
-    if (install.error != ERROR_SUCCESS) return false;
-    return path_is_inside(dir, install.config_path) || path_is_inside(dir, install.install_path);
+    return path_is_inside(dir, install.config_path) || path_is_inside(dir, install.install_path) ||
+           (!install.install_path.empty() && path_is_inside(dir, install.install_path / "config"));
+}
+
+bool same_file_object(const std::filesystem::path& a, const std::filesystem::path& b) {
+    Identity ia, ib;
+    return identity_of(a, &ia) && identity_of(b, &ib) && same(ia, ib);
 }
 
 }  // namespace isotone::compat

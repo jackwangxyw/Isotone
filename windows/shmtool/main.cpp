@@ -23,6 +23,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -80,6 +81,7 @@ std::string narrow(const std::wstring& w) {
 }
 
 // The last brace-wrapped group, so a full device ID and a bare GUID both work.
+// Empty when what is left is not a GUID.
 std::wstring endpoint_guid(const std::string& arg) {
     std::string s = arg;
     const size_t open = s.rfind('{');
@@ -89,7 +91,13 @@ std::wstring endpoint_guid(const std::string& arg) {
     } else {
         s = "{" + s + "}";
     }
-    return std::wstring(s.begin(), s.end());
+    // {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+    bool valid = s.size() == 38 && s.front() == '{' && s.back() == '}';
+    for (size_t i = 1; valid && i < 37; ++i) {
+        const bool dash = i == 9 || i == 14 || i == 19 || i == 24;
+        valid = dash ? s[i] == '-' : std::isxdigit(static_cast<unsigned char>(s[i])) != 0;
+    }
+    return valid ? std::wstring(s.begin(), s.end()) : std::wstring();
 }
 
 const char* host_state_name(uint32_t state) {
@@ -259,6 +267,12 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
     }
 
     const uint64_t wanted = static_cast<uint64_t>(seconds * rate);
+    // A WAV file's sizes are 32-bit; refuse rather than write a corrupt header.
+    if (wanted * isotone::kMaxChannels * sizeof(float) > 0xFFFFFFFFull - 44) {
+        std::printf("{\"captured\":false,\"reason\":%s}\n",
+                    json_string("that capture would exceed the 4 GB a WAV file can hold; capture less").c_str());
+        return 2;
+    }
     isotone::AudioRingCursor cursor;
     std::vector<float> chunk(size_t{isotone::kRingCapacityFrames} * isotone::kMaxChannels);
     std::vector<float> samples;
@@ -269,11 +283,11 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
     // Drain at about 100 Hz, which leaves the ring far from full at any rate.
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(static_cast<long long>(seconds * 1000) + 2000);
-    isotone::audio_ring_read(mapping.ring(), &cursor, chunk.data(), isotone::kRingCapacityFrames, &ch);
+    isotone::audio_ring_read(mapping.ring(), isotone::kRingCapacityFrames, &cursor, chunk.data(), isotone::kRingCapacityFrames, &ch);
     uint32_t epoch = cursor.epoch;
     while (frames < wanted && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        const uint32_t n = isotone::audio_ring_read(mapping.ring(), &cursor, chunk.data(),
+        const uint32_t n = isotone::audio_ring_read(mapping.ring(), isotone::kRingCapacityFrames, &cursor, chunk.data(),
                                                     isotone::kRingCapacityFrames, &ch);
         if (cursor.epoch != epoch) {
             ++resyncs;   // the layout changed; what came before is a different stream
@@ -323,8 +337,11 @@ int main(int argc, char** argv) {
     if (args.size() < 2) {
         return usage();
     }
-    const std::wstring name =
-        isotone::win::mapping_name(local ? L"Local\\" : L"Global\\", endpoint_guid(args[1]));
+    const std::wstring guid = endpoint_guid(args[1]);
+    if (guid.empty()) {
+        return usage();
+    }
+    const std::wstring name = isotone::win::mapping_name(local ? L"Local\\" : L"Global\\", guid);
 
     if (args[0] == "status" && args.size() == 2) {
         return cmd_status(name);

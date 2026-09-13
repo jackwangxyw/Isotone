@@ -36,4 +36,8 @@ bool path_is_inside(const std::filesystem::path& candidate, const std::filesyste
 // Tools use it to refuse a sandbox path that is really the live install.
 bool is_live_install_path(const std::filesystem::path& dir);
 
+// True when both paths name the same existing file or directory, however each
+// is spelled (volume serial and file ID).
+bool same_file_object(const std::filesystem::path& a, const std::filesystem::path& b);
+
 }  // namespace isotone::compat

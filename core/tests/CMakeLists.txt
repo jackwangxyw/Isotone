@@ -9,6 +9,7 @@ add_executable(core_tests
     test_smoothing.cpp
     test_response.cpp
     test_reference.cpp
+    test_hardening.cpp
 )
 
 target_link_libraries(core_tests PRIVATE isotone_core)

@@ -120,7 +120,11 @@ inline AudioRingHeader* region_ring(void* base) {
 
 // Initialises a freshly created region. The magic is written last, so a second
 // opener that sees a valid header sees a finished one.
-void init_shared_region(void* base);
+// Writes the region's headers. `seed`, when given, fills the parameter block
+// before the magic is written, so no other process can open the region and
+// write it at the same moment.
+void init_shared_region(void* base, void (*seed)(ParamBlock* block, void* context) = nullptr,
+                        void* context = nullptr);
 
 // True if `bytes` of mapped memory at `base` hold a region this build
 // understands.

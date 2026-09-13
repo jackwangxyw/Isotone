@@ -132,7 +132,7 @@ void LoopbackCapture::stop() {
 uint32_t LoopbackCapture::read(AudioRingCursor* cursor, float* out, uint32_t max_frames,
                                uint32_t* channels) const {
     if (region_ == nullptr) return 0;
-    return audio_ring_read(static_cast<const AudioRingHeader*>(region_), cursor, out, max_frames, channels);
+    return audio_ring_read(static_cast<const AudioRingHeader*>(region_), kRingCapacityFrames, cursor, out, max_frames, channels);
 }
 
 void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {

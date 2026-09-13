@@ -16,19 +16,20 @@ DWORD WriteCoalescer::write(std::string content) {
         return ERROR_SUCCESS;
     }
     const DWORD e = sink_(content);
+    last_attempt_time_ = clock_();
+    ++attempts_;
     if (e != ERROR_SUCCESS) {
         pending_ = std::move(content);
         return e;
     }
     last_written_ = std::move(content);
-    last_write_time_ = clock_();
     pending_.reset();
     ++writes_;
     return ERROR_SUCCESS;
 }
 
 DWORD WriteCoalescer::submit(std::string content) {
-    if (writes_ == 0 || clock_() - last_write_time_ >= interval_) {
+    if (attempts_ == 0 || clock_() - last_attempt_time_ >= interval_) {
         return write(std::move(content));
     }
     pending_ = std::move(content);
@@ -36,7 +37,7 @@ DWORD WriteCoalescer::submit(std::string content) {
 }
 
 DWORD WriteCoalescer::poll() {
-    if (!pending_ || (writes_ != 0 && clock_() - last_write_time_ < interval_)) {
+    if (!pending_ || (attempts_ != 0 && clock_() - last_attempt_time_ < interval_)) {
         return ERROR_SUCCESS;
     }
     return write(std::move(*pending_));
@@ -47,8 +48,8 @@ DWORD WriteCoalescer::flush() {
 }
 
 std::chrono::milliseconds WriteCoalescer::time_until_due() const {
-    if (!pending_ || writes_ == 0) return std::chrono::milliseconds{0};
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(clock_() - last_write_time_);
+    if (!pending_ || attempts_ == 0) return std::chrono::milliseconds{0};
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(clock_() - last_attempt_time_);
     return elapsed >= interval_ ? std::chrono::milliseconds{0} : interval_ - elapsed;
 }
 

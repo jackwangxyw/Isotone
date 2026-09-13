@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "eapo_install.h"
+
 namespace isotone::compat {
 namespace {
 
@@ -45,12 +47,20 @@ std::vector<std::string> config_lines(const std::string& bytes) {
     return lines;
 }
 
-// A relative include of Isotone.txt resolves next to config.txt, which is the
-// file this backend writes.
-bool names_isotone_file(const std::string& value) {
-    std::string v = lower(trim(value));
-    if (v.rfind(".\\", 0) == 0 || v.rfind("./", 0) == 0) v = v.substr(2);
-    return v == lower(kIsotoneFileName);
+// True when an Include value names the Isotone.txt next to config.txt, which is
+// the file this backend writes. Upstream resolves a relative include against the
+// including file's directory, so "Isotone.txt", ".\Isotone.txt" and an absolute
+// path to the same directory are all the same include.
+bool names_isotone_file(const std::string& value, const fs::path& config_dir) {
+    const std::string v = trim(value);
+    const int n = MultiByteToWideChar(CP_UTF8, 0, v.data(), static_cast<int>(v.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, v.data(), static_cast<int>(v.size()), wide.data(), n);
+    fs::path p = wide;
+    if (_wcsicmp(p.filename().c_str(), L"Isotone.txt") != 0) return false;
+    if (p.is_relative()) p = config_dir / p;
+    const fs::path dir = p.parent_path().lexically_normal();
+    return dir.lexically_normal() == config_dir.lexically_normal() || same_file_object(dir, config_dir);
 }
 
 bool names_peace_file(const std::string& value) {
@@ -114,7 +124,11 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
     fs::path tmp = path;
     tmp += L".tmp";
 
-    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    // CREATE_ALWAYS on an existing name writes through it, so a .tmp planted as
+    // a hard link to another file would be overwritten. Remove the name, which
+    // only unlinks it, and create a new file.
+    DeleteFileW(tmp.c_str());
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     DWORD written = 0;
@@ -146,12 +160,69 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
     }
 }
 
+namespace {
+
+// Opens config.txt to check and change it through one handle. Other writers are
+// shut out while it is held; Equalizer APO, which opens with read sharing only,
+// waits (FilterEngine::loadConfigFile retries a sharing violation), and so does
+// this, for up to `retry_ms`. A file that is a hard link or a reparse point is
+// refused: writing it would change a file somewhere else.
+DWORD open_for_update(const fs::path& path, HANDLE* out, DWORD retry_ms = 1000) {
+    const ULONGLONG deadline = GetTickCount64() + retry_ms;
+    for (;;) {
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(h, &info)) {
+                const DWORD e = GetLastError();
+                CloseHandle(h);
+                return e;
+            }
+            if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || info.nNumberOfLinks > 1) {
+                CloseHandle(h);
+                return ERROR_CANT_ACCESS_FILE;
+            }
+            *out = h;
+            return ERROR_SUCCESS;
+        }
+        const DWORD e = GetLastError();
+        if (e != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) return e;
+        Sleep(1);
+    }
+}
+
+DWORD read_handle(HANDLE h, std::string* out) {
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h, &size)) return GetLastError();
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(h, zero, nullptr, FILE_BEGIN)) return GetLastError();
+    std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+    size_t done = 0;
+    while (done < bytes.size()) {
+        DWORD got = 0;
+        const DWORD want = static_cast<DWORD>(std::min<size_t>(bytes.size() - done, 1 << 20));
+        if (!ReadFile(h, bytes.data() + done, want, &got, nullptr)) return GetLastError();
+        if (got == 0) break;
+        done += got;
+    }
+    bytes.resize(done);
+    *out = std::move(bytes);
+    return ERROR_SUCCESS;
+}
+
+}  // namespace
+
 ConfigInspection inspect_config(const fs::path& config_dir) {
     ConfigInspection r;
     std::string bytes;
     r.error = read_file_bytes(config_dir / "config.txt", &bytes);
     if (r.error != ERROR_SUCCESS) return r;
+    return inspect_config_text(bytes, config_dir);
+}
 
+ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& config_dir) {
+    ConfigInspection r;
     for (const std::string& line : config_lines(bytes)) {
         const size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
@@ -159,7 +230,7 @@ ConfigInspection inspect_config(const fs::path& config_dir) {
         const std::string value = line.substr(colon + 1);
         if (key == "Include") {
             r.includes.push_back(trim(value));
-            r.isotone_included |= names_isotone_file(value);
+            r.isotone_included |= names_isotone_file(value, config_dir);
             r.peace_included |= names_peace_file(value);
         } else if (key == "Stage") {
             r.has_stage_lines = true;
@@ -174,67 +245,72 @@ ConfigInspection inspect_config(const fs::path& config_dir) {
 
 AttachResult attach_include(const fs::path& config_dir) {
     AttachResult r;
-    r.before = inspect_config(config_dir);
-    if (r.before.error != ERROR_SUCCESS) {
-        r.error = r.before.error;
+    const fs::path config = config_dir / "config.txt";
+
+    // The backup is taken first, from an ordinary read: writing it while
+    // config.txt is held would make Equalizer APO's reload wait on this.
+    std::string snapshot;
+    if ((r.error = read_file_bytes(config, &snapshot)) != ERROR_SUCCESS) {
+        r.before.error = r.error;
         return r;
     }
+    r.before = inspect_config_text(snapshot, config_dir);
     if (r.before.isotone_included) {
         return r;
     }
-
-    const fs::path config = config_dir / "config.txt";
-    std::string original;
-    if ((r.error = read_file_bytes(config, &original)) != ERROR_SUCCESS) return r;
-    const std::string block = attach_block(newline_of(original));
-
     r.backup = config_dir / kConfigBackupName;
-    if ((r.error = write_file_atomically(r.backup, original)) != ERROR_SUCCESS) return r;
+    if ((r.error = write_file_atomically(r.backup, snapshot)) != ERROR_SUCCESS) return r;
 
-    // Append only: every existing byte, and the file's security descriptor, stay.
-    HANDLE h = CreateFileW(config.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        r.error = GetLastError();
+    // Check and append through one handle, so nothing can change the file in
+    // between. Append only: every existing byte, and the file's security
+    // descriptor, stay.
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if ((r.error = open_for_update(config, &h)) != ERROR_SUCCESS) return r;
+    std::string original;
+    r.error = read_handle(h, &original);
+    if (r.error == ERROR_SUCCESS && original != snapshot) {
+        // Changed after the backup was taken: append nothing, report it.
+        r.error = ERROR_INVALID_DATA;
+    }
+    if (r.error != ERROR_SUCCESS) {
+        CloseHandle(h);
         return r;
     }
+    const std::string block = attach_block(newline_of(original));
+    LARGE_INTEGER zero{};
     DWORD written = 0;
-    const bool ok = WriteFile(h, block.data(), static_cast<DWORD>(block.size()), &written, nullptr) &&
+    const bool ok = SetFilePointerEx(h, zero, nullptr, FILE_END) &&
+                    WriteFile(h, block.data(), static_cast<DWORD>(block.size()), &written, nullptr) &&
                     written == block.size() && FlushFileBuffers(h);
     r.error = ok ? ERROR_SUCCESS : GetLastError();
     CloseHandle(h);
-    if (!ok) return r;
-
-    // Prove it: the file must be exactly what was read plus the block. Anything
-    // else means someone else wrote to config.txt at the same moment.
-    std::string after;
-    if ((r.error = read_file_bytes(config, &after)) != ERROR_SUCCESS) return r;
-    if (after != original + block) {
-        r.error = ERROR_INVALID_DATA;
-        return r;
-    }
-    r.appended = true;
+    r.appended = ok;
     return r;
 }
 
 DWORD detach_include(const fs::path& config_dir, bool* removed) {
     *removed = false;
     const fs::path config = config_dir / "config.txt";
+
+    // Check and truncate through one handle, so the cut is made in the file
+    // that was checked.
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if (const DWORD e = open_for_update(config, &h); e != ERROR_SUCCESS) return e;
     std::string bytes;
-    if (const DWORD e = read_file_bytes(config, &bytes); e != ERROR_SUCCESS) return e;
+    if (const DWORD e = read_handle(h, &bytes); e != ERROR_SUCCESS) {
+        CloseHandle(h);
+        return e;
+    }
 
     std::string block;
     for (const char* nl : {"\r\n", "\n"}) {
         if (ends_with(bytes, attach_block(nl))) block = attach_block(nl);
     }
     if (block.empty()) {
-        const ConfigInspection i = inspect_config(config_dir);
-        return i.isotone_included ? ERROR_INVALID_DATA : ERROR_SUCCESS;
+        CloseHandle(h);
+        return inspect_config_text(bytes, config_dir).isotone_included ? ERROR_INVALID_DATA : ERROR_SUCCESS;
     }
 
-    HANDLE h = CreateFileW(config.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return GetLastError();
     LARGE_INTEGER end{};
     end.QuadPart = static_cast<LONGLONG>(bytes.size() - block.size());
     const bool ok = SetFilePointerEx(h, end, nullptr, FILE_BEGIN) && SetEndOfFile(h) &&

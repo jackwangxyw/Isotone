@@ -69,6 +69,28 @@ std::string narrow(const wchar_t* w) {
     return s;
 }
 
+std::string json_string(const std::string& s) {
+    std::string out = "\"";
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out + "\"";
+}
+
 std::wstring widen(const std::string& s) {
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
     std::wstring w(n > 0 ? n - 1 : 0, L'\0');
@@ -90,6 +112,14 @@ struct StreamFormat {
     uint32_t bits        = 0;
     uint32_t frame_bytes = 0;
 };
+
+// The sample encodings the tone writer and the capture reader handle.
+bool supported(const StreamFormat& f) {
+    if (f.channels == 0) return false;
+    const uint32_t bytes = f.frame_bytes / f.channels;
+    return (f.is_float && f.bits == 32 && bytes == 4) || (!f.is_float && f.bits == 16 && bytes == 2) ||
+           (!f.is_float && f.bits == 24 && bytes == 3) || (!f.is_float && (f.bits == 24 || f.bits == 32) && bytes == 4);
+}
 
 StreamFormat describe(const WAVEFORMATEX* wfx) {
     StreamFormat f;
@@ -199,6 +229,12 @@ public:
               "Activate render IAudioClient");
         CHECK(client_->GetMixFormat(&format_), "render GetMixFormat");
         fmt_ = describe(format_);
+        if (!supported(fmt_)) {
+            // Writing nothing into the buffer would play whatever it held.
+            std::fprintf(stderr, "render mix format not supported: %u-bit %s, %u bytes per frame\n", fmt_.bits,
+                         fmt_.is_float ? "float" : "int", fmt_.frame_bytes);
+            std::exit(2);
+        }
         CHECK(client_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2000000 /* 200 ms */, 0, format_,
                                   nullptr),
               "render Initialize");
@@ -248,15 +284,18 @@ public:
 
 private:
     void write_sample(BYTE* base, size_t index, double v) {
+        const uint32_t bytes = fmt_.frame_bytes / fmt_.channels;
+        const double clamped = std::clamp(v, -1.0, 1.0);
         if (fmt_.is_float && fmt_.bits == 32) {
             reinterpret_cast<float*>(base)[index] = static_cast<float>(v);
-        } else if (fmt_.bits == 16) {
-            const double clamped = std::clamp(v, -1.0, 1.0);
+        } else if (bytes == 2) {
             reinterpret_cast<int16_t*>(base)[index] = static_cast<int16_t>(clamped * 32767.0);
-        } else if (fmt_.bits == 32) {
-            const double clamped = std::clamp(v, -1.0, 1.0);
-            reinterpret_cast<int32_t*>(base)[index] =
-                static_cast<int32_t>(clamped * 2147483647.0);
+        } else if (bytes == 3) {
+            const int32_t s = static_cast<int32_t>(clamped * 8388607.0);
+            const BYTE* p = reinterpret_cast<const BYTE*>(&s);
+            std::memcpy(base + index * 3, p, 3);   // little-endian: the low three bytes
+        } else if (bytes == 4) {
+            reinterpret_cast<int32_t*>(base)[index] = static_cast<int32_t>(clamped * 2147483647.0);
         }
     }
 
@@ -276,6 +315,11 @@ public:
               "Activate capture IAudioClient");
         CHECK(client_->GetMixFormat(&format_), "capture GetMixFormat");
         fmt_ = describe(format_);
+        if (!supported(fmt_)) {
+            std::fprintf(stderr, "capture mix format not supported: %u-bit %s, %u bytes per frame\n", fmt_.bits,
+                         fmt_.is_float ? "float" : "int", fmt_.frame_bytes);
+            std::exit(2);
+        }
         const DWORD flags = loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
         CHECK(client_->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2000000, 0, format_, nullptr),
               "capture Initialize");
@@ -324,15 +368,21 @@ public:
 
 private:
     float read_sample(const BYTE* base, size_t index) const {
+        const uint32_t bytes = fmt_.frame_bytes / fmt_.channels;
         if (fmt_.is_float && fmt_.bits == 32) {
             return reinterpret_cast<const float*>(base)[index];
         }
-        if (fmt_.bits == 16) {
+        if (bytes == 2) {
             return reinterpret_cast<const int16_t*>(base)[index] / 32768.0f;
         }
-        if (fmt_.bits == 32) {
-            return static_cast<float>(reinterpret_cast<const int32_t*>(base)[index] /
-                                      2147483648.0);
+        if (bytes == 3) {
+            const BYTE* p = base + index * 3;
+            int32_t s = static_cast<int32_t>(uint32_t{p[0]} | uint32_t{p[1]} << 8 | uint32_t{p[2]} << 16);
+            if (s & 0x800000) s -= 0x1000000;
+            return static_cast<float>(s / 8388608.0);
+        }
+        if (bytes == 4) {
+            return static_cast<float>(reinterpret_cast<const int32_t*>(base)[index] / 2147483648.0);
         }
         return 0.0f;
     }
@@ -404,15 +454,15 @@ int cmd_list(IMMDeviceEnumerator* enumerator, bool json) {
     if (json) {
         std::printf("{\n  \"render\": [\n");
         for (size_t i = 0; i < render.size(); ++i) {
-            std::printf("    {\"id\": \"%s\", \"name\": \"%s\", \"description\": \"%s\"}%s\n",
-                        render[i].id.c_str(), render[i].name.c_str(),
-                        render[i].description.c_str(), i + 1 < render.size() ? "," : "");
+            std::printf("    {\"id\": %s, \"name\": %s, \"description\": %s}%s\n",
+                        json_string(render[i].id).c_str(), json_string(render[i].name).c_str(),
+                        json_string(render[i].description).c_str(), i + 1 < render.size() ? "," : "");
         }
         std::printf("  ],\n  \"capture\": [\n");
         for (size_t i = 0; i < capture.size(); ++i) {
-            std::printf("    {\"id\": \"%s\", \"name\": \"%s\", \"description\": \"%s\"}%s\n",
-                        capture[i].id.c_str(), capture[i].name.c_str(),
-                        capture[i].description.c_str(), i + 1 < capture.size() ? "," : "");
+            std::printf("    {\"id\": %s, \"name\": %s, \"description\": %s}%s\n",
+                        json_string(capture[i].id).c_str(), json_string(capture[i].name).c_str(),
+                        json_string(capture[i].description).c_str(), i + 1 < capture.size() ? "," : "");
         }
         std::printf("  ]\n}\n");
         return 0;
@@ -533,9 +583,9 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
 
     if (opt.json) {
         std::printf("{\n");
-        if (!opt.label.empty()) std::printf("  \"label\": \"%s\",\n", opt.label.c_str());
-        std::printf("  \"render_id\": \"%s\",\n  \"capture_id\": \"%s\",\n", render_id.c_str(),
-                    capture_id.c_str());
+        if (!opt.label.empty()) std::printf("  \"label\": %s,\n", json_string(opt.label).c_str());
+        std::printf("  \"render_id\": %s,\n  \"capture_id\": %s,\n", json_string(render_id).c_str(),
+                    json_string(capture_id).c_str());
         std::printf("  \"render_rate\": %u,\n  \"capture_rate\": %u,\n  \"channels\": %u,\n",
                     rf.sample_rate, cf.sample_rate, cf.channels);
         std::printf("  \"amplitude\": %.6f,\n", opt.amplitude);
@@ -592,7 +642,7 @@ void usage() {
         "  list [--json]\n"
         "      Show active render and capture endpoints.\n"
         "\n"
-        "  measure --render <id|substring> [--capture <id|substring>] [options]\n"
+        "  measure --render <id|substring> (--capture <id|substring> | --loopback) [options]\n"
         "      Play a stepped sine and report the measured level at each frequency,\n"
         "      and each channel's phase relative to channel 0.\n"
         "      --loopback         capture via WASAPI loopback on the render endpoint\n"
@@ -648,6 +698,10 @@ int main(int argc, char** argv) {
         const char* r = arg("--render");
         if (r == nullptr) {
             std::fprintf(stderr, "measure needs --render\n");
+        } else if (arg("--capture") == nullptr && !flag("--loopback")) {
+            // Without either, the render endpoint would be opened as a capture
+            // client, which fails.
+            std::fprintf(stderr, "measure needs --capture, or --loopback to capture the render endpoint\n");
         } else {
             opt.render_query  = r;
             opt.capture_query = arg("--capture", "");

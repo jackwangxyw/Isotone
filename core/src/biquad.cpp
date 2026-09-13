@@ -32,7 +32,12 @@ double alpha_for(WidthMode mode, double width, double sin_w0, double w0, double 
                 return sin_w0 / (2.0 * width);
             }
             const double S = width / 12.0;
-            return sin_w0 / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+            // Past S = 1 the term under the root falls as the gain rises, reaching
+            // zero (poles on the unit circle) and then going negative (NaN). Held
+            // at the value for an equivalent Q of 10, so a steep shelf stays a
+            // stable, if resonant, filter at any gain.
+            const double inner = (A + 1.0 / A) * (1.0 / S - 1.0) + 2.0;
+            return sin_w0 / 2.0 * std::sqrt(std::max(inner, 0.01));
         }
     }
     return sin_w0 / (2.0 * width);

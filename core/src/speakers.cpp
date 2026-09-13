@@ -4,22 +4,21 @@
 #include "isotone/speakers.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
 #include <utility>
 
+#include "isotone/apo_config.h"
+
 namespace isotone {
 
 namespace {
 
-// 12 significant digits, as format_apo_config uses.
-std::string num(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.12g", v);
-    return buf;
-}
+// 12 significant digits and a period whatever the locale, as format_apo_config uses.
+std::string num(double v) { return format_apo_number(v); }
 
 std::string hex(uint32_t v) {
     char buf[16];
@@ -70,8 +69,11 @@ void routing_matrix(const SpeakerSetup& setup, uint32_t speaker_mask, uint32_t c
         if (a >= 0 && b >= 0 && a < n && b < n) std::swap(source[a], source[b]);
     };
     if (setup.swap_front_rear) {
-        swap(fl, bl);
-        swap(fr, br);
+        // The rear pair is the back speakers, or the side speakers on a layout
+        // with no backs, such as Windows' default 5.1 (0x60F).
+        const bool backs = bl >= 0 || br >= 0;
+        swap(fl, backs ? bl : sl);
+        swap(fr, backs ? br : sr);
     }
     if (setup.swap_left_right) {
         swap(fl, fr);
@@ -107,9 +109,10 @@ bool parse_speaker_setup(const std::string& text, SpeakerSetup* setup, std::stri
     std::istringstream in(text);
     std::string token;
     const auto number = [](const std::string& v, double* out) {
-        char* end = nullptr;
-        *out = std::strtod(v.c_str(), &end);
-        return !v.empty() && end == v.c_str() + v.size() && std::isfinite(*out);
+        // The whole value must be the number.
+        const char* first = v.data();
+        const std::from_chars_result r = std::from_chars(first, first + v.size(), *out);
+        return !v.empty() && r.ec == std::errc() && r.ptr == first + v.size() && std::isfinite(*out);
     };
     const auto mask = [](const std::string& v, uint32_t* out) {
         char* end = nullptr;

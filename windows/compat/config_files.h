@@ -48,6 +48,9 @@ struct ConfigInspection {
     std::vector<std::string> includes;   // every Include value, in order
 };
 ConfigInspection inspect_config(const std::filesystem::path& config_dir);
+// The same, for config.txt's bytes already in hand. `config_dir` resolves
+// Include paths.
+ConfigInspection inspect_config_text(const std::string& bytes, const std::filesystem::path& config_dir);
 
 struct AttachResult {
     DWORD error = ERROR_SUCCESS;

@@ -172,9 +172,11 @@ bool resolve_root(const Args& a, fs::path* root, int* rc) {
         *root = a.root;
         return true;
     }
-    // The default sandbox is created on demand, with an empty config.txt.
+    // The default sandbox is created on demand, with an empty config.txt. The
+    // sandbox path itself is checked, before anything is created, since `sim`
+    // or the sandbox could be a junction into the live install.
     *root = fs::current_path() / "sim" / "compat-sandbox";
-    if (is_live_install_path(fs::current_path())) {
+    if (is_live_install_path(fs::current_path()) || is_live_install_path(*root)) {
         std::printf("{\"ok\":false,\"reason\":%s}\n",
                     json_string("the current directory is inside the live Equalizer APO install; "
                                 "run from elsewhere or pass --root").c_str());
@@ -185,6 +187,10 @@ bool resolve_root(const Args& a, fs::path* root, int* rc) {
     fs::create_directories(*root, ec);
     if (ec) {
         *rc = fail("cannot create " + utf8(*root), static_cast<DWORD>(ec.value()));
+        return false;
+    }
+    if (is_live_install_path(*root)) {
+        *rc = fail("the sandbox resolves into the live Equalizer APO install", ERROR_ACCESS_DENIED);
         return false;
     }
     if (!fs::exists(*root / "config.txt")) {
@@ -218,16 +224,18 @@ std::string inspection_json(const ConfigInspection& i) {
            ",\"includes\":" + includes + "}";
 }
 
-bool write_wav(const std::string& path, const std::vector<float>& samples, uint32_t channels,
-               uint32_t rate) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) return false;
-    const auto u32 = [&](uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
-    const auto u16 = [&](uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); };
-    const uint32_t data_bytes = static_cast<uint32_t>(samples.size() * sizeof(float));
-    out.write("RIFF", 4);
+// Written atomically, so a name planted as a link cannot redirect the write.
+DWORD write_wav(const fs::path& path, const std::vector<float>& samples, uint32_t channels, uint32_t rate) {
+    const uint64_t data_bytes64 = uint64_t{samples.size()} * sizeof(float);
+    if (data_bytes64 > 0xFFFFFFFFull - 36) return ERROR_FILE_TOO_LARGE;
+    const uint32_t data_bytes = static_cast<uint32_t>(data_bytes64);
+    std::string out;
+    out.reserve(44 + data_bytes);
+    const auto u32 = [&](uint32_t v) { out.append(reinterpret_cast<const char*>(&v), 4); };
+    const auto u16 = [&](uint16_t v) { out.append(reinterpret_cast<const char*>(&v), 2); };
+    out += "RIFF";
     u32(36 + data_bytes);
-    out.write("WAVEfmt ", 8);
+    out += "WAVEfmt ";
     u32(16);
     u16(3);
     u16(static_cast<uint16_t>(channels));
@@ -235,15 +243,26 @@ bool write_wav(const std::string& path, const std::vector<float>& samples, uint3
     u32(rate * channels * 4);
     u16(static_cast<uint16_t>(channels * 4));
     u16(32);
-    out.write("data", 4);
+    out += "data";
     u32(data_bytes);
-    out.write(reinterpret_cast<const char*>(samples.data()), data_bytes);
-    return static_cast<bool>(out);
+    out.append(reinterpret_cast<const char*>(samples.data()), data_bytes);
+    return write_file_atomically(path, out);
 }
 
 int cmd_loopback(const Args& a) {
     if (a.render.empty() || !(a.seconds > 0.0) || a.seconds > 600.0 || a.positional.size() != 2) {
         return usage();
+    }
+    const std::string& out_text = a.positional[1];
+    const int wn = MultiByteToWideChar(CP_UTF8, 0, out_text.data(), static_cast<int>(out_text.size()), nullptr, 0);
+    std::wstring out_wide(static_cast<size_t>(wn > 0 ? wn : 0), L'\0');
+    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, out_text.data(), static_cast<int>(out_text.size()), out_wide.data(), wn);
+    const fs::path out_path = out_wide;
+    std::error_code ec;
+    if (is_live_install_path(fs::absolute(out_path, ec).parent_path())) {
+        std::printf("{\"ok\":false,\"reason\":%s}\n",
+                    json_string("the output path is inside the live Equalizer APO install").c_str());
+        return 1;
     }
     LoopbackCapture capture;
     const HRESULT hr = capture.start(a.render);
@@ -275,8 +294,8 @@ int cmd_loopback(const Args& a) {
         return fail(FAILED(thread_hr) ? "loopback stream failed" : "no audio arrived: loopback delivers nothing while the endpoint is idle",
                     static_cast<DWORD>(thread_hr));
     }
-    if (!write_wav(a.positional[1], samples, channels, rate)) {
-        return fail("cannot write " + a.positional[1], ERROR_WRITE_FAULT);
+    if (const DWORD e = write_wav(out_path, samples, channels, rate); e != ERROR_SUCCESS) {
+        return fail("cannot write " + a.positional[1], e);
     }
     std::printf("{\"ok\":true,\"path\":%s,\"frames\":%llu,\"channels\":%u,\"stream_channels\":%u,"
                 "\"sample_rate\":%u,\"complete\":%s}\n",
@@ -349,7 +368,10 @@ int main(int argc, char** argv) {
             return fail("cannot read " + a.positional[1], e);
         }
         DeviceConfig device;
-        device.endpoint_guid = a.device;
+        // A full device ID ({0.0.0.00000000}.{guid}) names the endpoint by its
+        // last brace group; the Device line needs the GUID alone.
+        const size_t open = a.device.rfind('{');
+        device.endpoint_guid = open == std::string::npos ? a.device : a.device.substr(open);
         device.layout = layout_from(a);
         ApoParseResult parsed = parse_apo_config(text, device.layout);
         device.state = parsed.state;
@@ -370,9 +392,23 @@ int main(int argc, char** argv) {
                         ",\"text\":" + json_string(parsed.warnings[k].text) + "}";
         }
         warnings += "]";
-        std::printf("{\"ok\":true,\"path\":%s,\"bands\":%zu,\"warnings\":%s,\"attached\":%s}\n",
+        // Lines the backend does not model (Copy, Delay, GraphicEQ, Include, ...)
+        // and Device sections in the input are not written; say so.
+        std::string unsupported = "[";
+        for (size_t k = 0; k < parsed.unsupported.size(); ++k) {
+            unsupported += (k ? "," : "") + json_string(parsed.unsupported[k]);
+        }
+        unsupported += "]";
+        std::string devices = "[";
+        for (size_t k = 0; k < parsed.devices.size(); ++k) {
+            devices += (k ? "," : "") + json_string(parsed.devices[k]);
+        }
+        devices += "]";
+        std::printf("{\"ok\":true,\"path\":%s,\"bands\":%zu,\"warnings\":%s,\"not_applied\":%s,"
+                    "\"ignored_device_lines\":%s,\"attached\":%s}\n",
                     json_string(utf8(writer.path())).c_str(), device.state.bands.size(),
-                    warnings.c_str(), inspect_config(root).isotone_included ? "true" : "false");
+                    warnings.c_str(), unsupported.c_str(), devices.c_str(),
+                    inspect_config(root).isotone_included ? "true" : "false");
         return 0;
     }
     if (cmd == "show" && a.positional.size() == 1) {

@@ -39,7 +39,10 @@ public:
     // Host side. Creates the region with kMappingSddl and initialises it, or
     // opens it if another instance or an earlier engine run already made it.
     // Returns a Win32 error code.
-    DWORD create_or_open(const std::wstring& name);
+    // `seed` fills the parameter block of a region this call creates, before
+    // any other process can see the region as valid.
+    DWORD create_or_open(const std::wstring& name, void (*seed)(ParamBlock* block, void* context) = nullptr,
+                         void* context = nullptr);
 
     // Client side. Opens an existing region; ERROR_FILE_NOT_FOUND means no
     // engine has created it yet.

@@ -71,6 +71,16 @@ void set_identity(double m[kMaxChannels][kMaxChannels]) {
 
 double finite_or(double v, double fallback) { return std::isfinite(v) ? v : fallback; }
 
+bool covers(ChannelMask mask, uint32_t channel) {
+    return mask == kAllChannels || (channel < kMaskChannels && (mask & (ChannelMask{1} << channel)) != 0);
+}
+
+// A band with a zero or negative width designs to identity (biquad.cpp), so the
+// processor treats it as disabled too: what is drawn is what is heard.
+bool effective_enabled(const Band& in) {
+    return in.enabled && !(std::isfinite(in.width) && in.width <= 0.0);
+}
+
 }  // namespace
 
 uint32_t control_block_frames(double sample_rate) {
@@ -116,6 +126,7 @@ void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_f
     pointers_.assign(channels_, nullptr);
 
     preamp_target_ = preamp_cur_ = 0.0;
+    preamp_begin_lin_ = preamp_end_lin_ = 1.0;
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         trim_target_[c] = trim_cur_[c] = 0.0;
     }
@@ -232,7 +243,9 @@ void Processor::recompute_band(BandSlot& b) {
 void Processor::begin_crossfade(uint32_t index) {
     BandSlot& b = bands_[index];
     b.old_coeffs = b.coeffs;
+    b.old_channels = b.channels;
     b.fade = 0.0;
+    b.fade_prev = 0.0;
 
     // The old filter has to carry on from exactly where it was, so hand it the
     // live state. The new filter starts from rest: its own startup transient is
@@ -247,87 +260,123 @@ void Processor::begin_crossfade(uint32_t index) {
     }
 }
 
+void Processor::apply_band(uint32_t index, const Band& in) {
+    BandSlot& b = bands_[index];
+
+    // A non-finite value keeps the previous target. Fed to a smoother it would
+    // make the current value NaN, and a NaN smoother never recovers, so one bad
+    // write to shared memory would silence the device until the stream
+    // restarted. Finite values are clamped for the same reason.
+    const double fc      = std::max(clamp_fc(in.fc, sample_rate_), kMinFc);
+    const bool   enabled = effective_enabled(in);
+    const double log_fc  = std::isfinite(fc) ? std::log(fc) : b.log_fc_target;
+    const double log_w   = std::isfinite(in.width) && in.width > 0.0 ? std::log(std::max(in.width, kMinWidth))
+                                                                     : b.log_w_target;
+    const double gain    = std::isfinite(in.gain_db) ? std::clamp(in.gain_db, -kMaxBandGainDb, kMaxBandGainDb)
+                                                     : b.gain_target;
+
+    // A change of shape that cannot be interpolated: the filter is a different
+    // filter afterwards, so its output is crossfaded instead.
+    const bool discontinuous = b.occupied && (b.type != in.type ||
+                                              b.width_mode != in.width_mode ||
+                                              b.shelf_corner != in.shelf_corner ||
+                                              b.enabled != enabled ||
+                                              b.id != in.id ||
+                                              b.channels != in.channels);
+    // Widths in different modes are different units; sweeping between them
+    // designs filters that were never asked for.
+    const bool mode_changed = b.occupied && b.width_mode != in.width_mode;
+
+    if (!b.occupied) {
+        // A band appearing where there was none: start it at its target so it
+        // does not sweep in from a default, and fade it up from silence.
+        b.log_fc_cur = log_fc;
+        b.gain_cur   = gain;
+        b.log_w_cur  = log_w;
+    }
+
+    if (discontinuous || !b.occupied) {
+        const bool was_occupied = b.occupied;
+        begin_crossfade(index);
+        if (!was_occupied) {
+            // Nothing was here before, so the outgoing filter is a wire.
+            b.old_coeffs = BiquadCoeffs::identity();
+        }
+    }
+
+    b.type         = in.type;
+    b.width_mode   = in.width_mode;
+    b.shelf_corner = in.shelf_corner;
+    b.channels     = in.channels;
+    b.enabled      = enabled;
+    b.id           = in.id;
+    b.occupied     = true;
+
+    b.log_fc_target = log_fc;
+    b.gain_target   = gain;
+    b.log_w_target  = log_w;
+    if (mode_changed) {
+        b.log_w_cur = log_w;
+    }
+
+    if (discontinuous || b.fade < 1.0) {
+        // Recompute immediately so the crossfade targets the new shape from its
+        // first sample rather than one control block later.
+        recompute_band(b);
+    }
+}
+
+// A band that went away fades out to unity rather than vanishing.
+void Processor::remove_band(uint32_t index) {
+    BandSlot& b = bands_[index];
+    begin_crossfade(index);
+    b.occupied = false;
+    b.enabled  = false;
+    b.coeffs   = BiquadCoeffs::identity();
+}
+
 void Processor::set_target(const EqState& state) {
     const uint32_t count = static_cast<uint32_t>(std::min<size_t>(state.bands.size(), max_bands_));
 
     for (uint32_t i = 0; i < count; ++i) {
         const Band& in = state.bands[i];
         BandSlot&   b  = bands_[i];
-
-        // A non-finite value keeps the previous target. Fed to a smoother it
-        // would make the current value NaN, and a NaN smoother never recovers,
-        // so one bad write to shared memory would silence the device until the
-        // stream restarted.
-        const double fc     = std::max(clamp_fc(in.fc, sample_rate_), kMinFc);
-        const double width  = std::max(in.width, kMinWidth);
-        const double log_fc = std::isfinite(fc) ? std::log(fc) : b.log_fc_target;
-        const double log_w  = std::isfinite(width) ? std::log(width) : b.log_w_target;
-        const double gain   = std::isfinite(in.gain_db) ? in.gain_db : b.gain_target;
-
-        // A change of shape that cannot be interpolated: the filter is a
-        // different filter afterwards, so its output is crossfaded instead.
-        const bool discontinuous = b.occupied && (b.type != in.type ||
-                                                  b.width_mode != in.width_mode ||
-                                                  b.shelf_corner != in.shelf_corner ||
-                                                  b.enabled != in.enabled ||
-                                                  b.id != in.id ||
-                                                  b.channels != in.channels);
-
-        if (!b.occupied) {
-            // A band appearing where there was none: start it at its target so
-            // it does not sweep in from a default, and fade it up from silence.
-            b.log_fc_cur = log_fc;
-            b.gain_cur   = gain;
-            b.log_w_cur  = log_w;
+        const bool shape_differs = !b.occupied || b.type != in.type || b.width_mode != in.width_mode ||
+                                   b.shelf_corner != in.shelf_corner || b.enabled != effective_enabled(in) ||
+                                   b.id != in.id || b.channels != in.channels;
+        if (b.fade < 1.0 && shape_differs) {
+            b.pending        = true;
+            b.pending_remove = false;
+            b.pending_band   = in;
+            continue;
         }
-
-        if (discontinuous || !b.occupied) {
-            const bool was_occupied = b.occupied;
-            begin_crossfade(i);
-            if (!was_occupied) {
-                // Nothing was here before, so the outgoing filter is a wire.
-                b.old_coeffs = BiquadCoeffs::identity();
-            }
-        }
-
-        b.type         = in.type;
-        b.width_mode   = in.width_mode;
-        b.shelf_corner = in.shelf_corner;
-        b.channels     = in.channels;
-        b.enabled      = in.enabled;
-        b.id           = in.id;
-        b.occupied     = true;
-
-        b.log_fc_target = log_fc;
-        b.gain_target   = gain;
-        b.log_w_target  = log_w;
-
-        if (discontinuous || b.fade < 1.0) {
-            // Recompute immediately so the crossfade targets the new shape from
-            // its first sample rather than one control block later.
-            recompute_band(b);
-        }
+        b.pending = false;
+        b.pending_remove = false;
+        apply_band(i, in);
     }
 
-    // Bands that went away fade out to unity rather than vanishing.
     for (uint32_t i = count; i < max_bands_; ++i) {
         BandSlot& b = bands_[i];
+        if (b.occupied && b.fade < 1.0) {
+            b.pending        = true;
+            b.pending_remove = true;
+            continue;
+        }
+        b.pending = false;
+        b.pending_remove = false;
         if (b.occupied) {
-            begin_crossfade(i);
-            b.occupied = false;
-            b.enabled  = false;
-            b.coeffs   = BiquadCoeffs::identity();
+            remove_band(i);
         }
     }
 
     band_count_ = count;
 
     if (std::isfinite(state.preamp_db)) {
-        preamp_target_ = state.preamp_db;
+        preamp_target_ = std::clamp(state.preamp_db, kMinLevelDb, kMaxLevelDb);
     }
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         if (std::isfinite(state.channel_gain_db[c])) {
-            trim_target_[c] = state.channel_gain_db[c];
+            trim_target_[c] = std::clamp(state.channel_gain_db[c], kMinLevelDb, kMaxLevelDb);
         }
     }
     mute_target_   = state.mute ? 0.0 : 1.0;
@@ -338,17 +387,29 @@ void Processor::set_target(const EqState& state) {
 
 void Processor::reset() {
     preamp_cur_ = preamp_target_;
+    preamp_begin_lin_ = preamp_end_lin_ = db_to_linear(preamp_cur_);
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         trim_cur_[c] = trim_target_[c];
     }
     mute_cur_   = mute_target_;
     bypass_cur_ = bypass_target_;
 
-    for (BandSlot& b : bands_) {
+    for (uint32_t i = 0; i < max_bands_; ++i) {
+        BandSlot& b = bands_[i];
+        if (b.pending) {
+            b.pending = false;
+            if (b.pending_remove) {
+                b.pending_remove = false;
+                if (b.occupied) remove_band(i);
+            } else {
+                apply_band(i, b.pending_band);
+            }
+        }
         b.log_fc_cur = b.log_fc_target;
         b.gain_cur   = b.gain_target;
         b.log_w_cur  = b.log_w_target;
         b.fade       = 1.0;
+        b.fade_prev  = 1.0;
         recompute_band(b);
     }
     for (State& s : state_new_) s.clear();
@@ -383,27 +444,52 @@ void Processor::reset() {
     delay_pos_ = 0;
 }
 
-void Processor::advance_smoothers(uint32_t) {
-    approach(preamp_cur_, preamp_target_, smoothing_coef_);
-    for (uint32_t c = 0; c < kMaxChannels; ++c) {
-        approach(trim_cur_[c], trim_target_[c], smoothing_coef_);
-    }
-    approach(mute_cur_, mute_target_, smoothing_coef_);
+void Processor::advance_smoothers(uint32_t frames) {
+    // Every smoother and fade moves by the time `frames` covers, so a host's
+    // buffer size does not change how fast parameters move. A full control
+    // block is the common case and uses the precomputed coefficient.
+    const double part  = static_cast<double>(frames) / static_cast<double>(control_frames_);
+    const double coef  = frames == control_frames_ ? smoothing_coef_
+                                                   : 1.0 - std::pow(1.0 - smoothing_coef_, part);
+    const double fstep = fade_step_ * part;
 
-    bypass_cur_ += std::clamp(bypass_target_ - bypass_cur_, -fade_step_, fade_step_);
+    preamp_begin_lin_ = db_to_linear(preamp_cur_);
+    approach(preamp_cur_, preamp_target_, coef);
+    preamp_end_lin_ = db_to_linear(preamp_cur_);
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        approach(trim_cur_[c], trim_target_[c], coef);
+    }
+    approach(mute_cur_, mute_target_, coef);
+
+    bypass_cur_ += std::clamp(bypass_target_ - bypass_cur_, -fstep, fstep);
 
     for (uint32_t i = 0; i < max_bands_; ++i) {
         BandSlot& b = bands_[i];
         if (!b.occupied && b.fade >= 1.0) {
+            b.fade_prev = 1.0;
             continue;
         }
-        approach(b.log_fc_cur, b.log_fc_target, smoothing_coef_);
-        approach(b.gain_cur,   b.gain_target,   smoothing_coef_);
-        approach(b.log_w_cur,  b.log_w_target,  smoothing_coef_);
+        approach(b.log_fc_cur, b.log_fc_target, coef);
+        approach(b.gain_cur,   b.gain_target,   coef);
+        approach(b.log_w_cur,  b.log_w_target,  coef);
+        b.fade_prev = b.fade;
         if (b.fade < 1.0) {
-            b.fade = std::min(1.0, b.fade + fade_step_);
+            b.fade = std::min(1.0, b.fade + fstep);
         }
         recompute_band(b);
+        if (b.fade >= 1.0 && b.pending) {
+            // The fade this change waited for is complete: start its own.
+            b.pending = false;
+            if (b.pending_remove) {
+                b.pending_remove = false;
+                if (b.occupied) remove_band(i);
+            } else {
+                apply_band(i, b.pending_band);
+            }
+            b.fade_prev = b.fade;
+            b.fade = std::min(1.0, b.fade + fstep);
+            recompute_band(b);
+        }
     }
 
     // Routing matrix.
@@ -412,7 +498,7 @@ void Processor::advance_smoothers(uint32_t) {
         bool settled = true;
         for (uint32_t o = 0; o < routed_; ++o) {
             for (uint32_t i = 0; i < routed_; ++i) {
-                approach(mat_cur_[o][i], mat_target_[o][i], smoothing_coef_);
+                approach(mat_cur_[o][i], mat_target_[o][i], coef);
                 if (near_enough(mat_cur_[o][i], mat_target_[o][i], 1e-6)) {
                     mat_cur_[o][i] = mat_target_[o][i];
                 } else {
@@ -431,14 +517,14 @@ void Processor::advance_smoothers(uint32_t) {
     // Bass management.
     if (!near_enough(log_xover_cur_, log_xover_target_, 1e-9) ||
         !near_enough(log_lfe_cur_, log_lfe_target_, 1e-9)) {
-        approach(log_xover_cur_, log_xover_target_, smoothing_coef_);
-        approach(log_lfe_cur_, log_lfe_target_, smoothing_coef_);
+        approach(log_xover_cur_, log_xover_target_, coef);
+        approach(log_lfe_cur_, log_lfe_target_, coef);
         recompute_bass_filters();
     }
     bass_active_ = false;
     for (uint32_t c = 0; c < routed_; ++c) {
         bass_begin_[c] = bass_cur_[c];
-        approach(bass_cur_[c], bass_target_[c], smoothing_coef_);
+        approach(bass_cur_[c], bass_target_[c], coef);
         if (near_enough(bass_cur_[c], bass_target_[c], 1e-6)) {
             bass_cur_[c] = bass_target_[c];
         }
@@ -454,7 +540,7 @@ void Processor::advance_smoothers(uint32_t) {
 
     // Polarity and speaker mute.
     for (uint32_t c = 0; c < channels_; ++c) {
-        approach(chan_cur_[c], chan_target_[c], smoothing_coef_);
+        approach(chan_cur_[c], chan_target_[c], coef);
     }
 
     // A delay change starts when the previous one has finished fading.
@@ -476,7 +562,7 @@ bool Processor::is_settling() const {
     if (!near_enough(bypass_cur_, bypass_target_, 1e-5)) return true;
 
     for (const BandSlot& b : bands_) {
-        if (b.fade < 1.0) return true;
+        if (b.fade < 1.0 || b.pending) return true;
         if (!b.occupied) continue;
         if (!near_enough(b.log_fc_cur, b.log_fc_target, 1e-6)) return true;
         if (!near_enough(b.gain_cur,   b.gain_target,   1e-4)) return true;
@@ -537,9 +623,15 @@ void Processor::stage_bass(float* const* planar, uint32_t offset, uint32_t frame
             // frequency, so they add back to the input's level.
             const double m  = bass_begin_[c] + (bass_cur_[c] - bass_begin_[c]) * t;
             const double x  = planar[c][offset + n];
-            const double lo = lr4(xover_lp_, xover_lp_state_[c], x);
-            const double hi = lr4(xover_hp_, xover_hp_state_[c], x);
-            planar[c][offset + n] = static_cast<float>(x + (hi - x) * m);
+            double lo = lr4(xover_lp_, xover_lp_state_[c], x);
+            double hi = lr4(xover_hp_, xover_hp_state_[c], x);
+            if (!std::isfinite(lo) || !std::isfinite(hi)) {
+                // Non-finite input poisons filter state for good; start over.
+                xover_lp_state_[c].clear();
+                xover_hp_state_[c].clear();
+                lo = hi = 0.0;
+            }
+            planar[c][offset + n] = static_cast<float>(std::isfinite(x) ? x + (hi - x) * m : 0.0);
             sub += lo * m;
         }
         if (lfe_ >= 0) {
@@ -548,6 +640,10 @@ void Processor::stage_bass(float* const* planar, uint32_t offset, uint32_t frame
             if (bass_begin_[c] != 0.0 || bass_cur_[c] != 0.0) {
                 const double m = bass_begin_[c] + (bass_cur_[c] - bass_begin_[c]) * t;
                 x += (lr4(lfe_lp_, lfe_state_, x) - x) * m;
+                if (!std::isfinite(x)) {
+                    lfe_state_.clear();
+                    x = 0.0;
+                }
             }
             planar[c][offset + n] = static_cast<float>(x + sub);
         }
@@ -594,8 +690,6 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
     stage_matrix(planar, offset, frames);
     stage_bass(planar, offset, frames);
 
-    const double preamp = db_to_linear(preamp_cur_);
-
     for (uint32_t c = 0; c < channels_; ++c) {
         // Only the first kMaxChannels channels have a trim; the rest sit at 0 dB.
         const double trim = c < kMaxChannels ? db_to_linear(trim_cur_[c]) : 1.0;
@@ -605,30 +699,50 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
         float* chan = planar[c] + offset;
 
         for (uint32_t n = 0; n < frames; ++n) {
-            double x = static_cast<double>(chan[n]) * preamp;
+            // Preamp, crossfade weights and post gain are all ramped across the
+            // block, so none of them steps once per control block.
+            const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
+            double x = static_cast<double>(chan[n]) *
+                       (preamp_begin_lin_ + (preamp_end_lin_ - preamp_begin_lin_) * t);
 
             for (uint32_t i = 0; i < max_bands_; ++i) {
                 BandSlot& b = bands_[i];
-                if (!b.occupied && b.fade >= 1.0) {
+                if (!b.occupied && b.fade >= 1.0 && b.fade_prev >= 1.0) {
                     continue;
                 }
-                if (b.channels != kAllChannels &&
-                    (c >= kMaskChannels || (b.channels & (ChannelMask{1} << c)) == 0)) {
-                    continue;
-                }
+                const bool in_new = covers(b.channels, c);
                 const size_t k = static_cast<size_t>(i) * channels_ + c;
-                if (b.fade < 1.0) {
-                    const double y_old = step(b.old_coeffs, state_old_[k].s1, state_old_[k].s2, x);
-                    const double y_new = step(b.coeffs, state_new_[k].s1, state_new_[k].s2, x);
-                    x = y_old * (1.0 - b.fade) + y_new * b.fade;
+                if (b.fade < 1.0 || b.fade_prev < 1.0) {
+                    // A change of channels fades the band out where it was and
+                    // in where it is going, like any other change of shape.
+                    const bool in_old = covers(b.old_channels, c);
+                    if (!in_new && !in_old) {
+                        continue;
+                    }
+                    const double w = b.fade_prev + (b.fade - b.fade_prev) * t;
+                    const double y_old = in_old ? step(b.old_coeffs, state_old_[k].s1, state_old_[k].s2, x) : x;
+                    const double y_new = in_new ? step(b.coeffs, state_new_[k].s1, state_new_[k].s2, x) : x;
+                    x = y_old * (1.0 - w) + y_new * w;
                 } else {
+                    if (!in_new) {
+                        continue;
+                    }
                     x = step(b.coeffs, state_new_[k].s1, state_new_[k].s2, x);
                 }
             }
 
-            // Ramped across the block, so a polarity flip or mute is a slope
-            // rather than a step every control block.
-            const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
+            if (!std::isfinite(x)) {
+                // Non-finite input, or a filter that overflowed, would keep its
+                // state NaN until the stream restarted. Start this channel's
+                // filters from rest and output silence for the sample instead.
+                for (uint32_t i = 0; i < max_bands_; ++i) {
+                    const size_t k = static_cast<size_t>(i) * channels_ + c;
+                    state_new_[k].clear();
+                    state_old_[k].clear();
+                }
+                x = 0.0;
+            }
+
             chan[n] = static_cast<float>(x * (post_begin + (post_end - post_begin) * t));
         }
     }

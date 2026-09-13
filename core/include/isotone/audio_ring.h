@@ -57,7 +57,9 @@ public:
     // Token layout: process id in the high 32 bits, an instance serial below.
     bool claim(uint64_t token);
     void release();
-    bool owns() const { return owner_; }
+    // True while this writer holds the ring. Another process taking the claim
+    // (see claim) ends it: the next write notices and stops.
+    bool owns() const;
 
     // Appends `frames` frames. `interleaved` holds `stride` samples per frame
     // and the first min(stride, channels) of each are stored; nullptr stores
@@ -89,7 +91,9 @@ struct AudioRingCursor {
 // If more are waiting than fit, the newest are kept. Frames the writer
 // overwrote before the reader got to them are dropped rather than returned
 // torn. `channels` receives the samples per frame of what was copied.
-uint32_t audio_ring_read(const AudioRingHeader* ring, AudioRingCursor* cursor, float* out,
-                         uint32_t max_frames, uint32_t* channels);
+// `capacity` is the value the region was created with, as for the writer: a
+// header that disagrees with it is treated as corrupt and nothing is read.
+uint32_t audio_ring_read(const AudioRingHeader* ring, uint32_t capacity, AudioRingCursor* cursor,
+                         float* out, uint32_t max_frames, uint32_t* channels);
 
 }  // namespace isotone

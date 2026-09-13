@@ -4,6 +4,7 @@
 #include "isotone/apo_config.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -51,18 +52,7 @@ std::string normalise_decimal(std::string s) {
     return s;
 }
 
-bool parse_double(const std::string& s, double* out) {
-    if (s.empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    const double v = std::strtod(s.c_str(), &end);
-    if (end == s.c_str() || !std::isfinite(v)) {
-        return false;
-    }
-    *out = v;
-    return true;
-}
+bool parse_double(const std::string& s, double* out) { return parse_apo_number(s, out); }
 
 // Room EQ Wizard writes a thousands separator as a period, so "1.000" means
 // 1000 Hz rather than 1 Hz. Upstream's rule, reproduced exactly: a string of at
@@ -200,13 +190,69 @@ bool mask_from_channel_words(const std::vector<std::string>& words,
     return selected != 0;
 }
 
-// 12 significant digits. The default %g gives 6, which silently rounds a
-// frequency like 1419.857 Hz to 1419.86 and loses the round trip. Short values
-// still print short, so a hand-written "Q 0.7" comes back out as "Q 0.7".
-std::string format_double(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.12g", v);
-    return buf;
+std::string format_double(double v) { return format_apo_number(v); }
+
+// The width field of a filter line, in a form the parser reads back to the same
+// filter. The parser follows upstream: bandwidth is not accepted for shelves
+// and a dB slope only for shelves. For those combinations, which only the UI can
+// create, the width is written as the Q that designs the same filter; for a
+// shelf bandwidth that Q is exact at 48 kHz.
+std::string width_text(const Band& b) {
+    const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
+    switch (b.width_mode) {
+        case WidthMode::Q:
+            return " Q " + format_apo_number(b.width);
+        case WidthMode::BandwidthOct:
+            if (!is_shelf) {
+                return " BW Oct " + format_apo_number(b.width);
+            } else {
+                constexpr double kPi = 3.14159265358979323846;
+                const double w0 = 2.0 * kPi * std::min(b.fc, 20000.0) / 48000.0;
+                const double alpha = std::sin(w0) * std::sinh(std::log(2.0) / 2.0 * b.width * w0 / std::sin(w0));
+                return " Q " + format_apo_number(std::sin(w0) / (2.0 * alpha));
+            }
+        case WidthMode::SlopeDb:
+            // design() reads a slope as Q for everything but shelves.
+            return is_shelf ? std::string() : " Q " + format_apo_number(b.width);
+    }
+    return std::string();
+}
+
+std::string mute_copy_line(const std::vector<std::string>& names) {
+    std::string line = "Copy:";
+    for (const std::string& name : names) {
+        line += " " + name + "=0";
+    }
+    return line;
+}
+
+// True for a Copy line that sets every channel of the layout to zero and does
+// nothing else: the form format_apo_config writes for mute.
+bool copy_is_mute(const std::string& params, const std::vector<std::string>& names) {
+    std::istringstream words(params);
+    std::string word;
+    std::vector<std::string> zeroed;
+    while (words >> word) {
+        const size_t eq = word.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            return false;
+        }
+        double v = 1.0;
+        if (!parse_apo_number(word.substr(eq + 1), &v) || v != 0.0 ||
+            word.find_first_not_of("0.+-", eq + 1) != std::string::npos) {
+            return false;
+        }
+        zeroed.push_back(to_upper(word.substr(0, eq)));
+    }
+    if (zeroed.empty() || names.empty()) {
+        return false;
+    }
+    for (const std::string& name : names) {
+        if (std::find(zeroed.begin(), zeroed.end(), to_upper(name)) == zeroed.end()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 const char* token_for(FilterType type, bool corner) {
@@ -354,6 +400,10 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
                     }
                 }
             }
+            continue;
+        }
+        if (command == "Copy" && copy_is_mute(params, channel_names)) {
+            result.state.mute = true;
             continue;
         }
         if (command.rfind("Filter", 0) == 0) {
@@ -505,6 +555,38 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
     return result;
 }
 
+std::string format_apo_number(double v) {
+    char buf[64];
+    const std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::general, 12);
+    return std::string(buf, r.ec == std::errc() ? r.ptr : buf);
+}
+
+std::string format_apo_frequency(double hz) {
+    std::string s = format_apo_number(hz);
+    if (s.size() >= 5 && s.find_first_of("eE") == std::string::npos && s[s.size() - 4] == '.') {
+        s += '0';
+    }
+    return s;
+}
+
+bool parse_apo_number(const std::string& s, double* out) {
+    const char* begin = s.data();
+    const char* end = s.data() + s.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(*begin))) {
+        ++begin;
+    }
+    if (begin < end && *begin == '+') {
+        ++begin;
+    }
+    double v = 0.0;
+    const std::from_chars_result r = std::from_chars(begin, end, v, std::chars_format::general);
+    if (r.ec != std::errc() || r.ptr == begin || !std::isfinite(v)) {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
 std::string format_apo_config(const EqState& state, const ApoFormatOptions& options) {
     std::ostringstream out;
 
@@ -562,54 +644,43 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             if (!b.enabled) {
                 if (options.write_disabled_as_none) {
                     out << "Filter " << index++ << ": OFF " << token_for(b.type, b.shelf_corner)
-                        << " Fc " << format_double(b.fc) << " Hz";
+                        << " Fc " << format_apo_frequency(b.fc) << " Hz";
                     if (type_uses_gain(b.type)) {
                         out << " Gain " << format_double(b.gain_db) << " dB";
                     }
-                    if (b.width_mode == WidthMode::Q) {
-                        out << " Q " << format_double(b.width);
-                    } else if (b.width_mode == WidthMode::BandwidthOct) {
-                        out << " BW Oct " << format_double(b.width);
-                    }
-                    out << "\n";
+                    out << width_text(b) << "\n";
                 }
                 continue;
             }
 
+            const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
             out << "Filter " << index++ << ": ON " << token_for(b.type, b.shelf_corner) << " ";
-            if (b.width_mode == WidthMode::SlopeDb) {
+            if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
                 out << format_double(b.width) << " dB ";
             }
-            out << "Fc " << format_double(b.fc) << " Hz";
+            out << "Fc " << format_apo_frequency(b.fc) << " Hz";
             if (type_uses_gain(b.type)) {
                 out << " Gain " << format_double(b.gain_db) << " dB";
             }
-            if (b.width_mode == WidthMode::Q) {
-                out << " Q " << format_double(b.width);
-            } else if (b.width_mode == WidthMode::BandwidthOct) {
-                out << " BW Oct " << format_double(b.width);
-            }
-            out << "\n";
+            out << width_text(b) << "\n";
         }
     }
 
-    // Channel trims and mute ride on Preamp inside a Channel block, which is how
-    // Peace expresses them too.
-    bool any_trim = state.mute;
+    // Channel trims ride on Preamp inside a Channel block, which is how Peace
+    // expresses them too.
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
-        if (state.channel_gain_db[c] != 0.0) {
-            any_trim = true;
+        if (state.channel_gain_db[c] == 0.0) {
+            continue;
         }
+        out << "Channel: " << channel_name(c) << "\n";
+        out << "Preamp: " << format_double(state.channel_gain_db[c]) << " dB\n";
     }
-    if (any_trim) {
-        for (uint32_t c = 0; c < kMaxChannels; ++c) {
-            const double db = state.mute ? -100.0 : state.channel_gain_db[c];
-            if (db == 0.0) {
-                continue;
-            }
-            out << "Channel: " << channel_name(c) << "\n";
-            out << "Preamp: " << format_double(db) << " dB\n";
-        }
+
+    // Mute is silence, not a large cut: every channel of the layout is copied
+    // from nothing. The parser reads this exact form back as mute.
+    if (state.mute) {
+        out << "Channel: all\n";
+        out << mute_copy_line(channel_names) << "\n";
     }
 
     return out.str();

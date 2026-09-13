@@ -809,7 +809,25 @@ TEST_CASE("identical content is not rewritten, and a failed write stays pending"
     CHECK(w.submit("next") == ERROR_SHARING_VIOLATION);
     CHECK(w.has_pending());
     fail = false;
-    CHECK(w.poll() == ERROR_SUCCESS);
+    // A failed attempt starts the interval too, so a failing sink is not hit on
+    // every edit or poll.
+    int attempts_while_failing = 0;
+    WriteCoalescer counted(
+        [&](const std::string&) {
+            ++attempts_while_failing;
+            return DWORD{ERROR_ACCESS_DENIED};
+        },
+        std::chrono::milliseconds(33), clock.fn());
+    counted.submit("a");
+    counted.submit("b");
+    counted.submit("c");
+    counted.poll();
+    CHECK(attempts_while_failing == 1);
+    clock.advance(34);
+    counted.poll();
+    CHECK(attempts_while_failing == 2);
+
+    CHECK(w.poll() == ERROR_SUCCESS);   // due: the clock has moved past the interval
     CHECK(writes == 2);
     CHECK_FALSE(w.has_pending());
 }
@@ -845,4 +863,164 @@ TEST_CASE("the writer coalesces live edits on disk and persists at once") {
     CompatWriter again(s.dir, clock.fn());
     REQUIRE(again.load() == ERROR_SUCCESS);
     CHECK(again.text() == writer.text());
+}
+
+// ---------------------------------------------------------------------------
+// Defects found by the 2026-09-13 review
+
+namespace {
+
+std::string utf8_of(const fs::path& p) {
+    const std::wstring& w = p.native();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n > 0 ? n : 0), '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// Runs the block for a 5.1 device through the upstream model and the
+// processor, returning the worst sample difference.
+double model_vs_processor(const DeviceConfig& d) {
+    constexpr double kRate = 48000.0;
+    constexpr size_t kFrames = 24000;
+    const ChannelLayout layout = d.layout;
+    std::vector<std::vector<double>> input(layout.channels, std::vector<double>(kFrames));
+    for (uint32_t c = 0; c < layout.channels; ++c) {
+        for (size_t f = 0; f < kFrames; ++f) {
+            const double t = static_cast<double>(f) / kRate;
+            input[c][f] = 0.4 * std::sin(2 * 3.14159265358979 * (40.0 + 9 * c) * t) +
+                          0.2 * std::sin(2 * 3.14159265358979 * (1500.0 + 70 * c) * t);
+        }
+    }
+    UpstreamModel model(layout, kRate);
+    const std::vector<std::vector<double>> expected = model.run(format_device_block(d), input);
+    Processor p;
+    p.initialize(kRate, layout.channels, 480, 64, layout.speaker_mask);
+    p.set_target(d.state);
+    p.reset();
+    std::vector<std::vector<float>> buf(layout.channels, std::vector<float>(480));
+    std::vector<float*> ptr(layout.channels);
+    double worst = 0.0;
+    for (size_t pos = 0; pos < kFrames; pos += 480) {
+        for (uint32_t c = 0; c < layout.channels; ++c) {
+            for (size_t i = 0; i < 480; ++i) buf[c][i] = static_cast<float>(input[c][pos + i]);
+            ptr[c] = buf[c].data();
+        }
+        p.process(ptr.data(), 480);
+        for (uint32_t c = 0; c < layout.channels; ++c) {
+            for (size_t i = 0; i < 480; ++i) worst = std::max(worst, std::abs(buf[c][i] - expected[c][pos + i]));
+        }
+    }
+    return worst;
+}
+
+}  // namespace
+
+TEST_CASE("a crossover with three decimals reaches Equalizer APO as written, not 1000 times higher") {
+    // Upstream reads "80.125" as Room EQ Wizard's thousands separator. The
+    // model parses Filter lines with the same rule, so a crossover written that
+    // way would be designed at 80125 Hz and the outputs would disagree.
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = ChannelLayout{6, 0x60F};
+    d.state.speakers.bass_management = true;
+    d.state.speakers.small_speakers = 0x37;
+    d.state.speakers.crossover_hz = 80.125;
+    d.state.speakers.lfe_lowpass_hz = 150.25;
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    CHECK(block.find("Fc 80.1250 Hz") != std::string::npos);
+    CHECK(model_vs_processor(d) < 1e-4);
+}
+
+TEST_CASE("mute in Isotone.txt is silence, and reads back as mute") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = ChannelLayout{6, 0x60F};
+    d.state.bands.push_back(band(FilterType::Peaking, 1000, 12, 1, WidthMode::Q));
+    d.state.mute = true;
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    CHECK(block.find("-100") == std::string::npos);
+    CHECK(model_vs_processor(d) < 1e-6);
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
+    REQUIRE(parsed.size() == 1);
+    CHECK(parsed[0].state.mute);
+    CHECK(parsed[0].unsupported.empty());
+    CHECK(parsed[0].state.bands.size() == 1);
+}
+
+TEST_CASE("a layout given with no speaker mask gets the default one, so speaker features are written") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = ChannelLayout{2, 0};
+    d.state.speakers.swap_left_right = true;
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    CHECK(block.find("Copy: L=1*R R=1*L") != std::string::npos);
+}
+
+TEST_CASE("an Include of Isotone.txt by absolute path counts as attached") {
+    Sandbox s;
+    const std::string absolute = "Include: " + utf8_of(s.dir / "Isotone.txt") + "\r\n";
+    put(s.dir / "config.txt", std::string(kOwnerConfig) + absolute);
+    CHECK(inspect_config(s.dir).isotone_included);
+    const AttachResult r = attach_include(s.dir);
+    CHECK(r.error == ERROR_SUCCESS);
+    CHECK_FALSE(r.appended);
+    CHECK(get(s.dir / "config.txt") == std::string(kOwnerConfig) + absolute);
+
+    // An Isotone.txt somewhere else is a different file.
+    Sandbox other;
+    put(s.dir / "config.txt", std::string(kOwnerConfig) + "Include: " + utf8_of(other.dir / "Isotone.txt") + "\r\n");
+    CHECK_FALSE(inspect_config(s.dir).isotone_included);
+}
+
+TEST_CASE("attach and detach refuse a config.txt that is a hard link to another file") {
+    // A link planted in a sandbox would otherwise carry the append or the
+    // truncation to the file it points at, such as the live config.txt.
+    Sandbox s;
+    Sandbox elsewhere;
+    const fs::path target = elsewhere.dir / "config.txt";
+    put(target, kOwnerConfig);
+    REQUIRE(CreateHardLinkW((s.dir / "config.txt").c_str(), target.c_str(), nullptr));
+    CHECK(attach_include(s.dir).error == ERROR_CANT_ACCESS_FILE);
+    CHECK(get(target) == kOwnerConfig);
+
+    put(target, std::string(kOwnerConfig) + block("\r\n"));   // as if attached
+    bool removed = false;
+    CHECK(detach_include(s.dir, &removed) == ERROR_CANT_ACCESS_FILE);
+    CHECK_FALSE(removed);
+    CHECK(get(target) == std::string(kOwnerConfig) + block("\r\n"));
+}
+
+TEST_CASE("an atomic write does not write through a .tmp name planted as a hard link") {
+    Sandbox s;
+    const fs::path victim = s.dir / "victim.txt";
+    put(victim, "keep me");
+    REQUIRE(CreateHardLinkW((s.dir / "Isotone.txt.tmp").c_str(), victim.c_str(), nullptr));
+    REQUIRE(write_file_atomically(s.dir / "Isotone.txt", "new content") == ERROR_SUCCESS);
+    CHECK(get(victim) == "keep me");
+    CHECK(get(s.dir / "Isotone.txt") == "new content");
+}
+
+TEST_CASE("detach waits for a writer holding config.txt, then cuts the file it checked") {
+    Sandbox s;
+    const fs::path config = s.dir / "config.txt";
+    put(config, kOwnerConfig);
+    REQUIRE(attach_include(s.dir).appended);
+    // Another program (Peace, an editor) has the file open for writing.
+    HANDLE held = CreateFileW(config.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+    std::thread release([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        CloseHandle(held);
+    });
+    bool removed = false;
+    const DWORD e = detach_include(s.dir, &removed);
+    release.join();
+    CHECK(e == ERROR_SUCCESS);
+    CHECK(removed);
+    CHECK(get(config) == kOwnerConfig);
 }

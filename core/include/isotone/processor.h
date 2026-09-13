@@ -34,6 +34,14 @@ inline constexpr double kMaxDelaySeconds = 1.0;
 inline constexpr double kMinBassHz = 20.0;
 inline constexpr double kMaxBassHz = 500.0;
 
+// The largest boost or cut a band may apply, and the range of the preamp and
+// the channel trims. Parameters come from shared memory any local user can
+// write, so a finite but absurd value is clamped rather than allowed to
+// overflow the filter state.
+inline constexpr double kMaxBandGainDb = 60.0;
+inline constexpr double kMinLevelDb    = -120.0;
+inline constexpr double kMaxLevelDb    = 60.0;
+
 uint32_t control_block_frames(double sample_rate);
 
 // Turns on flush-to-zero and denormals-are-zero for the calling thread. A host
@@ -103,11 +111,22 @@ private:
         BiquadCoeffs coeffs;
         BiquadCoeffs old_coeffs;
 
-        // Crossfade progress, 1.0 when not fading.
+        // Crossfade progress, 1.0 when not fading, and its value at the start
+        // of the current block, so the weight ramps per sample.
         double fade = 1.0;
+        double fade_prev = 1.0;
         double fade_step = 0.0;
+        // The channels the outgoing filter covered, for a crossfade that also
+        // changes the band's channels.
+        ChannelMask old_channels = kAllChannels;
 
         bool occupied = false;
+
+        // A change of shape that arrives while a crossfade is still running
+        // waits until it finishes, so two changes never share one fade.
+        bool pending        = false;
+        bool pending_remove = false;
+        Band pending_band;
     };
 
     // Two identical second-order Butterworth sections in series: a 24 dB/oct
@@ -118,6 +137,8 @@ private:
     };
 
     void recompute_band(BandSlot& b);
+    void apply_band(uint32_t index, const Band& in);
+    void remove_band(uint32_t index);
     void advance_smoothers(uint32_t frames);
     void begin_crossfade(uint32_t index);
     void process_block(float* const* planar, uint32_t offset, uint32_t frames);
@@ -144,6 +165,7 @@ private:
 
     // Global smoothed values.
     double preamp_target_ = 0.0, preamp_cur_ = 0.0;
+    double preamp_begin_lin_ = 1.0, preamp_end_lin_ = 1.0;   // linear, across the current block
     double trim_target_[kMaxChannels] = {};
     double trim_cur_[kMaxChannels]    = {};
     double mute_target_ = 1.0, mute_cur_ = 1.0;   // linear, 1 = audible

@@ -12,10 +12,11 @@
 // down every sound on the machine until the audio service restarts.
 //
 // Registration is not needed: the DLL is loaded directly and DllGetClassObject
-// is called by hand, so this touches no registry key and no audio device. It
-// loads IsoAPO-selftest.dll, the build of the same sources that puts the region
-// in Local\ rather than Global\, because this process cannot create Global\
-// objects without elevation.
+// is called by hand, and no audio device is touched. It loads
+// IsoAPO-selftest.dll, the build of the same sources that puts the region in
+// Local\ rather than Global\, because this process cannot create Global\
+// objects without elevation, and that reads child-APO records from
+// HKCU\Software\IsoAPO-selftest, which the child test writes and deletes.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -109,10 +110,12 @@ double amplitude_at(const float* x, size_t n, size_t stride, double freq, double
 // Pushes `total_frames` of a unit sine through the APO in blocks, in place, as
 // the engine does, calling `after` with the frame count once each block is
 // processed. Returns everything that came out, or an empty vector if the APO
-// returned the wrong frame count.
+// returned the wrong frame count. With `out_buffer` the output goes there
+// instead, pre-filled with garbage, as an engine with separate buffers would.
 std::vector<float> run_sine(IAudioProcessingObjectRT* rt, float* buffer, double freq,
                             size_t total_frames,
-                            const std::function<void(UINT32)>& after = nullptr) {
+                            const std::function<void(UINT32)>& after = nullptr,
+                            float* out_buffer = nullptr) {
     std::vector<float> captured;
     captured.reserve(total_frames * kChannels);
     size_t position = 0;
@@ -130,13 +133,18 @@ std::vector<float> run_sine(IAudioProcessingObjectRT* rt, float* buffer, double 
         in.u32BufferFlags = BUFFER_VALID;
         in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
         APO_CONNECTION_PROPERTY out = in;
+        if (out_buffer != nullptr) {
+            for (size_t i = 0; i < static_cast<size_t>(frames) * kChannels; ++i) out_buffer[i] = 7.0f;
+            out.pBuffer = reinterpret_cast<UINT_PTR>(out_buffer);
+        }
         APO_CONNECTION_PROPERTY* ins[1] = {&in};
         APO_CONNECTION_PROPERTY* outs[1] = {&out};
         rt->APOProcess(1, ins, 1, outs);
         if (out.u32ValidFrameCount != frames) {
             return {};
         }
-        captured.insert(captured.end(), buffer, buffer + static_cast<size_t>(frames) * kChannels);
+        const float* result = out_buffer != nullptr ? out_buffer : buffer;
+        captured.insert(captured.end(), result, result + static_cast<size_t>(frames) * kChannels);
         if (after) after(frames);
         position += frames;
     }
@@ -227,6 +235,146 @@ bool create_apo(IClassFactory* factory, Apo* out) {
 void ui_write(isotone::ParamBlock* shared, const isotone::EqState& state) {
     isotone::param_block_write(shared, [&](isotone::ParamBlock* b) { isotone::to_param_block(state, b); });
 }
+
+// A stand-in for the vendor APO an install replaces. It scales the audio by
+// kChildGain and counts every call, so the test can see IsoAPO forward each step
+// and process what the child wrote. Registered in this process only, with
+// CoRegisterClassObject.
+constexpr double kChildGain = 0.5;
+constexpr HNSTIME kChildLatency = 12345;
+// {5C1D0E2A-4B7F-4E11-9A31-6D2B8E4017C3}
+constexpr CLSID kTestChildClsid = {0x5c1d0e2a, 0x4b7f, 0x4e11, {0x9a, 0x31, 0x6d, 0x2b, 0x8e, 0x40, 0x17, 0xc3}};
+
+struct ChildProbe {
+    int live = 0, created = 0, initialized = 0, format_calls = 0, locks = 0, unlocks = 0, processes = 0;
+    bool fail_initialize = false;
+    int refuse_formats = 0;   // refuse this many format probes first
+    std::wstring endpoint;
+    CLSID init_clsid{};
+};
+ChildProbe g_child;
+
+class TestChild : public IAudioProcessingObject,
+                  public IAudioProcessingObjectRT,
+                  public IAudioProcessingObjectConfiguration {
+public:
+    TestChild() { ++g_child.live; ++g_child.created; }
+    ~TestChild() { --g_child.live; }
+
+    HRESULT __stdcall QueryInterface(const IID& iid, void** ppv) override {
+        if (ppv == nullptr) return E_POINTER;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IAudioProcessingObject)) {
+            *ppv = static_cast<IAudioProcessingObject*>(this);
+        } else if (iid == __uuidof(IAudioProcessingObjectRT)) {
+            *ppv = static_cast<IAudioProcessingObjectRT*>(this);
+        } else if (iid == __uuidof(IAudioProcessingObjectConfiguration)) {
+            *ppv = static_cast<IAudioProcessingObjectConfiguration*>(this);
+        } else {
+            *ppv = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    ULONG __stdcall AddRef() override { return ++refs_; }
+    ULONG __stdcall Release() override {
+        const ULONG n = --refs_;
+        if (n == 0) delete this;
+        return n;
+    }
+
+    HRESULT __stdcall Reset() override { return S_OK; }
+    HRESULT __stdcall GetLatency(HNSTIME* time) override {
+        *time = kChildLatency;
+        return S_OK;
+    }
+    HRESULT __stdcall GetRegistrationProperties(APO_REG_PROPERTIES**) override { return E_NOTIMPL; }
+    HRESULT __stdcall Initialize(UINT32 size, BYTE* data) override {
+        ++g_child.initialized;
+        if (g_child.fail_initialize) return E_FAIL;
+        if (size < sizeof(APOInitSystemEffects) || data == nullptr) return E_INVALIDARG;
+        const auto* init = reinterpret_cast<APOInitSystemEffects*>(data);
+        g_child.init_clsid = init->APOInit.clsid;
+        static constexpr PROPERTYKEY kEndpointGuid = {
+            {0x1da5d803, 0xd492, 0x4edd, {0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e}}, 4};
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        if (SUCCEEDED(init->pAPOEndpointProperties->GetValue(kEndpointGuid, &var)) && var.vt == VT_LPWSTR) {
+            g_child.endpoint = var.pwszVal;
+        }
+        PropVariantClear(&var);
+        return S_OK;
+    }
+    HRESULT __stdcall IsInputFormatSupported(IAudioMediaType*, IAudioMediaType* requested,
+                                             IAudioMediaType** supported) override {
+        ++g_child.format_calls;
+        if (g_child.refuse_formats > 0) {
+            --g_child.refuse_formats;
+            return APOERR_FORMAT_NOT_SUPPORTED;
+        }
+        requested->AddRef();
+        *supported = requested;
+        return S_OK;
+    }
+    HRESULT __stdcall IsOutputFormatSupported(IAudioMediaType*, IAudioMediaType* requested,
+                                              IAudioMediaType** supported) override {
+        requested->AddRef();
+        *supported = requested;
+        return S_OK;
+    }
+    HRESULT __stdcall GetInputChannelCount(UINT32* count) override {
+        *count = kChannels;
+        return S_OK;
+    }
+
+    void __stdcall APOProcess(UINT32, APO_CONNECTION_PROPERTY** in, UINT32, APO_CONNECTION_PROPERTY** out) override {
+        ++g_child.processes;
+        const auto* src = reinterpret_cast<const float*>(in[0]->pBuffer);
+        auto* dst = reinterpret_cast<float*>(out[0]->pBuffer);
+        const size_t samples = static_cast<size_t>(in[0]->u32ValidFrameCount) * kChannels;
+        for (size_t i = 0; i < samples; ++i) dst[i] = static_cast<float>(src[i] * kChildGain);
+        out[0]->u32ValidFrameCount = in[0]->u32ValidFrameCount;
+        out[0]->u32BufferFlags = in[0]->u32BufferFlags;
+    }
+    UINT32 __stdcall CalcInputFrames(UINT32 frames) override { return frames; }
+    UINT32 __stdcall CalcOutputFrames(UINT32 frames) override { return frames; }
+
+    HRESULT __stdcall LockForProcess(UINT32, APO_CONNECTION_DESCRIPTOR**, UINT32,
+                                     APO_CONNECTION_DESCRIPTOR**) override {
+        ++g_child.locks;
+        return S_OK;
+    }
+    HRESULT __stdcall UnlockForProcess() override {
+        ++g_child.unlocks;
+        return S_OK;
+    }
+
+private:
+    ULONG refs_ = 1;
+};
+
+class TestChildFactory : public IClassFactory {
+public:
+    HRESULT __stdcall QueryInterface(const IID& iid, void** ppv) override {
+        if (ppv == nullptr) return E_POINTER;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IClassFactory)) {
+            *ppv = static_cast<IClassFactory*>(this);
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG __stdcall AddRef() override { return 2; }    // static lifetime
+    ULONG __stdcall Release() override { return 1; }
+    HRESULT __stdcall CreateInstance(IUnknown* outer, const IID& iid, void** ppv) override {
+        if (outer != nullptr) return CLASS_E_NOAGGREGATION;
+        auto* child = new TestChild();
+        const HRESULT hr = child->QueryInterface(iid, ppv);
+        child->Release();
+        return hr;
+    }
+    HRESULT __stdcall LockServer(BOOL) override { return S_OK; }
+};
 
 isotone::EqState peaking_state(double fc, double gain_db, double q) {
     isotone::EqState s;
@@ -386,7 +534,8 @@ int main(int argc, char** argv) {
               CLASS_E_CLASSNOTAVAILABLE,
           "an unknown CLSID is refused");
 
-    check(can_unload() == S_OK, "DllCanUnloadNow says yes while nothing is live");
+    // The factory's code lives in the DLL, so a held factory must keep it loaded.
+    check(can_unload() == S_FALSE, "DllCanUnloadNow says no while a class factory is held");
 
     Apo first;
     check(create_apo(factory, &first), "CreateInstance and the configuration and RT interfaces");
@@ -501,7 +650,7 @@ int main(int argc, char** argv) {
     isotone::AudioRingCursor cursor;
     std::vector<float> drained(static_cast<size_t>(kMaxFrames) * isotone::kMaxChannels);
     uint32_t ring_channels = 0;
-    isotone::audio_ring_read(ring, &cursor, drained.data(), kMaxFrames, &ring_channels);
+    isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &cursor, drained.data(), kMaxFrames, &ring_channels);
 
     // Drain the ring after every block, as the UI's timer would, and demand the
     // ring hold exactly what the APO output.
@@ -509,7 +658,7 @@ int main(int argc, char** argv) {
     size_t ring_frames = 0;
     const auto drain_and_compare = [&](UINT32 frames) {
         const uint32_t n =
-            isotone::audio_ring_read(ring, &cursor, drained.data(), kMaxFrames, &ring_channels);
+            isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &cursor, drained.data(), kMaxFrames, &ring_channels);
         ring_frames += n;
         ring_matches &= n == frames && ring_channels == kChannels &&
                         std::memcmp(drained.data(), buffer,
@@ -537,26 +686,65 @@ int main(int argc, char** argv) {
                 expect_100);
     check(std::abs(db_100 - expect_100) < 0.01, "100 Hz matches the analytic skirt of the band");
 
-    // A silent buffer must come back flagged silent, or some drivers misbehave,
-    // and the ring must still advance so the spectrum shows silence.
+    // Silent buffers go through the filters, so the band's tail after the sine
+    // plays out and is flagged audible; once it has died away the buffer is
+    // flagged silent again, which some drivers need, and the ring shows silence.
     {
-        for (size_t i = 0; i < sample_count; ++i) buffer[i] = 0.0f;
-        APO_CONNECTION_PROPERTY in{};
-        in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
-        in.u32ValidFrameCount = kMaxFrames;
-        in.u32BufferFlags = BUFFER_SILENT;
-        in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
-        APO_CONNECTION_PROPERTY out = in;
-        APO_CONNECTION_PROPERTY* ins[1] = {&in};
-        APO_CONNECTION_PROPERTY* outs[1] = {&out};
-        isotone::audio_ring_read(ring, &cursor, drained.data(), kMaxFrames, &ring_channels);
-        first.rt->APOProcess(1, ins, 1, outs);
-        check(out.u32BufferFlags == BUFFER_SILENT, "a silent buffer stays flagged silent");
-        const uint32_t n =
-            isotone::audio_ring_read(ring, &cursor, drained.data(), kMaxFrames, &ring_channels);
-        bool zeros = n == kMaxFrames;
-        for (uint32_t i = 0; i < n * kChannels; ++i) zeros &= drained[i] == 0.0f;
+        isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &cursor, drained.data(), kMaxFrames, &ring_channels);
+        bool first_audible = false, became_silent = false, zeros = false;
+        for (int call = 0; call < 200 && !became_silent; ++call) {
+            for (size_t i = 0; i < sample_count; ++i) buffer[i] = 0.5f;   // garbage: a silent buffer is undefined
+            APO_CONNECTION_PROPERTY in{};
+            in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
+            in.u32ValidFrameCount = kMaxFrames;
+            in.u32BufferFlags = BUFFER_SILENT;
+            in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+            APO_CONNECTION_PROPERTY out = in;
+            APO_CONNECTION_PROPERTY* ins[1] = {&in};
+            APO_CONNECTION_PROPERTY* outs[1] = {&out};
+            first.rt->APOProcess(1, ins, 1, outs);
+            if (call == 0) first_audible = out.u32BufferFlags == BUFFER_VALID;
+            const uint32_t n = isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &cursor, drained.data(),
+                                                        kMaxFrames, &ring_channels);
+            if (out.u32BufferFlags == BUFFER_SILENT) {
+                became_silent = true;
+                zeros = n == kMaxFrames;
+                for (uint32_t i = 0; i < n * kChannels; ++i) zeros &= drained[i] == 0.0f;
+            }
+        }
+        check(first_audible, "the first silent buffer after audio carries the filter's tail");
+        check(became_silent, "silent buffers are flagged silent again once the tail is gone");
         check(zeros, "a silent buffer reaches the ring as silence");
+    }
+
+    // Lip sync delays everything by 50 ms. The last 50 ms of the sine must play
+    // out over the silent buffers that follow, and must not be left in the delay
+    // line to play before the next sound.
+    {
+        isotone::EqState delayed;
+        delayed.speakers.lip_sync_ms = 50.0;   // 2400 samples
+        ui_write(shared, delayed);
+        run_sine(first.rt, buffer, 1000.0, 48000);
+        double tail_peak = 0.0;
+        for (int call = 0; call < 4; ++call) {   // 4096 frames of silence
+            APO_CONNECTION_PROPERTY in{};
+            in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
+            in.u32ValidFrameCount = kMaxFrames;
+            in.u32BufferFlags = BUFFER_SILENT;
+            in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+            APO_CONNECTION_PROPERTY out = in;
+            APO_CONNECTION_PROPERTY* ins[1] = {&in};
+            APO_CONNECTION_PROPERTY* outs[1] = {&out};
+            first.rt->APOProcess(1, ins, 1, outs);
+            for (size_t i = 0; i < sample_count && call < 2; ++i) tail_peak = (std::max)(tail_peak, double(std::abs(buffer[i])));
+        }
+        const std::vector<float> resumed = run_sine(first.rt, buffer, 1000.0, 4800);
+        double stale = 0.0;
+        for (size_t i = 0; i < 2300 * kChannels && i < resumed.size(); ++i) stale = (std::max)(stale, double(std::abs(resumed[i])));
+        std::printf("  %-66s %.3f / %.2e\n", "delayed tail peak in silence / stale audio after resume", tail_peak, stale);
+        check(tail_peak > 0.9, "a delayed tail plays out over the silent buffers that follow the sound");
+        check(stale < 1e-6, "nothing stale is left in the delay line for the next sound");
+        ui_write(shared, peaking_state(1000.0, -6.0, 1.0));
     }
 
     // ------------------------------------------------------------------
@@ -600,6 +788,38 @@ int main(int argc, char** argv) {
         check(!captured.empty() && err0 < 1e-4, "a speaker delay written by the UI delays that channel");
         check(!captured.empty() && err1 < 1e-4, "a polarity flip written by the UI inverts that channel");
         ui_write(shared, peaking_state(1000.0, -6.0, 1.0));
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\nformat negotiation and locking\n");
+    {
+        check(first.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init)) == APOERR_ALREADY_INITIALIZED,
+              "Initialize while locked is refused");
+
+        // Alone, IsoAPO cannot change the channel count: stereo in, 5.1 out must
+        // be answered with a 5.1 input suggestion, not accepted.
+        UNCOMPRESSEDAUDIOFORMAT six = format;
+        six.dwSamplesPerFrame = 6;
+        six.dwChannelMask = 0x60F;
+        IAudioMediaType* six_media = nullptr;
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&six, &six_media);
+        Apo probe;
+        create_apo(factory, &probe);
+        probe.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        IAudioMediaType* suggested = nullptr;
+        const HRESULT hr_mismatch = probe.apo->IsInputFormatSupported(six_media, media, &suggested);
+        UNCOMPRESSEDAUDIOFORMAT suggestion{};
+        const bool suggested_six = suggested != nullptr && SUCCEEDED(suggested->GetUncompressedAudioFormat(&suggestion)) &&
+                                   suggestion.dwSamplesPerFrame == 6;
+        check(hr_mismatch == S_FALSE && suggested_six,
+              "a channel-count change is answered with a suggestion in the output's layout");
+        if (suggested) suggested->Release();
+        IAudioMediaType* same = nullptr;
+        check(probe.apo->IsInputFormatSupported(media, media, &same) == S_OK && same != nullptr,
+              "a matching format is accepted");
+        if (same) same->Release();
+        probe.release();
+        if (six_media) six_media->Release();
     }
 
     // ------------------------------------------------------------------
@@ -694,7 +914,7 @@ int main(int argc, char** argv) {
         // Channel c carries amplitude (c + 1) / 16, so a channel read from the
         // wrong slot shows up as a level error.
         isotone::AudioRingCursor wide_cursor;
-        isotone::audio_ring_read(ring, &wide_cursor, drained.data(), kMaxFrames, &ring_channels);
+        isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &wide_cursor, drained.data(), kMaxFrames, &ring_channels);
         std::vector<float> out;
         bool ring_ok = true;
         const size_t total = 48000;
@@ -717,7 +937,7 @@ int main(int argc, char** argv) {
             out.insert(out.end(), wide_buffer, wide_buffer + static_cast<size_t>(kMaxFrames) * kWide);
 
             const uint32_t n =
-                isotone::audio_ring_read(ring, &wide_cursor, drained.data(), kMaxFrames, &ring_channels);
+                isotone::audio_ring_read(ring, isotone::kRingCapacityFrames, &wide_cursor, drained.data(), kMaxFrames, &ring_channels);
             ring_ok &= n == kMaxFrames && ring_channels == isotone::kMaxChannels;
             for (UINT32 i = 0; i < n && ring_ok; ++i) {
                 ring_ok = std::memcmp(drained.data() + static_cast<size_t>(i) * isotone::kMaxChannels,
@@ -749,11 +969,217 @@ int main(int argc, char** argv) {
         if (wide_media) wide_media->Release();
     }
 
+    // ------------------------------------------------------------------
+    std::printf("\nchild APO (the one an install replaced)\n");
+    {
+        static TestChildFactory child_factory;
+        DWORD cookie = 0;
+        check_hr(CoRegisterClassObject(kTestChildClsid, &child_factory, CLSCTX_INPROC_SERVER,
+                                       REGCLS_MULTIPLEUSE, &cookie),
+                 "a test child APO class is registered in this process");
+
+        // A fresh endpoint, so each case starts from a new region and its
+        // -12 dB seed.
+        GUID child_endpoint{};
+        CoCreateGuid(&child_endpoint);
+        wchar_t child_upper[64] = {};
+        StringFromGUID2(child_endpoint, child_upper, 64);
+        const std::wstring record_key = std::wstring(L"Software\\IsoAPO-selftest\\Child APOs\\") + child_upper;
+        const auto record = [&](const std::wstring& value) {
+            return RegSetKeyValueW(HKEY_CURRENT_USER, record_key.c_str(), L"PostMixChild", REG_SZ, value.c_str(),
+                                   static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+        };
+        const auto clsid_text = [](const CLSID& c) {
+            wchar_t text[64] = {};
+            StringFromGUID2(c, text, 64);
+            return std::wstring(text);
+        };
+
+        FakeEndpointProperties child_properties(child_upper);
+        APOInitSystemEffects child_init = init;
+        child_init.pAPOEndpointProperties = &child_properties;
+
+        struct Result {
+            HRESULT init = E_FAIL, format = E_FAIL, lock = E_FAIL;
+            HNSTIME latency = -1;
+            double level = 0.0;
+        };
+        std::vector<float> separate(sample_count);
+        const auto run = [&](bool separate_buffers = false) {
+            Result r;
+            Apo apo;
+            if (!create_apo(factory, &apo)) return r;
+            r.init = apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            apo.apo->GetLatency(&r.latency);
+            IAudioMediaType* supported = nullptr;
+            r.format = apo.apo->IsInputFormatSupported(media, media, &supported);
+            if (supported) supported->Release();
+            r.lock = apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const std::vector<float> out =
+                run_sine(apo.rt, buffer, 1000.0, 48000, nullptr, separate_buffers ? separate.data() : nullptr);
+            r.level = out.empty() ? 0.0 : settled_db(out, 1000.0);
+            apo.config->UnlockForProcess();
+            apo.release();
+            return r;
+        };
+        const double alone = peaking_db(1000.0, -12.0, 1.0, 1000.0, kRate);
+        const double with_child = alone + 20.0 * std::log10(kChildGain);
+
+        check(record(clsid_text(kTestChildClsid)), "the child is recorded as the endpoint's post-mix child");
+        g_child = ChildProbe{};
+        Result r = run();
+        std::printf("  %-66s %+.3f dB (child then band %+.3f)\n", "level at 1 kHz with the child", r.level, with_child);
+        check(SUCCEEDED(r.init) && g_child.created == 1 && g_child.initialized == 1,
+              "Initialize creates and initializes the child");
+        check(g_child.endpoint == child_upper && g_child.init_clsid == post_mix,
+              "the child gets the same initialization data");
+        check(r.latency == kChildLatency, "GetLatency reports the child's latency");
+        // The base class's LockForProcess asks IsInputFormatSupported again, so
+        // the child sees that call as well as the explicit one.
+        check(r.format == S_OK && g_child.format_calls == 2, "format negotiation goes to the child");
+        check(SUCCEEDED(r.lock) && g_child.locks == 1 && g_child.unlocks == 1,
+              "LockForProcess and UnlockForProcess are forwarded");
+        check(g_child.processes == static_cast<int>((48000 + kMaxFrames - 1) / kMaxFrames),
+              "the child runs on every process call");
+        check(std::abs(r.level - with_child) < 0.01, "IsoAPO processes the child's output");
+        check(g_child.live == 0, "releasing IsoAPO releases the child");
+
+        g_child = ChildProbe{};
+        r = run(true);
+        check(std::abs(r.level - with_child) < 0.01,
+              "with separate input and output buffers IsoAPO still processes the child's output");
+
+        g_child = ChildProbe{};
+        g_child.fail_initialize = true;
+        r = run();
+        check(SUCCEEDED(r.init) && r.latency == 0 && g_child.live == 0 && g_child.processes == 0 &&
+                  std::abs(r.level - alone) < 0.01,
+              "a child that fails Initialize is dropped and IsoAPO runs alone");
+
+        const CLSID unregistered = {0x0badc0de, 0x1111, 0x2222, {0x33, 0x33, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44}};
+        for (const auto& [value, what] : {
+                 std::pair<std::wstring, const char*>{clsid_text(unregistered), "an unregistered child CLSID is skipped"},
+                 {clsid_text(post_mix), "IsoAPO recorded as its own child is skipped"},
+                 {L"!VALUE", "upstream's !VALUE placeholder means no child"},
+                 {L"", "an empty record means no child"}}) {
+            g_child = ChildProbe{};
+            record(value);
+            r = run();
+            check(SUCCEEDED(r.init) && SUCCEEDED(r.lock) && r.latency == 0 && g_child.created == 0 &&
+                      std::abs(r.level - alone) < 0.01,
+                  what);
+        }
+
+        // A child that declines one probed format is kept: the engine goes on to
+        // try another.
+        record(clsid_text(kTestChildClsid));
+        g_child = ChildProbe{};
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            g_child.refuse_formats = 1;
+            IAudioMediaType* supported = nullptr;
+            const HRESULT refused = apo.apo->IsInputFormatSupported(media, media, &supported);
+            if (supported) supported->Release();
+            const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const std::vector<float> out = run_sine(apo.rt, buffer, 1000.0, 48000);
+            const double level = out.empty() ? 0.0 : settled_db(out, 1000.0);
+            apo.config->UnlockForProcess();
+            apo.release();
+            check(refused == APOERR_FORMAT_NOT_SUPPORTED && SUCCEEDED(locked) && g_child.locks == 1 &&
+                      std::abs(level - with_child) < 0.01,
+                  "a child that declines one probed format is kept");
+        }
+
+        // A silent buffer holds whatever was there before; the child must see
+        // silence, or it filters leftovers into the output.
+        g_child = ChildProbe{};
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            bool quiet = true;
+            for (int call = 0; call < 50; ++call) {
+                for (size_t i = 0; i < sample_count; ++i) buffer[i] = 0.5f;
+                APO_CONNECTION_PROPERTY in{};
+                in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
+                in.u32ValidFrameCount = kMaxFrames;
+                in.u32BufferFlags = BUFFER_SILENT;
+                in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+                APO_CONNECTION_PROPERTY out = in;
+                APO_CONNECTION_PROPERTY* ins[1] = {&in};
+                APO_CONNECTION_PROPERTY* outs[1] = {&out};
+                apo.rt->APOProcess(1, ins, 1, outs);
+                for (size_t i = 0; i < sample_count; ++i) quiet &= buffer[i] == 0.0f;
+            }
+            apo.config->UnlockForProcess();
+            apo.release();
+            check(quiet, "a child is given silence, not a silent buffer's leftovers");
+        }
+
+        // IsoAPO's own lock failing after the child locked must unlock the child.
+        g_child = ChildProbe{};
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            UNCOMPRESSEDAUDIOFORMAT other_rate = format;
+            other_rate.fFramesPerSecond = 44100.0f;   // the base class requires matching rates
+            IAudioMediaType* other_media = nullptr;
+            CreateAudioMediaTypeFromUncompressedAudioFormat(&other_rate, &other_media);
+            APO_CONNECTION_DESCRIPTOR out_descriptor = descriptor;
+            out_descriptor.pFormat = other_media;
+            APO_CONNECTION_DESCRIPTOR* outs[1] = {&out_descriptor};
+            const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, outs);
+            apo.release();
+            if (other_media) other_media->Release();
+            check(FAILED(locked) && g_child.locks == 1 && g_child.unlocks == 1,
+                  "a failed lock unlocks a child that had already locked");
+        }
+
+        // Equalizer APO recorded as the child is refused, so the two can never
+        // host each other. The class is served by the test factory here, so a
+        // missing guard shows up as a created child, not a real Equalizer APO.
+        const CLSID eapo_post = {0xec1cc9ce, 0xfaed, 0x4822, {0x82, 0x8a, 0x82, 0xa8, 0x1a, 0x6f, 0x01, 0x8f}};
+        DWORD eapo_cookie = 0;
+        CoRegisterClassObject(eapo_post, &child_factory, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, &eapo_cookie);
+        g_child = ChildProbe{};
+        record(clsid_text(eapo_post));
+        r = run();
+        check(SUCCEEDED(r.init) && g_child.created == 0 && std::abs(r.level - alone) < 0.01,
+              "Equalizer APO recorded as the child is refused");
+        CoRevokeClassObject(eapo_cookie);
+
+        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\IsoAPO-selftest");
+        CoRevokeClassObject(cookie);
+    }
+
     _aligned_free(buffer);
     media->Release();
     factory->Release();
 
     check(can_unload() == S_OK, "DllCanUnloadNow says yes again after release");
+
+    // A region whose magic someone zeroed must not stall the next open.
+    {
+        GUID stalled{};
+        CoCreateGuid(&stalled);
+        wchar_t stalled_text[64] = {};
+        StringFromGUID2(stalled, stalled_text, 64);
+        const std::wstring stalled_name = isotone::win::mapping_name(L"Local\\", stalled_text);
+        HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                      static_cast<DWORD>(isotone::kSharedRegionBytes), stalled_name.c_str());
+        isotone::win::SharedMapping opener;
+        const auto t0 = std::chrono::steady_clock::now();
+        const DWORD opened = opener.open(stalled_name);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("  %-66s %lld ms\n", "opening a region with a zero magic", static_cast<long long>(ms));
+        check(h != nullptr && opened == ERROR_INVALID_DATA && ms < 150,
+              "a region with a zeroed magic is refused within 150 ms");
+        if (h) CloseHandle(h);
+    }
 
     ui.close();
     isotone::win::SharedMapping probe;

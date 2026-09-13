@@ -58,7 +58,10 @@ private:
     Clock clock_;
     std::optional<std::string> pending_;
     std::optional<std::string> last_written_;
-    std::chrono::steady_clock::time_point last_write_time_{};
+    // Rate limiting counts attempts, failed ones included, so a sink that keeps
+    // failing is not called on every edit.
+    std::chrono::steady_clock::time_point last_attempt_time_{};
+    size_t attempts_ = 0;
     size_t writes_ = 0;
 };
 

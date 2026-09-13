@@ -58,6 +58,10 @@ bool AudioRingWriter::claim(uint64_t token) {
     return true;
 }
 
+bool AudioRingWriter::owns() const {
+    return owner_ && std::atomic_ref<const uint64_t>(ring_->writer).load(std::memory_order_relaxed) == token_;
+}
+
 void AudioRingWriter::release() {
     if (!owner_) {
         return;
@@ -89,6 +93,11 @@ void AudioRingWriter::write(const float* interleaved, uint32_t stride, uint32_t 
     if (!owner_ || frames == 0 || channels_ == 0) {
         return;
     }
+    if (!owns()) {
+        // Another process took the claim: two writers would corrupt the indices.
+        owner_ = false;
+        return;
+    }
     const uint32_t end = next_ + frames;
     std::atomic_ref<uint32_t>(ring_->pending_index).store(end, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
@@ -113,9 +122,10 @@ void AudioRingWriter::write(const float* interleaved, uint32_t stride, uint32_t 
     next_ = end;
 }
 
-uint32_t audio_ring_read(const AudioRingHeader* ring, AudioRingCursor* cursor, float* out,
-                         uint32_t max_frames, uint32_t* channels) {
-    if (ring == nullptr || cursor == nullptr || out == nullptr || channels == nullptr) {
+uint32_t audio_ring_read(const AudioRingHeader* ring, uint32_t capacity, AudioRingCursor* cursor,
+                         float* out, uint32_t max_frames, uint32_t* channels) {
+    if (ring == nullptr || cursor == nullptr || out == nullptr || channels == nullptr ||
+        !is_power_of_two(capacity)) {
         return 0;
     }
     std::atomic_ref<const uint32_t> epoch(ring->epoch);
@@ -125,10 +135,13 @@ uint32_t audio_ring_read(const AudioRingHeader* ring, AudioRingCursor* cursor, f
     }
     std::atomic_thread_fence(std::memory_order_acquire);
 
-    const uint32_t capacity = std::atomic_ref<const uint32_t>(ring->capacity).load(std::memory_order_relaxed);
+    // The header's capacity is only compared, never used: the arithmetic below
+    // uses the caller's, so a rewritten header cannot move the copy.
+    const uint32_t header_capacity =
+        std::atomic_ref<const uint32_t>(ring->capacity).load(std::memory_order_relaxed);
     const uint32_t ch = std::atomic_ref<const uint32_t>(ring->channels).load(std::memory_order_relaxed);
     const uint32_t end = std::atomic_ref<const uint32_t>(ring->write_index).load(std::memory_order_relaxed);
-    if (!is_power_of_two(capacity) || ch == 0 || ch > kMaxChannels) {
+    if (header_capacity != capacity || ch == 0 || ch > kMaxChannels) {
         return 0;
     }
     if (cursor->epoch != e1) {

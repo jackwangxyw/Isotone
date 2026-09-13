@@ -88,6 +88,20 @@ struct ApoFormatOptions {
 
 std::string format_apo_config(const EqState& state, const ApoFormatOptions& options = {});
 
+// A number as the config format writes it: up to 12 significant digits, with a
+// period, whatever the C locale.
+std::string format_apo_number(double v);
+
+// A frequency in Hz as it has to be written for Equalizer APO. Upstream reads a
+// value like "80.125" as Room EQ Wizard's thousands separator and multiplies it
+// by 1000; this adds a trailing zero to any value that would match that rule.
+std::string format_apo_frequency(double hz);
+
+// Reads the leading number of `s` with a period as the decimal mark, whatever
+// the C locale, as upstream's wcstod-based parsing does. A leading '+' is
+// allowed. False if there is no number or it is not finite.
+bool parse_apo_number(const std::string& s, double* out);
+
 // Escapes nothing and quotes nothing: Equalizer APO's Device patterns are plain
 // substring matches. Returns a pattern that matches only the given endpoint.
 std::string apo_device_pattern_for_guid(const std::string& guid);

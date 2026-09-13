@@ -79,19 +79,19 @@ TEST_CASE("frames written are the frames read, in order") {
     AudioRingCursor cursor;
     std::vector<float> out(1024 * kMaxChannels);
     uint32_t ch = 0;
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 1024, &ch) == 0);  // sync
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch) == 0);  // sync
 
     const std::vector<float> a = ramp(0, 300, 2);
     const std::vector<float> b = ramp(300, 500, 2);
     w.write(a.data(), 2, 300);
     w.write(b.data(), 2, 500);
 
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 1024, &ch) == 800);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch) == 800);
     CHECK(ch == 2);
     const std::vector<float> expect = ramp(0, 800, 2);
     CHECK(std::memcmp(out.data(), expect.data(), expect.size() * sizeof(float)) == 0);
 
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 1024, &ch) == 0);  // drained
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch) == 0);  // drained
 }
 
 TEST_CASE("a new reader starts at the newest frame") {
@@ -106,11 +106,11 @@ TEST_CASE("a new reader starts at the newest frame") {
     AudioRingCursor cursor;
     std::vector<float> out(256 * kMaxChannels);
     uint32_t ch = 0;
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 256, &ch) == 0);
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch) == 0);
 
     const std::vector<float> b = ramp(100, 10, 1);
     w.write(b.data(), 1, 10);
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 256, &ch) == 10);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch) == 10);
     CHECK(out[0] == 100.0f);
 }
 
@@ -124,20 +124,20 @@ TEST_CASE("a reader that falls behind gets the newest frames, never stale ones")
     AudioRingCursor cursor;
     std::vector<float> out(256 * kMaxChannels);
     uint32_t ch = 0;
-    audio_ring_read(r.header(), &cursor, out.data(), 256, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch);
 
     const std::vector<float> a = ramp(0, 1000, 2);
     for (uint32_t i = 0; i < 1000; i += 70) {
         const uint32_t n = std::min<uint32_t>(70, 1000 - i);
         w.write(a.data() + size_t{i} * 2, 2, n);
     }
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 256, &ch) == 256);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch) == 256);
     const std::vector<float> expect = ramp(1000 - 256, 256, 2);
     CHECK(std::memcmp(out.data(), expect.data(), expect.size() * sizeof(float)) == 0);
 
     SUBCASE("and a smaller request keeps the newest") {
         w.write(a.data(), 2, 50);   // frames 1000..1049 carry values 0..49
-        REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 20, &ch) == 20);
+        REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 20, &ch) == 20);
         CHECK(out[0] == 30.0f);
     }
 }
@@ -151,11 +151,11 @@ TEST_CASE("a single write longer than the ring keeps its tail") {
     AudioRingCursor cursor;
     std::vector<float> out(64 * kMaxChannels);
     uint32_t ch = 0;
-    audio_ring_read(r.header(), &cursor, out.data(), 64, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch);
 
     const std::vector<float> a = ramp(0, 200, 1);
     w.write(a.data(), 1, 200);
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 64, &ch) == 64);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch) == 64);
     CHECK(out[0] == 136.0f);
     CHECK(out[63] == 199.0f);
     CHECK(r.guard_intact());
@@ -170,18 +170,18 @@ TEST_CASE("the frame counter wrapping past 2^32 loses nothing") {
     AudioRingCursor cursor;
     std::vector<float> out(128 * kMaxChannels);
     uint32_t ch = 0;
-    audio_ring_read(r.header(), &cursor, out.data(), 128, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 128, &ch);
 
     // Silence writes only touch the last `capacity` frames, so this is cheap.
     w.write(nullptr, 1, 0x7FFFFFF0u);
     w.write(nullptr, 1, 0x7FFFFFF0u);   // counter now 0xFFFFFFE0
-    audio_ring_read(r.header(), &cursor, out.data(), 128, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 128, &ch);
     CHECK(r.header()->write_index == 0xFFFFFFE0u);
 
     const std::vector<float> a = ramp(0, 100, 1);
     w.write(a.data(), 1, 100);   // crosses zero
     CHECK(r.header()->write_index == 0x00000044u);
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 128, &ch) == 100);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 128, &ch) == 100);
     const std::vector<float> expect = ramp(0, 100, 1);
     CHECK(std::memcmp(out.data(), expect.data(), expect.size() * sizeof(float)) == 0);
 }
@@ -197,11 +197,11 @@ TEST_CASE("stride wider than the ring stores the leading channels") {
     AudioRingCursor cursor;
     std::vector<float> out(64 * kMaxChannels);
     uint32_t ch = 0;
-    audio_ring_read(r.header(), &cursor, out.data(), 64, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch);
 
     const std::vector<float> a = ramp(0, 10, 12);
     w.write(a.data(), 12, 10);
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 64, &ch) == 10);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch) == 10);
     CHECK(ch == kMaxChannels);
     CHECK(out[kMaxChannels] == 1.0f);                 // frame 1, channel 0
     CHECK(out[kMaxChannels + 7] == 1.0f + 0.25f * 7); // frame 1, channel 7
@@ -217,17 +217,17 @@ TEST_CASE("a layout change makes readers resynchronise instead of misreading") {
     AudioRingCursor cursor;
     std::vector<float> out(256 * kMaxChannels);
     uint32_t ch = 0;
-    audio_ring_read(r.header(), &cursor, out.data(), 256, &ch);
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch);
 
     const std::vector<float> a = ramp(0, 50, 2);
     w.write(a.data(), 2, 50);
     w.set_channels(6);
     CHECK((r.header()->epoch & 1u) == 0);
 
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 256, &ch) == 0);
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch) == 0);
     const std::vector<float> b = ramp(0, 40, 6);
     w.write(b.data(), 6, 40);
-    REQUIRE(audio_ring_read(r.header(), &cursor, out.data(), 256, &ch) == 40);
+    REQUIRE(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 256, &ch) == 40);
     CHECK(ch == 6);
     CHECK(std::memcmp(out.data(), b.data(), b.size() * sizeof(float)) == 0);
 }
@@ -281,11 +281,11 @@ TEST_CASE("corrupt layout fields in shared memory cannot steer a write out of bo
     AudioRingCursor cursor;
     std::vector<float> out(64 * kMaxChannels);
     uint32_t ch = 0;
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 64, &ch) == 0);
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 64, &ch) == 0);
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch) == 0);
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch) == 0);
     r.header()->capacity = 100;   // not a power of two
     r.header()->channels = 2;
-    CHECK(audio_ring_read(r.header(), &cursor, out.data(), 64, &ch) == 0);
+    CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 64, &ch) == 0);
 }
 
 namespace {
@@ -340,7 +340,7 @@ TEST_CASE("a reader racing a writer never receives an overwritten frame") {
     const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while (std::chrono::steady_clock::now() < until) {
         uint32_t ch = 0;
-        const uint32_t n = audio_ring_read(r.header(), &cursor, out.data(), kCapacity, &ch);
+        const uint32_t n = audio_ring_read(r.header(), r.capacity, &cursor, out.data(), kCapacity, &ch);
         if (n == 0) continue;
         ++chunks;
         frames += n;
