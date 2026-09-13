@@ -314,6 +314,8 @@ $Dll = (Resolve-Path $Dll).Path
 #    first one holds the pristine values.
 if (Test-Path $backupFile) {
     Write-Host "Backup already exists, keeping it (it holds the pristine values)."
+} elseif ($DryRun) {
+    Write-Host "  would export FxProperties to $backupFile"
 } else {
     $regPath = $fxPath -replace '^HKLM:', 'HKEY_LOCAL_MACHINE'
     reg.exe export $regPath $backupFile /y | Out-Null

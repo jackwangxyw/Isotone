@@ -617,6 +617,99 @@ not exist, so the transport under test is the same code.
   silent stream open. With nothing playing the UI will see "engine idle", as
   plan 5.3 expects.
 
+## 2026-09-12: devicetool, wrapping upstream's registration code
+
+`windows/devicetool` builds `isotone-devicetool`: list, status, install,
+uninstall, repair, test and roundtrip, with JSON output and exit codes 0/1/2.
+It vendors `DeviceAPOInfo`, `AbstractAPOInfo`, `RegistryHelper` and
+`StringHelper` from `mirror/equalizerapo` at
+`53d885f7f1a097b457e17a5206b7d60f647877a8` (2024-09-27), as plan 5.2 says.
+`windows/devicetool/upstream/VENDORED.md` lists every change.
+
+- **Licence.** Every vendored file is GPL "or later". `ScopeGuard.h` is not
+  vendored: it includes folly's Apache-2.0 `UncaughtExceptions.h`. `stdafx.h`
+  defines the one macro it provided.
+- **Dry run.** Upstream's install and uninstall logic runs unchanged.
+  `RegistryHelper` sends every write (values, keys, ownership, ACLs and the
+  `.reg` backup file) to a `RegistryDryRun` when one is set, returning before any
+  system call, and that sink answers the reads that follow those writes.
+  `--dry-run` needs no elevation. Checked: every write function is gated at its
+  first line, and nothing outside `RegistryHelper` writes the registry.
+  `roundtrip` chains install, a simulated driver update, repair and uninstall in
+  one dry run and checks the effect slots come back exactly.
+- **What gets installed.** The post-mix class only, in MFX by default (the stage
+  1b finding). Install refuses when Equalizer APO is on the endpoint unless
+  `--replace-equalizerapo` is passed, and never records an Equalizer APO class as
+  the child.
+- **Install records.** devicetool writes upstream's record under
+  `HKLM\SOFTWARE\IsoAPO\Child APOs\{guid}`, so uninstall restores the original
+  slot values. `install.ps1` writes none; devicetool reports such an install as
+  unrecorded and will not uninstall it.
+- **Upstream behaviour to know.** `INSTALL_SFX_MFX` deletes LFX/GFX and
+  `INSTALL_LFX_GFX` deletes SFX/MFX/EFX while installed (restored on uninstall).
+  The extra effect lists `,13`/`,14`/`,15` are never touched. `saveToFile` writes
+  a `.reg` with a doubled `HKEY_LOCAL_MACHINE` root that would not import (read,
+  not run). `checkAPORegistration(true)` shells out to `regsvr32` on a DLL next to
+  the exe, a build-tree path audiodg cannot read; nothing calls it with `true`.
+- **Verified on this machine, read-only.** `status` on all 46 endpoints matches
+  the registry, including CABLE Input as `conflict` (IsoAPO unrecorded in MFX,
+  Equalizer APO pre-mix in SFX) and Equalizer APO's `ConfigPath`. A dry-run
+  install on CABLE In 16ch writes the same FxProperties value as `install.ps1
+  -DryRun`, plus the record. A fingerprint of all 893 FxProperties values on
+  every endpoint was identical before and after a status, roundtrip and dry-run
+  install session. No real install has been run.
+- **Not handled yet.** IsoAPO does not wrap a child APO, so a vendor APO it
+  replaces stops processing while installed; devicetool warns.
+  `--replace-equalizerapo` replaces the target slot only, so the endpoint still
+  reports a conflict. Realtek's `,19` and `,20` values are not reported.
+- **Fixed on the way.** `install.ps1 -DryRun` ran `reg export` and wrote a backup
+  file; it now only reports it.
+
+## 2026-09-12: UI direction, and multichannel features added to scope
+
+Owner's decisions while reviewing the main-screen mockups
+(`docs/design/mockups`, gitignored; published as a design canvas):
+
+- **Framework leaning: Qt 6 Quick**, pending a one-screen prototype that matches
+  the mockups. Look: MUSE-like, not dense pro-audio.
+- **Themes:** System, Dark, Light and Custom (user base colours), blue default
+  accent. Band colours are an option: one accent or a colour per band.
+- **Layout:** one layout with a collapsible sidebar (labelled with outputs when
+  open, icon rail with an outputs popover when collapsed). The Channels panel
+  collapses too.
+- **Bands:** the strip scrolls sideways; band order is Manual or By frequency.
+- **Balance** is shown as a number from -1.0 to +1.0 in 0.1 steps, as Peace does
+  (confirmed in Peace's help file, `releasenotes.htm`). Its gain mapping is not
+  decided; the proposal is to attenuate the opposite side only, reaching silence
+  at the ends, never boosting.
+- **Mono is removed, UI and core.** `EqState::mono`, the processor's downmix
+  and the param block field are gone; `kParamVersion` is 3 and `reserved` grew
+  to keep the layout aligned. The compat backend worktree still emits `Copy:`
+  for mono and must drop it before merging.
+- **No draggable room map** for speaker placement. Speaker setup is a table
+  (level, distance or delay, polarity, test, mute, solo), as JRiver's Room
+  Correction and Roon's speaker setup present it. No explainer microcopy in
+  the UI.
+- **Added to scope for multichannel outputs** (the owner asked for what 2.1, 5.1
+  and 7.1 users need, without clutter). Shown only when the active output has
+  more than two channels:
+  - speaker groups (named channel sets a band can target);
+  - per-speaker level, delay set by distance or directly, polarity, mute, solo
+    and a test tone;
+  - bass management: a crossover sending bass from small speakers to the sub,
+    and an LFE low-pass;
+  - routing: stereo upmix, swap front and rear, swap left and right, and a global
+    delay for lip sync.
+
+  This supersedes the plan's deferral of channel delay and swap (4.8). Crossfeed
+  stays out (1.1).
+
+Engine work this implies, none of it built yet: per-channel delay lines
+(preallocated, crossfaded when changed), per-channel polarity, a channel mixing
+matrix that implements swap, upmix and the bass-management sum in one stage,
+Linkwitz-Riley 24 dB/oct crossover filters, named groups over the existing
+channel masks, and a param-block layout change to carry all of it.
+
 ---
 
 # Where things stand (end of 2026-09-12)

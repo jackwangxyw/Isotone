@@ -35,6 +35,7 @@ if(WIN32 AND MSVC)
     add_subdirectory(windows/apo)
     add_subdirectory(windows/measure)
     add_subdirectory(windows/shmtool)
+    add_subdirectory(windows/devicetool)
 endif()
 
 if(ISOTONE_BUILD_TESTS)

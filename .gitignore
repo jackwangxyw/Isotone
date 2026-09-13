@@ -80,3 +80,6 @@ Thumbs.db
 .DS_Store
 .idea/
 *.swp
+
+# Claude Code session data, including agent worktrees
+.claude/
