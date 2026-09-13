@@ -69,6 +69,12 @@ wstring RegistryHelper::readValue(wstring key, wstring valuename)
 		throw RegistryException(L"Error while reading registry value " + key + L"\\" + valuename + L": " + StringHelper::getSystemErrorString(status));
 	}
 
+	if (bufSize < sizeof(wchar_t))   // Isotone modification: an empty value would index buf[-1]
+	{
+		delete buf;
+		return result;
+	}
+
 	// Remove zero-termination
 	if (buf[bufSize / sizeof(wchar_t) - 1] == L'\0')
 		bufSize -= sizeof(wchar_t);
@@ -307,9 +313,12 @@ void RegistryHelper::createKey(wstring key)
 	wstring subKey = splitKey(key, &rootKey);
 
 	HKEY keyHandle;
-	LSTATUS status = RegCreateKeyExW(rootKey, subKey.c_str(), 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &keyHandle, NULL);
+	DWORD disposition = 0;   // Isotone modification
+	LSTATUS status = RegCreateKeyExW(rootKey, subKey.c_str(), 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &keyHandle, &disposition);   // Isotone modification: disposition
 	if (status != ERROR_SUCCESS)
 		throw RegistryException(L"Error while creating registry key " + key + L": " + StringHelper::getSystemErrorString(status));
+	if (disposition == REG_OPENED_EXISTING_KEY)   // Isotone modification
+		report.cancel();
 
 	RegCloseKey(keyHandle);
 }

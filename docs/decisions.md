@@ -1013,9 +1013,205 @@ Owner's decisions:
 
 Screens regenerated for band order and the bass management card.
 
+## 2026-09-13: IsoAPO hosts the APO it replaces
+
+Ported from upstream `EqualizerAPO.cpp`:
+
+- **Initialize** reads the child CLSID from `HKLM\SOFTWARE\IsoAPO\Child APOs\
+  {endpoint}` (`PreMixChild` for the pre-mix class, `PostMixChild` for
+  post-mix), creates it in-process, and passes it the same initialization data.
+- **Negotiation and lifecycle:** `IsInputFormatSupported`, `LockForProcess`,
+  `UnlockForProcess` and `GetLatency` go to the child.
+- **Processing:** `APOProcess` runs the child first, on silent buffers too, and
+  the processor on the child's output buffer, with the channel count and speaker
+  mask of the output format.
+- **Failure:** a child that fails creation, `Initialize`, format negotiation or
+  `LockForProcess` is released and IsoAPO runs alone.
+- **Two deviations from upstream.** Upstream ignores a child's `LockForProcess`
+  failure and keeps calling it; IsoAPO drops it. IsoAPO also refuses a record
+  naming IsoAPO itself, which would otherwise recurse inside audiodg.
+- **Record location:** the self-test build of the DLL reads the record from
+  `HKCU\Software\IsoAPO-selftest` instead of HKLM, so it runs unelevated. That is
+  its only other difference from the shipping DLL.
+
+**Self-test, with a test child** registered in the test process through
+`CoRegisterClassObject`. The child scales audio by 0.5 and counts calls. Checked:
+
+- **Creation and init data:** the child is created, gets the same endpoint GUID
+  and class, and reports its latency through IsoAPO.
+- **Negotiation and lifecycle:** it sees format negotiation (twice: the SDK base
+  class's `LockForProcess` asks again), lock, unlock and every process call.
+- **Output:** 1 kHz measures −18.021 dB, the child's −6.02 dB followed by the
+  −12 dB seed band. The same holds with separate input and output buffers.
+- **Release:** releasing IsoAPO releases the child.
+- **Running alone:** IsoAPO runs alone at −12 dB when the child fails
+  `Initialize`, when the recorded CLSID is unregistered, when it names IsoAPO,
+  and when the value is `!VALUE` or empty.
+
+Six deliberate bugs each failed it: child not run; input copied over the child's
+output; lock not forwarded; latency not forwarded; a failed child kept; no
+self-guard.
+
+**devicetool hands over what Equalizer APO was hosting** when
+`--replace-equalizerapo` removes it:
+
+- **Slots:** a slot Equalizer APO had taken from another APO (per Equalizer
+  APO's own install record) gets that APO back instead of being emptied.
+- **Child:** the APO Equalizer APO's post-mix instance hosted becomes IsoAPO's
+  `PostMixChild`.
+
+No endpoint on this machine has such a record (the four that name a child
+belong to devices that no longer exist), so `roundtrip` gained
+`--simulate-equalizerapo-child <clsid>`. It writes that record into the dry run
+only. On CABLE In 16ch with Microsoft's WM GFX APO as the simulated child:
+
+- **After install:** SFX holds the WM GFX APO, MFX holds IsoAPO, and IsoAPO's
+  `PostMixChild` is the WM GFX APO.
+- **After uninstall:** both Equalizer APO classes are back exactly.
+
+Two deliberate bugs (slot not restored, child not taken over) each failed it.
+Without the flag, and without `--replace-equalizerapo`, output is unchanged.
+
+**Pending test, Realtek (owner, when hardware is at hand).** Equalizer APO
+works on this machine's Realtek outputs, by the owner's memory. There its classes
+sit in SFX (`,5`) and EFX (`,7`), upstream's recommended mode for the endpoint is
+`SFX_EFX`, and Realtek's own APOs are in the composite lists `,13`–`,15` and
+`,19`–`,20`. devicetool's default `--mode mfx` would instead write IsoAPO to
+`,6`, a slot Equalizer APO does not use there; `--mode efx` writes `,7`, where
+Equalizer APO is. The test: with something plugged into the Realtek jack,
+install with upstream's mode, play audio, and check `isotone-shm status` shows a
+moving heartbeat and the ring carries processed audio.
+
+**Not handled:**
+
+- **Pre-mix child:** a pre-mix child Equalizer APO hosted in LFX is lost,
+  because upstream's SFX/MFX install deletes LFX.
+- **Not seen live:** none of this has run in audiodg yet.
+
+## 2026-09-13: Code review and fixes
+
+Four read-only reviewers covered the core, IsoAPO and the transport, the
+Equalizer APO backend, and devicetool with the tools: about 60 findings, each
+re-read against the code before acting. The owner asked for everything fixable
+to be fixed, with two decisions: the shared region stays writable by every
+local user (anyone with a login is trusted), and mute is true silence.
+
+Every fix below has a test that fails when that fix alone is reverted, checked
+by reverting each one and rebuilding, unless it is listed under "verified by
+reading" at the end.
+
+**Core** (`core/tests/test_hardening.cpp`, 15 cases, plus a 5.1 subcase in
+`test_speakers.cpp`):
+- Band gain is clamped to ±60 dB and preamp and trims to −120..+60 dB, and a
+  non-finite sample from any filter clears that channel's filter state and
+  outputs silence for the sample. A huge finite value from shared memory used
+  to leave the filters NaN until the stream restarted.
+- A band moved to other channels crossfades out where it was and in where it
+  goes; the mask switched instantly before.
+- A shape change arriving mid-crossfade waits for the fade to finish instead
+  of discarding the outgoing filter.
+- Smoothers and fades advance by the frames actually processed, so a host's
+  buffer size no longer changes how fast parameters move.
+- Preamp and crossfade weight ramp per sample, as bypass and post gain already
+  did.
+- A band with zero or negative width is off in the audio, as it already was in
+  the drawn curve; a width-mode change snaps the width instead of sweeping
+  between units.
+- A dB-slope shelf steeper than 12 dB/oct stays stable at high gain (the term
+  under the square root is held at the value for Q 10).
+- The ring reader takes the capacity from the caller, not the shared header; a
+  writer that lost its claim to another process stops writing.
+- Numbers are read and written with a period whatever the C locale
+  (`std::from_chars`/`to_chars`); frequencies are written so Equalizer APO's
+  Room EQ Wizard rule cannot read `80.125` as 80125 Hz (a trailing zero); widths
+  the importer does not accept for a filter type are exported as the Q that
+  designs the same filter; mute is exported as `Copy: X=0` for every channel and
+  read back as mute.
+- Swap front/rear uses the side speakers on a layout with no backs, such as
+  Windows' default 5.1 (0x60F); it did nothing there before.
+- The random-parameter stress test's fixed peak bound of 1000 was replaced by a
+  runaway bound and a check that the output returns to unity once parameters
+  are flat. The wait-for-the-fade change let high-Q bands hold their shape and
+  one peak reached 1781; the old code's constant restarted fades had kept it
+  lower. RMS over the ten seconds was equal or lower, and nothing grew.
+
+**IsoAPO** (self-test, 12 new checks):
+- Silent buffers go through the child and the processor, zeroed first, so a
+  delay tail plays out and nothing stale waits in the delay line; the output is
+  flagged silent only when it is.
+- Alone, a channel-count change in format negotiation is answered with a
+  suggestion in the output's layout instead of accepted and then refused at
+  lock; a child that declines one probed format is kept.
+- A failed lock unlocks a child that had locked; `LockForProcess` catches
+  exceptions; `Initialize` while locked returns `APOERR_ALREADY_INITIALIZED`
+  (the SDK has no "already locked" code).
+- Equalizer APO's classes are refused as a child; flush-to-zero is set on every
+  call, after the child; class factories count for `DllCanUnloadNow`.
+- The region is seeded before its magic is written, so no other process can
+  write it during seeding; an open that finds a zero magic gives up after 50 ms
+  (it waited 200 sleeps).
+
+**Equalizer APO backend** (`compat_tests`, 7 new cases, and CLI runs):
+- Attach and detach check and change `config.txt` through one handle, retrying a
+  sharing violation (Equalizer APO's own loader retries forever), and refuse a
+  file that is a hard link or reparse point. Atomic writes create their `.tmp`
+  fresh, so a planted link is not written through.
+- The default sandbox is checked before it is created; the guard no longer
+  fails open when `ConfigPath` is unreadable; `loopback` refuses an output path
+  inside the live install (CLI run: refused, no file created).
+- An Include of `Isotone.txt` by absolute path counts as attached.
+- Crossover frequencies use the Room EQ Wizard-safe format (the model-based
+  test compares with Equalizer APO semantics); a mask of 0 gets the default
+  layout; mute is `Copy: X=0`.
+- Failed writes count toward the write coalescer's rate limit.
+- `apply` reports lines it does not model and `Device:` lines it ignored, and
+  takes a full device ID (CLI runs).
+
+**devicetool** (dry-run roundtrips on every present render endpoint, 18
+simulated handoffs, a throwaway HKCU key program):
+- Replacing Equalizer APO restores a slot only with an APO Equalizer APO was
+  actually hosting there, and makes IsoAPO host an APO only when IsoAPO took
+  that APO's slot. Before, an Equalizer APO in SFX/EFX with IsoAPO in MFX put the
+  EFX vendor APO back in EFX and also hosted it: twice. The simulation now
+  checks each vendor APO runs exactly once (or nowhere, when it was not hosted).
+- Without `--mode`, install and repair use the mode of Equalizer APO's post-mix
+  slot where it is on the endpoint (MFX on the cables, EFX on the Realtek
+  outputs), otherwise upstream's recommendation.
+- Uninstall restores the "disable enhancements" flag and removes processing-mode
+  lists install added (recorded in the install record), replaces Equalizer APO
+  classes with what they replaced when Equalizer APO is no longer registered,
+  and succeeds when a driver removed FxProperties.
+- A real install that fails is rolled back; `--replace-equalizerapo` on an
+  already-installed endpoint does the replacement (dry run on CABLE Input:
+  deletes SFX); repair refuses an endpoint Equalizer APO took back and uses the
+  backup directory; a dry run whose registration checks fail reports ok false.
+- The dry run refuses a key creation the ACL would deny Administrators, so it
+  shows upstream's take-ownership fallback; `createKey` does not log a key that
+  already existed; arguments are read as UTF-16 (`wmain`).
+- `install.ps1` is removed: devicetool replaces it, and its uninstall
+  unregistered the DLL for every endpoint.
+
+**Tools:** `isotone-shm` rejects a malformed endpoint (exit 2) and a capture too
+large for a WAV header; `isotone-measure` escapes JSON strings, handles 24-bit
+3-byte and refuses other unsupported mix formats instead of playing an
+uninitialised buffer, and requires `--capture` or `--loopback`.
+
+**Verified by reading only** (no test reaches them): rollback of a failed real
+install, repair's backend refusal and backup directory, the dry-run ok false
+path, the guard's registry fallback, the `LockForProcess` exception catch, the
+seeding order, per-call flush-to-zero, the shm WAV size limit, the measure
+format refusal, and `readValue` on a zero-length value (the old out-of-bounds
+read did not crash, so a functional test passes either way).
+
+**Not changed:** the region's DACL (owner's decision); channel names past the
+layout's count, which match upstream `ChannelHelper::getChannelNames`.
+
+Not yet run live: the rebuilt IsoAPO DLL is not staged, so the audio path
+changes (silent buffers, child hosting) have only run in the self-test.
+
 ---
 
-# Where things stand (end of 2026-09-12)
+# Where things stand (end of 2026-09-13)
 
 ## Done
 
@@ -1025,7 +1221,7 @@ Screens regenerated for band order and the bass management card.
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (127 cases now) |
+| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (144 cases now) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; `compat_tests` 19 cases |
 | 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
@@ -1052,11 +1248,11 @@ core/                  the DSP core: types, biquad design, response evaluation,
                        routing, bass management, delay), APO config
                        parser/formatter, param block schema
                        and the audio ring
-core/tests/            9 test files; reference data from scipy at 4 sample rates
+core/tests/            10 test files; reference data from scipy at 4 sample rates
 tools/gen_reference.py independent scipy implementation that generates it
 tools/check_shm_transport.py  cross-process transport check, runs in CI
 windows/transport/     the named shared mapping, used by the APO and the tools
-windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test, install.ps1
+windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test
 windows/measure/       isotone-measure: endpoint list, stepped-sine measurement
 windows/shmtool/       isotone-shm: status / write / capture on a live region
 windows/devicetool/    isotone-devicetool, with upstream's registration code vendored
@@ -1110,5 +1306,6 @@ Equalizer APO's pre-mix and post-mix classes, the same values as the older
 
 - No commits or pushes without the owner saying so each time.
 - Never modify the owner's live Equalizer APO configuration.
-- Never hand the owner registry code that has not been run. `install.ps1 -DryRun`
-  executes every check unelevated with no side effects.
+- Never hand the owner registry code that has not been run.
+  `isotone-devicetool install|uninstall|repair --dry-run` and `roundtrip` run
+  every check unelevated with no side effects.

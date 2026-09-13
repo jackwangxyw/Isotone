@@ -130,13 +130,16 @@ public:
 		exceptions(std::uncaught_exceptions()) {}
 	~RegistryWriteReport()
 	{
-		if (RegistryHelper::log && std::uncaught_exceptions() == exceptions)
+		if (RegistryHelper::log && !cancelled && std::uncaught_exceptions() == exceptions)
 			RegistryHelper::log->write(operation, key, valuename, data);
 	}
+	// The write turned out to change nothing (a key that already existed).
+	void cancel() { cancelled = true; }
 	RegistryWriteReport(const RegistryWriteReport&) = delete;
 	RegistryWriteReport& operator=(const RegistryWriteReport&) = delete;
 
 private:
 	std::wstring operation, key, valuename, data;
 	int exceptions;
+	bool cancelled = false;
 };

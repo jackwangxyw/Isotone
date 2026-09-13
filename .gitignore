@@ -8,7 +8,7 @@
 # Snapshot of the owner's live Equalizer APO state. Personal settings, not tracked.
 /sim/reference/
 
-# Per-machine endpoint registry backups written by windows/apo/install.ps1.
+# Per-machine endpoint registry backups written by the retired windows/apo/install.ps1.
 # These are local safety copies of one machine's audio configuration, not
 # project data, and restoring one onto a different machine would be wrong.
 /windows/apo/IsoAPO-backup-*.reg

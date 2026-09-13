@@ -38,6 +38,11 @@ public:
 private:
     bool deleted(const std::wstring& normalized) const;
     bool really_exists(const std::wstring& key) const;
+    // Whether the key would be refused to an elevated process: its nearest
+    // existing ancestor denies Administrators subkey creation, and this dry run
+    // has not taken ownership of it and made it writable.
+    bool create_would_be_denied(const std::wstring& key) const;
+    std::set<std::wstring> made_writable_;
 
     std::vector<RegistryOperation> operations_;
     std::set<std::wstring> created_;
