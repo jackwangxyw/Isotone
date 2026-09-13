@@ -62,6 +62,32 @@ struct Band {
     bool        enabled  = true;
 };
 
+enum class Upmix : uint8_t {
+    Off = 0,
+    All,        // front left/right also feed centre, sides and backs
+    NoCentre,   // sides and backs only
+};
+
+// Speaker setup for outputs with more than two channels. Per-speaker values
+// index channels in stream order, like channel_gain_db, and roles (front left,
+// LFE, ...) come from the stream's speaker mask. Channel groups need nothing
+// here: a group is a name for a ChannelMask, and bands already take a mask.
+struct SpeakerSetup {
+    double      delay_ms[kMaxChannels] = {0, 0, 0, 0, 0, 0, 0, 0};  // time alignment
+    ChannelMask inverted = 0;           // polarity
+    ChannelMask muted    = 0;           // mute and solo
+    double      lip_sync_ms = 0.0;      // added to every channel
+    bool        swap_left_right = false;
+    bool        swap_front_rear = false;
+    Upmix       upmix = Upmix::Off;
+    bool        bass_management = false;
+    double      crossover_hz = 80.0;    // 24 dB/oct Linkwitz-Riley
+    // Speakers whose bass below the crossover goes to LFE. Not `small`:
+    // rpcndr.h defines that as a macro.
+    ChannelMask small_speakers = 0;
+    double      lfe_lowpass_hz = 120.0; // 24 dB/oct, on the LFE channel's own content
+};
+
 struct EqState {
     bool              bypass      = false;
     double            preamp_db   = 0.0;
@@ -69,6 +95,7 @@ struct EqState {
     std::vector<Band> bands;                        // unbounded in the core
     double            channel_gain_db[kMaxChannels] = {0, 0, 0, 0, 0, 0, 0, 0};
     bool              mute        = false;
+    SpeakerSetup      speakers;
 };
 
 // True if `band` contributes to output channel `channel`.

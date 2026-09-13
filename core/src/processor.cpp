@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+
+#include "isotone/apo_config.h"
+#include "isotone/speakers.h"
 
 // Flush-to-zero lives in SSE1; denormals-are-zero needs SSE3. MSVC on x64 always
 // has both. GCC and Clang only define the SSE3 intrinsic when the target allows
@@ -49,6 +53,24 @@ inline double step(const BiquadCoeffs& c, double& s1, double& s2, double x) {
     return y;
 }
 
+BiquadCoeffs butterworth2(FilterType type, double fc, double sample_rate) {
+    Band b;
+    b.type  = type;
+    b.fc    = fc;
+    b.width = std::sqrt(0.5);
+    return design(b, sample_rate);
+}
+
+void set_identity(double m[kMaxChannels][kMaxChannels]) {
+    for (uint32_t o = 0; o < kMaxChannels; ++o) {
+        for (uint32_t i = 0; i < kMaxChannels; ++i) {
+            m[o][i] = o == i ? 1.0 : 0.0;
+        }
+    }
+}
+
+double finite_or(double v, double fallback) { return std::isfinite(v) ? v : fallback; }
+
 }  // namespace
 
 uint32_t control_block_frames(double sample_rate) {
@@ -70,7 +92,7 @@ void enable_denormal_flushing() {
 }
 
 void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_frames,
-                           uint32_t max_bands) {
+                           uint32_t max_bands, uint32_t speaker_mask) {
     sample_rate_ = sample_rate > 0.0 ? sample_rate : 48000.0;
     channels_    = channels;
     max_frames_  = max_frames;
@@ -99,6 +121,99 @@ void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_f
     }
     mute_target_   = mute_cur_   = 1.0;
     bypass_target_ = bypass_cur_ = 0.0;
+
+    // Speaker setup.
+    speaker_mask_ = speaker_mask != 0 ? speaker_mask : default_speaker_mask(channels_);
+    lfe_ = speaker_channel(speaker_mask_, channels_, kSpeakerLowFrequency);
+    routed_ = std::min(channels_, kMaxChannels);
+
+    set_identity(mat_target_);
+    set_identity(mat_cur_);
+    set_identity(mat_begin_);
+    mat_settled_ = mat_identity_ = true;
+    mat_active_ = mat_interp_ = false;
+
+    log_xover_target_ = log_xover_cur_ = std::log(80.0);
+    log_lfe_target_   = log_lfe_cur_   = std::log(120.0);
+    recompute_bass_filters();
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        bass_target_[c] = bass_cur_[c] = bass_begin_[c] = 0.0;
+        xover_lp_state_[c].clear();
+        xover_hp_state_[c].clear();
+    }
+    lfe_state_.clear();
+    bass_active_ = false;
+
+    chan_target_.assign(channels_, 1.0);
+    chan_cur_.assign(channels_, 1.0);
+    post_prev_.assign(channels_, 1.0);
+
+    const auto longest = static_cast<uint32_t>(std::ceil(kMaxDelaySeconds * sample_rate_)) + 1;
+    delay_size_ = 1;
+    while (delay_size_ < longest) {
+        delay_size_ <<= 1;
+    }
+    delay_buf_.assign(static_cast<size_t>(channels_) * delay_size_, 0.0f);
+    delay_pos_ = 0;
+    delay_target_.assign(channels_, 0);
+    delay_cur_.assign(channels_, 0);
+    delay_old_.assign(channels_, 0);
+    delay_fade_.assign(channels_, 1.0);
+    delay_fade_step_ = 1.0 / (kCrossfadeSeconds * sample_rate_);
+}
+
+void Processor::recompute_bass_filters() {
+    const double xover = std::exp(log_xover_cur_);
+    xover_lp_ = butterworth2(FilterType::LowPass, xover, sample_rate_);
+    xover_hp_ = butterworth2(FilterType::HighPass, xover, sample_rate_);
+    lfe_lp_   = butterworth2(FilterType::LowPass, std::exp(log_lfe_cur_), sample_rate_);
+}
+
+void Processor::set_speaker_targets(const SpeakerSetup& sp) {
+    // Routing.
+    double routing[kMaxChannels][kMaxChannels];
+    routing_matrix(sp, speaker_mask_, channels_, routing);
+    bool identity = true;
+    bool changed = false;
+    for (uint32_t o = 0; o < kMaxChannels; ++o) {
+        for (uint32_t i = 0; i < kMaxChannels; ++i) {
+            const double v = routing[o][i];
+            identity &= v == (o == i ? 1.0 : 0.0);
+            changed |= v != mat_target_[o][i];
+            mat_target_[o][i] = v;
+        }
+    }
+    mat_identity_ = identity;
+    if (changed) {
+        mat_settled_ = false;
+    }
+
+    // Bass management. The crossover and LFE low-pass keep their previous value
+    // when given a non-finite one, for the same reason as the band parameters.
+    log_xover_target_ = std::log(std::clamp(finite_or(sp.crossover_hz, std::exp(log_xover_target_)),
+                                            kMinBassHz, kMaxBassHz));
+    log_lfe_target_   = std::log(std::clamp(finite_or(sp.lfe_lowpass_hz, std::exp(log_lfe_target_)),
+                                            kMinBassHz, kMaxBassHz));
+    const bool managed = sp.bass_management && lfe_ >= 0;
+    for (uint32_t c = 0; c < routed_; ++c) {
+        const bool redirected = (sp.small_speakers & (ChannelMask{1} << c)) != 0;
+        bass_target_[c] = static_cast<int>(c) == lfe_ ? (managed ? 1.0 : 0.0)
+                                                      : (managed && redirected ? 1.0 : 0.0);
+    }
+
+    // Polarity and speaker mute.
+    for (uint32_t c = 0; c < channels_; ++c) {
+        const ChannelMask bit = c < kMaskChannels ? ChannelMask{1} << c : 0;
+        const double sign = (sp.inverted & bit) != 0 ? -1.0 : 1.0;
+        chan_target_[c] = (sp.muted & bit) != 0 ? 0.0 : sign;
+    }
+
+    // Delay, rounded to whole samples the way Equalizer APO's DelayFilter does.
+    for (uint32_t c = 0; c < channels_; ++c) {
+        const double ms = channel_delay_ms(sp, c, kMaxDelaySeconds * 1000.0);
+        const double samples = std::floor(ms * sample_rate_ / 1000.0 + 0.5);
+        delay_target_[c] = static_cast<uint32_t>(std::min(samples, static_cast<double>(delay_size_ - 1)));
+    }
 }
 
 void Processor::recompute_band(BandSlot& b) {
@@ -217,6 +332,8 @@ void Processor::set_target(const EqState& state) {
     }
     mute_target_   = state.mute ? 0.0 : 1.0;
     bypass_target_ = state.bypass ? 1.0 : 0.0;
+
+    set_speaker_targets(state.speakers);
 }
 
 void Processor::reset() {
@@ -236,6 +353,34 @@ void Processor::reset() {
     }
     for (State& s : state_new_) s.clear();
     for (State& s : state_old_) s.clear();
+
+    std::memcpy(mat_cur_, mat_target_, sizeof(mat_cur_));
+    std::memcpy(mat_begin_, mat_target_, sizeof(mat_begin_));
+    mat_settled_ = true;
+    mat_interp_  = false;
+    mat_active_  = !mat_identity_;
+
+    log_xover_cur_ = log_xover_target_;
+    log_lfe_cur_   = log_lfe_target_;
+    recompute_bass_filters();
+    bass_active_ = false;
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        bass_cur_[c] = bass_begin_[c] = bass_target_[c];
+        bass_active_ |= bass_target_[c] > 0.0;
+        xover_lp_state_[c].clear();
+        xover_hp_state_[c].clear();
+    }
+    lfe_state_.clear();
+
+    for (uint32_t c = 0; c < channels_; ++c) {
+        chan_cur_[c] = chan_target_[c];
+        const double trim = c < kMaxChannels ? db_to_linear(trim_cur_[c]) : 1.0;
+        post_prev_[c] = trim * mute_cur_ * chan_cur_[c];
+        delay_cur_[c] = delay_old_[c] = delay_target_[c];
+        delay_fade_[c] = 1.0;
+    }
+    std::fill(delay_buf_.begin(), delay_buf_.end(), 0.0f);
+    delay_pos_ = 0;
 }
 
 void Processor::advance_smoothers(uint32_t) {
@@ -260,6 +405,66 @@ void Processor::advance_smoothers(uint32_t) {
         }
         recompute_band(b);
     }
+
+    // Routing matrix.
+    if (!mat_settled_) {
+        std::memcpy(mat_begin_, mat_cur_, sizeof(mat_begin_));
+        bool settled = true;
+        for (uint32_t o = 0; o < routed_; ++o) {
+            for (uint32_t i = 0; i < routed_; ++i) {
+                approach(mat_cur_[o][i], mat_target_[o][i], smoothing_coef_);
+                if (near_enough(mat_cur_[o][i], mat_target_[o][i], 1e-6)) {
+                    mat_cur_[o][i] = mat_target_[o][i];
+                } else {
+                    settled = false;
+                }
+            }
+        }
+        mat_settled_ = settled;
+        mat_interp_  = true;
+        mat_active_  = true;
+    } else {
+        mat_interp_ = false;
+        mat_active_ = !mat_identity_;
+    }
+
+    // Bass management.
+    if (!near_enough(log_xover_cur_, log_xover_target_, 1e-9) ||
+        !near_enough(log_lfe_cur_, log_lfe_target_, 1e-9)) {
+        approach(log_xover_cur_, log_xover_target_, smoothing_coef_);
+        approach(log_lfe_cur_, log_lfe_target_, smoothing_coef_);
+        recompute_bass_filters();
+    }
+    bass_active_ = false;
+    for (uint32_t c = 0; c < routed_; ++c) {
+        bass_begin_[c] = bass_cur_[c];
+        approach(bass_cur_[c], bass_target_[c], smoothing_coef_);
+        if (near_enough(bass_cur_[c], bass_target_[c], 1e-6)) {
+            bass_cur_[c] = bass_target_[c];
+        }
+        if (bass_begin_[c] == 0.0 && bass_cur_[c] == 0.0) {
+            // Out of use: start from rest next time, so no stale ringing leaks in.
+            xover_lp_state_[c].clear();
+            xover_hp_state_[c].clear();
+            if (static_cast<int>(c) == lfe_) lfe_state_.clear();
+        } else {
+            bass_active_ = true;
+        }
+    }
+
+    // Polarity and speaker mute.
+    for (uint32_t c = 0; c < channels_; ++c) {
+        approach(chan_cur_[c], chan_target_[c], smoothing_coef_);
+    }
+
+    // A delay change starts when the previous one has finished fading.
+    for (uint32_t c = 0; c < channels_; ++c) {
+        if (delay_fade_[c] >= 1.0 && delay_target_[c] != delay_cur_[c]) {
+            delay_old_[c]  = delay_cur_[c];
+            delay_cur_[c]  = delay_target_[c];
+            delay_fade_[c] = 0.0;
+        }
+    }
 }
 
 bool Processor::is_settling() const {
@@ -277,16 +482,126 @@ bool Processor::is_settling() const {
         if (!near_enough(b.gain_cur,   b.gain_target,   1e-4)) return true;
         if (!near_enough(b.log_w_cur,  b.log_w_target,  1e-6)) return true;
     }
+
+    if (!mat_settled_) return true;
+    if (!near_enough(log_xover_cur_, log_xover_target_, 1e-6)) return true;
+    if (!near_enough(log_lfe_cur_, log_lfe_target_, 1e-6)) return true;
+    for (uint32_t c = 0; c < routed_; ++c) {
+        if (bass_cur_[c] != bass_target_[c]) return true;
+    }
+    for (uint32_t c = 0; c < channels_; ++c) {
+        if (!near_enough(chan_cur_[c], chan_target_[c], 1e-5)) return true;
+        if (delay_cur_[c] != delay_target_[c] || delay_fade_[c] < 1.0) return true;
+    }
     return false;
 }
 
+void Processor::stage_matrix(float* const* planar, uint32_t offset, uint32_t frames) {
+    if (!mat_active_) {
+        return;
+    }
+    double in[kMaxChannels];
+    for (uint32_t n = 0; n < frames; ++n) {
+        const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
+        for (uint32_t i = 0; i < routed_; ++i) {
+            in[i] = planar[i][offset + n];
+        }
+        for (uint32_t o = 0; o < routed_; ++o) {
+            double acc = 0.0;
+            for (uint32_t i = 0; i < routed_; ++i) {
+                const double m = mat_interp_ ? mat_begin_[o][i] + (mat_cur_[o][i] - mat_begin_[o][i]) * t
+                                             : mat_cur_[o][i];
+                acc += m * in[i];
+            }
+            planar[o][offset + n] = static_cast<float>(acc);
+        }
+    }
+}
+
+void Processor::stage_bass(float* const* planar, uint32_t offset, uint32_t frames) {
+    if (!bass_active_) {
+        return;
+    }
+    auto lr4 = [](const BiquadCoeffs& k, Lr4State& s, double x) {
+        return step(k, s.b.s1, s.b.s2, step(k, s.a.s1, s.a.s2, x));
+    };
+    for (uint32_t n = 0; n < frames; ++n) {
+        const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
+        double sub = 0.0;
+        for (uint32_t c = 0; c < routed_; ++c) {
+            if (static_cast<int>(c) == lfe_ || (bass_begin_[c] == 0.0 && bass_cur_[c] == 0.0)) {
+                continue;
+            }
+            // The main speaker keeps what is above the crossover and the sub
+            // takes what is below. The two halves are in phase at every
+            // frequency, so they add back to the input's level.
+            const double m  = bass_begin_[c] + (bass_cur_[c] - bass_begin_[c]) * t;
+            const double x  = planar[c][offset + n];
+            const double lo = lr4(xover_lp_, xover_lp_state_[c], x);
+            const double hi = lr4(xover_hp_, xover_hp_state_[c], x);
+            planar[c][offset + n] = static_cast<float>(x + (hi - x) * m);
+            sub += lo * m;
+        }
+        if (lfe_ >= 0) {
+            const uint32_t c = static_cast<uint32_t>(lfe_);
+            double x = planar[c][offset + n];
+            if (bass_begin_[c] != 0.0 || bass_cur_[c] != 0.0) {
+                const double m = bass_begin_[c] + (bass_cur_[c] - bass_begin_[c]) * t;
+                x += (lr4(lfe_lp_, lfe_state_, x) - x) * m;
+            }
+            planar[c][offset + n] = static_cast<float>(x + sub);
+        }
+    }
+}
+
+void Processor::stage_delay(float* const* planar, uint32_t offset, uint32_t frames) {
+    const uint32_t mask = delay_size_ - 1;
+    for (uint32_t c = 0; c < channels_; ++c) {
+        float* chan = planar[c] + offset;
+        float* ring = delay_buf_.data() + static_cast<size_t>(c) * delay_size_;
+        uint32_t pos = delay_pos_;
+        if (delay_cur_[c] == 0 && delay_fade_[c] >= 1.0) {
+            for (uint32_t n = 0; n < frames; ++n) {
+                ring[pos] = chan[n];
+                pos = (pos + 1) & mask;
+            }
+            continue;
+        }
+        const uint32_t cur = delay_cur_[c];
+        const uint32_t old = delay_old_[c];
+        double fade = delay_fade_[c];
+        for (uint32_t n = 0; n < frames; ++n) {
+            ring[pos] = chan[n];
+            const double now = ring[(pos - cur) & mask];
+            if (fade < 1.0) {
+                fade = std::min(1.0, fade + delay_fade_step_);
+                const double before = ring[(pos - old) & mask];
+                chan[n] = static_cast<float>(before + (now - before) * fade);
+            } else {
+                chan[n] = static_cast<float>(now);
+            }
+            pos = (pos + 1) & mask;
+        }
+        delay_fade_[c] = fade;
+    }
+    delay_pos_ = (delay_pos_ + frames) & mask;
+}
+
 void Processor::process_block(float* const* planar, uint32_t offset, uint32_t frames) {
+    // Order: routing, bass management, EQ with the per-speaker gains, delay.
+    // Speaker EQ therefore acts on what each speaker actually plays, including
+    // the bass that bass management sends to the sub.
+    stage_matrix(planar, offset, frames);
+    stage_bass(planar, offset, frames);
+
     const double preamp = db_to_linear(preamp_cur_);
 
     for (uint32_t c = 0; c < channels_; ++c) {
         // Only the first kMaxChannels channels have a trim; the rest sit at 0 dB.
         const double trim = c < kMaxChannels ? db_to_linear(trim_cur_[c]) : 1.0;
-        const double post = trim * mute_cur_;
+        const double post_begin = post_prev_[c];
+        const double post_end = trim * mute_cur_ * chan_cur_[c];
+        post_prev_[c] = post_end;
         float* chan = planar[c] + offset;
 
         for (uint32_t n = 0; n < frames; ++n) {
@@ -311,9 +626,14 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
                 }
             }
 
-            chan[n] = static_cast<float>(x * post);
+            // Ramped across the block, so a polarity flip or mute is a slope
+            // rather than a step every control block.
+            const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
+            chan[n] = static_cast<float>(x * (post_begin + (post_end - post_begin) * t));
         }
     }
+
+    stage_delay(planar, offset, frames);
 }
 
 void Processor::process(float* const* planar, uint32_t frames) {

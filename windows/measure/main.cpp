@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -210,6 +211,10 @@ public:
     void start() { CHECK(client_->Start(), "render Start"); }
     void stop()  { if (client_) client_->Stop(); }
 
+    // Channel c plays the tone scaled by gains[c]; channels past the list play
+    // it at 1, so an empty list is the same tone everywhere.
+    void set_channel_gains(const std::vector<double>& gains) { gains_ = gains; }
+
     // Writes as many frames of the tone as the buffer has room for.
     void pump(double frequency, double amplitude, double* phase) {
         UINT32 padding = 0;
@@ -226,7 +231,8 @@ public:
             *phase += step;
             if (*phase > 2.0 * kPi) *phase -= 2.0 * kPi;
             for (uint32_t c = 0; c < fmt_.channels; ++c) {
-                write_sample(data, (static_cast<size_t>(n) * fmt_.channels + c), v);
+                const double g = c < gains_.size() ? gains_[c] : 1.0;
+                write_sample(data, (static_cast<size_t>(n) * fmt_.channels + c), v * g);
             }
         }
         render_->ReleaseBuffer(free_frames, 0);
@@ -259,6 +265,7 @@ private:
     WAVEFORMATEX*       format_ = nullptr;
     StreamFormat        fmt_{};
     UINT32              buffer_frames_ = 0;
+    std::vector<double> gains_;
 };
 
 class CaptureStream {
@@ -336,11 +343,12 @@ private:
     StreamFormat         fmt_{};
 };
 
-// Amplitude of a single frequency, measured with a Hann-windowed DFT evaluated at
-// exactly that frequency rather than at a bin centre. The window suppresses the
-// leakage that would otherwise appear when the frequency does not divide evenly
-// into the analysis length, so the result is accurate for any frequency.
-double amplitude_at(const std::vector<float>& x, double frequency, double sample_rate) {
+// A single frequency, measured with a Hann-windowed DFT evaluated at exactly that
+// frequency rather than at a bin centre. The window suppresses the leakage that
+// would otherwise appear when the frequency does not divide evenly into the
+// analysis length, so the result is accurate for any frequency. The magnitude
+// is the amplitude of the sine; the angle is its phase at the window start.
+std::complex<double> dft_at(const std::vector<float>& x, double frequency, double sample_rate) {
     const size_t n = x.size();
     if (n < 64) return 0.0;
 
@@ -353,7 +361,7 @@ double amplitude_at(const std::vector<float>& x, double frequency, double sample
         im -= x[i] * w * std::sin(phase);
         wsum += w;
     }
-    return 2.0 * std::sqrt(re * re + im * im) / wsum;
+    return {2.0 * re / wsum, 2.0 * im / wsum};
 }
 
 double rms(const std::vector<float>& x) {
@@ -429,6 +437,7 @@ struct MeasureOptions {
     double settle_s   = 0.30;
     double measure_s  = 0.30;
     std::vector<double> frequencies;
+    std::vector<double> channel_gains;
     bool   json       = false;
     std::string label;
 };
@@ -448,6 +457,7 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
     RenderStream render;
     CaptureStream capture;
     render.open(render_device);
+    render.set_channel_gains(opt.channel_gains);
     capture.open(capture_device, opt.loopback);
 
     const StreamFormat rf = render.format();
@@ -467,6 +477,10 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
     double phase = 0.0;
     std::vector<std::vector<double>> results;   // [channel][frequency]
     results.resize(cf.channels);
+    // Phase of each channel relative to channel 0, in degrees within (-180, 180].
+    // All channels come from one capture stream, so they share a clock: a delay
+    // of d seconds on channel c reads as -360 * f * d, an inverted channel as 180.
+    std::vector<std::vector<double>> phases(cf.channels);
 
     for (double freq : opt.frequencies) {
         // Settle: keep the tone running but throw the capture away, so the
@@ -487,19 +501,25 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
             Sleep(10);
         }
 
+        std::complex<double> reference = 0.0;
         for (uint32_t c = 0; c < cf.channels; ++c) {
             double db = -200.0;
+            std::complex<double> x = 0.0;
             if (c < captured.size() && !captured[c].empty()) {
-                const double a = amplitude_at(captured[c], freq, cf.sample_rate);
+                x = dft_at(captured[c], freq, cf.sample_rate);
+                const double a = std::abs(x);
                 db = a > 0.0 ? 20.0 * std::log10(a) : -200.0;
             }
+            if (c == 0) reference = x;
             results[c].push_back(db);
+            phases[c].push_back(std::arg(x * std::conj(reference)) * 180.0 / kPi);
         }
 
         if (!opt.json) {
             std::printf("%10.2f Hz", freq);
             for (uint32_t c = 0; c < cf.channels; ++c) {
                 std::printf("   ch%u %+8.3f dB", c, results[c].back());
+                if (c > 0) std::printf(" %+7.2f deg", phases[c].back());
             }
             std::printf("\n");
             std::fflush(stdout);
@@ -528,6 +548,14 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
             std::printf("    [");
             for (size_t i = 0; i < results[c].size(); ++i) {
                 std::printf("%s%.6f", i ? ", " : "", results[c][i]);
+            }
+            std::printf("]%s\n", c + 1 < cf.channels ? "," : "");
+        }
+        std::printf("  ],\n  \"phase_deg\": [\n");
+        for (uint32_t c = 0; c < cf.channels; ++c) {
+            std::printf("    [");
+            for (size_t i = 0; i < phases[c].size(); ++i) {
+                std::printf("%s%.6f", i ? ", " : "", phases[c][i]);
             }
             std::printf("]%s\n", c + 1 < cf.channels ? "," : "");
         }
@@ -565,11 +593,14 @@ void usage() {
         "      Show active render and capture endpoints.\n"
         "\n"
         "  measure --render <id|substring> [--capture <id|substring>] [options]\n"
-        "      Play a stepped sine and report the measured level at each frequency.\n"
+        "      Play a stepped sine and report the measured level at each frequency,\n"
+        "      and each channel's phase relative to channel 0.\n"
         "      --loopback         capture via WASAPI loopback on the render endpoint\n"
         "                         instead of from a separate capture device\n"
         "      --freqs a,b,c      frequencies in Hz (default: 31 third-octave points)\n"
         "      --amplitude x      tone amplitude, 0..1 (default 0.25)\n"
+        "      --channel-gains a,b,c  per render channel, multiplies the amplitude\n"
+        "                         (default 1 for every channel)\n"
         "      --settle s         seconds to discard before each measurement (default 0.30)\n"
         "      --window s         seconds to measure (default 0.30)\n"
         "      --label text       copied into the JSON output\n"
@@ -628,6 +659,8 @@ int main(int argc, char** argv) {
             opt.measure_s     = std::strtod(arg("--window", "0.30"), nullptr);
             const char* freqs = arg("--freqs");
             opt.frequencies   = freqs ? parse_frequencies(freqs) : default_frequencies();
+            const char* gains = arg("--channel-gains");
+            if (gains) opt.channel_gains = parse_frequencies(gains);
             rc = cmd_measure(enumerator, opt);
         }
     } else if (command == "play") {

@@ -6,12 +6,13 @@
 // writes parameters while a measurement runs, and reads the ring back.
 //
 //   isotone-shm status  <endpoint>
-//   isotone-shm write   <endpoint> <config.txt | -> [--bypass]
+//   isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]
 //   isotone-shm capture <endpoint> <seconds> <out.wav>
 //
 // <endpoint> is an endpoint GUID, with or without braces, or a full device ID
-// such as {0.0.0.00000000}.{guid}. Add --local to use the Local\ namespace,
-// which is where the self-test build of the APO puts its region.
+// such as {0.0.0.00000000}.{guid}. SETTINGS is the speaker setup text of
+// isotone/speakers.h, quoted as one argument. Add --local to use the Local\
+// namespace, which is where the self-test build of the APO puts its region.
 //
 // Output is one JSON object on stdout. Exit code 0 on success, 1 when the region
 // cannot be opened or the input is unusable, 2 on bad arguments.
@@ -35,6 +36,7 @@
 #include "isotone/apo_config.h"
 #include "isotone/audio_ring.h"
 #include "isotone/param_block.h"
+#include "isotone/speakers.h"
 #include "shared_mapping.h"
 
 namespace {
@@ -43,7 +45,7 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  isotone-shm status  <endpoint> [--local]\n"
-                 "  isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--local]\n"
+                 "  isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--local]\n"
                  "  isotone-shm capture <endpoint> <seconds> <out.wav> [--local]\n");
     return 2;
 }
@@ -138,12 +140,12 @@ int cmd_status(const std::wstring& name) {
                   static_cast<unsigned long long>(ring->writer));
 
     std::printf("{\"name\":%s,\"open\":true,\"version\":%u,\"sample_rate\":%u,\"channels\":%u,"
-                "\"host_state\":\"%s\",\"heartbeat\":%u,\"heartbeat_advancing\":%s,"
+                "\"speaker_mask\":\"0x%x\",\"host_state\":\"%s\",\"heartbeat\":%u,\"heartbeat_advancing\":%s,"
                 "\"seq\":%u,\"params_consistent\":%s,\"bypass\":%s,\"mute\":%s,"
                 "\"preamp_db\":%g,\"band_count\":%u,"
                 "\"ring\":{\"writer\":\"%s\",\"channels\":%u,\"capacity\":%u,\"write_index\":%u}}\n",
                 json_string(narrow(name)).c_str(), b->hdr.version, b->hdr.sample_rate,
-                b->hdr.channels, host_state_name(b->hdr.host_state), beat1,
+                b->hdr.channels, b->hdr.speaker_mask, host_state_name(b->hdr.host_state), beat1,
                 beat1 != beat0 ? "true" : "false", copy.hdr.seq, consistent ? "true" : "false",
                 copy.bypass ? "true" : "false", copy.mute ? "true" : "false",
                 static_cast<double>(copy.preamp_db),
@@ -151,7 +153,8 @@ int cmd_status(const std::wstring& name) {
     return 0;
 }
 
-int cmd_write(const std::wstring& name, const std::string& path, bool bypass) {
+int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
+              const isotone::SpeakerSetup& speakers) {
     std::string text;
     if (path == "-") {
         std::ostringstream ss;
@@ -174,17 +177,16 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass) {
         return 1;
     }
 
-    // Channel names resolve against the device's layout. The header publishes
-    // the channel count but not the speaker mask, so this uses upstream's
-    // default mask for that count, which is also what upstream does for a
-    // stream that reports none.
+    // Channel names resolve against the device's layout, which the host
+    // publishes in the header.
     isotone::ChannelLayout layout;
     if (mapping.params()->hdr.channels != 0) {
         layout.channels = mapping.params()->hdr.channels;
-        layout.speaker_mask = isotone::default_speaker_mask(layout.channels);
+        layout.speaker_mask = mapping.params()->hdr.speaker_mask;
     }
     isotone::ApoParseResult parsed = isotone::parse_apo_config(text, layout);
     parsed.state.bypass = bypass;
+    parsed.state.speakers = speakers;
 
     // Say so rather than silently truncate: the block holds a fixed number.
     if (parsed.state.bands.size() > isotone::kParamMaxBands) {
@@ -213,10 +215,11 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass) {
     unsupported += "]";
 
     std::printf("{\"written\":true,\"seq\":%u,\"bands\":%zu,\"preamp_db\":%g,\"bypass\":%s,"
-                "\"layout\":{\"channels\":%u,\"speaker_mask\":\"0x%x\"},"
+                "\"layout\":{\"channels\":%u,\"speaker_mask\":\"0x%x\"},\"speakers\":%s,"
                 "\"warnings\":%s,\"unsupported\":%s}\n",
                 mapping.params()->hdr.seq, parsed.state.bands.size(), parsed.state.preamp_db,
-                bypass ? "true" : "false", layout.channels, layout.speaker_mask, warnings.c_str(),
+                bypass ? "true" : "false", layout.channels, layout.speaker_mask,
+                json_string(isotone::format_speaker_setup(speakers)).c_str(), warnings.c_str(),
                 unsupported.c_str());
     return 0;
 }
@@ -303,10 +306,18 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
 int main(int argc, char** argv) {
     std::vector<std::string> args;
     bool local = false, bypass = false;
+    isotone::SpeakerSetup speakers;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--local") local = true;
         else if (a == "--bypass") bypass = true;
+        else if (a == "--speakers") {
+            std::string error;
+            if (i + 1 == argc || !isotone::parse_speaker_setup(argv[++i], &speakers, &error)) {
+                if (!error.empty()) std::fprintf(stderr, "%s\n", error.c_str());
+                return usage();
+            }
+        }
         else args.push_back(a);
     }
     if (args.size() < 2) {
@@ -319,7 +330,7 @@ int main(int argc, char** argv) {
         return cmd_status(name);
     }
     if (args[0] == "write" && args.size() == 3) {
-        return cmd_write(name, args[2], bypass);
+        return cmd_write(name, args[2], bypass, speakers);
     }
     if (args[0] == "capture" && args.size() == 4) {
         char* end = nullptr;

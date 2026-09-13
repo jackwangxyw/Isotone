@@ -27,6 +27,13 @@ inline constexpr double kCrossfadeSeconds     = 0.010;
 // 0.67 ms; the count scales with the rate to hold that interval.
 inline constexpr uint32_t kControlBlockAt48k = 32;
 
+// Longest delay a channel can have, speaker delay and lip sync together.
+inline constexpr double kMaxDelaySeconds = 1.0;
+
+// Range of the bass-management crossover and the LFE low-pass.
+inline constexpr double kMinBassHz = 20.0;
+inline constexpr double kMaxBassHz = 500.0;
+
 uint32_t control_block_frames(double sample_rate);
 
 // Turns on flush-to-zero and denormals-are-zero for the calling thread. A host
@@ -41,9 +48,11 @@ public:
     Processor() = default;
 
     // Reserves everything process() will touch. Safe to call again to change
-    // rate or channel count; it is not real-time safe.
+    // rate or channel count; it is not real-time safe. `speaker_mask` names the
+    // speaker on each channel (speakers.h); 0 means the usual layout for the
+    // channel count.
     void initialize(double sample_rate, uint32_t channels, uint32_t max_frames,
-                    uint32_t max_bands = 64);
+                    uint32_t max_bands = 64, uint32_t speaker_mask = 0);
 
     // Sets the destination for every smoothed parameter. Bands beyond
     // max_bands() are ignored. Real-time safe: no allocation.
@@ -101,10 +110,23 @@ private:
         bool occupied = false;
     };
 
+    // Two identical second-order Butterworth sections in series: a 24 dB/oct
+    // Linkwitz-Riley filter.
+    struct Lr4State {
+        State a, b;
+        void clear() { a.clear(); b.clear(); }
+    };
+
     void recompute_band(BandSlot& b);
     void advance_smoothers(uint32_t frames);
     void begin_crossfade(uint32_t index);
     void process_block(float* const* planar, uint32_t offset, uint32_t frames);
+
+    void set_speaker_targets(const SpeakerSetup& sp);
+    void recompute_bass_filters();
+    void stage_matrix(float* const* planar, uint32_t offset, uint32_t frames);
+    void stage_bass(float* const* planar, uint32_t offset, uint32_t frames);
+    void stage_delay(float* const* planar, uint32_t offset, uint32_t frames);
 
     double   sample_rate_ = 48000.0;
     uint32_t channels_    = 0;
@@ -130,6 +152,47 @@ private:
     std::vector<float>  dry_;        // one control block of pre-EQ audio, per channel
     std::vector<float>  scratch_;    // interleaving scratch
     std::vector<float*> pointers_;   // planar pointers into scratch_
+
+    // ---- Speaker setup.
+    uint32_t speaker_mask_ = 0;
+    int      lfe_ = -1;     // LFE channel, -1 when the stream has none
+    uint32_t routed_ = 0;   // channels the routing and bass stages cover: min(channels, kMaxChannels)
+
+    // Swaps and upmix as one matrix, out[o] = sum mat[o][i] * in[i]. While it
+    // moves it is interpolated across each control block from mat_begin_.
+    double mat_target_[kMaxChannels][kMaxChannels] = {};
+    double mat_cur_[kMaxChannels][kMaxChannels]    = {};
+    double mat_begin_[kMaxChannels][kMaxChannels]  = {};
+    bool   mat_settled_  = true;
+    bool   mat_identity_ = true;   // target is identity
+    bool   mat_active_   = false;  // this block needs the stage
+    bool   mat_interp_   = false;  // this block interpolates from mat_begin_
+
+    // Bass management. bass_*[c] is a small speaker's share of redirection, or
+    // for the LFE channel, how much of its low-pass is applied.
+    double log_xover_target_ = 0.0, log_xover_cur_ = 0.0;
+    double log_lfe_target_   = 0.0, log_lfe_cur_   = 0.0;
+    BiquadCoeffs xover_lp_, xover_hp_, lfe_lp_;
+    double bass_target_[kMaxChannels] = {};
+    double bass_cur_[kMaxChannels]    = {};
+    double bass_begin_[kMaxChannels]  = {};
+    bool   bass_active_ = false;
+    Lr4State xover_lp_state_[kMaxChannels];
+    Lr4State xover_hp_state_[kMaxChannels];
+    Lr4State lfe_state_;
+
+    // Polarity and speaker mute as a signed linear gain per channel, and the
+    // post gain each channel's previous block ended on, so a block ramps from it.
+    std::vector<double> chan_target_, chan_cur_, post_prev_;
+
+    // Delay. Each channel has a ring that is always written, so turning a delay
+    // on reads real history. A change crossfades from the old tap to the new.
+    std::vector<float>    delay_buf_;   // [channel * delay_size_ + index]
+    uint32_t              delay_size_ = 1;   // power of two
+    uint32_t              delay_pos_  = 0;
+    std::vector<uint32_t> delay_target_, delay_cur_, delay_old_;
+    std::vector<double>   delay_fade_;  // 1 when not fading
+    double                delay_fade_step_ = 1.0;   // per sample
 };
 
 }  // namespace isotone

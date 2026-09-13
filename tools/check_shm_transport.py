@@ -5,7 +5,8 @@
 Runs the self-test build of IsoAPO in real time in one process
 (`isotone-apo-selftest --serve`) and drives its region from another with
 `isotone-shm`, the way the UI will: status and heartbeat, a parameter write, a
-bypass write, and audio captured back out of the ring and measured. A separate
+bypass write, speaker settings, and audio captured back out of the ring and
+measured. A separate
 process matters, because it is the only way to exercise the mapping's DACL the
 way the UI will meet it.
 
@@ -47,8 +48,8 @@ def find(build: pathlib.Path, name: str) -> pathlib.Path:
     return hits[0]
 
 
-def level_1k_db(path: pathlib.Path, amplitude: float) -> float:
-    """Level of channel 0 at 1 kHz relative to `amplitude`, by a Hann-windowed
+def tone_1k(path: pathlib.Path, amplitude: float, channel: int = 0) -> complex:
+    """A channel's 1 kHz component relative to `amplitude`, by a Hann-windowed
     single-bin DFT, the same measurement the C++ self test uses."""
     data = path.read_bytes()
     fmt = data.find(b"fmt ")
@@ -56,11 +57,20 @@ def level_1k_db(path: pathlib.Path, amplitude: float) -> float:
     rate = struct.unpack_from("<I", data, fmt + 12)[0]
     d = data.find(b"data")
     n = struct.unpack_from("<I", data, d + 4)[0]
-    x = np.frombuffer(data, dtype="<f4", count=n // 4, offset=d + 8).reshape(-1, channels)[:, 0]
+    x = np.frombuffer(data, dtype="<f4", count=n // 4, offset=d + 8).reshape(-1, channels)[:, channel]
     i = np.arange(len(x))
     w = 0.5 - 0.5 * np.cos(2 * np.pi * i / (len(x) - 1))
     z = np.sum(x * w * np.exp(-2j * np.pi * 1000.0 * i / rate))
-    return float(20 * np.log10(2 * abs(z) / w.sum() / amplitude))
+    return complex(2 * z / w.sum() / amplitude)
+
+
+def level_1k_db(path: pathlib.Path, amplitude: float, channel: int = 0) -> float:
+    return float(20 * np.log10(max(abs(tone_1k(path, amplitude, channel)), 1e-10)))
+
+
+def phase_1k_deg(path: pathlib.Path, channel: int) -> float:
+    """Phase of `channel` at 1 kHz relative to channel 0, in (-180, 180]."""
+    return float(np.degrees(np.angle(tone_1k(path, 1, channel) * np.conj(tone_1k(path, 1, 0)))))
 
 
 def main() -> int:
@@ -86,6 +96,9 @@ def main() -> int:
         check(shm("status")[0] == 2, "missing endpoint exits 2")
         check(shm("capture", guid, "-1", "x.wav", "--local")[0] == 2, "negative capture length exits 2")
         check(shm("frobnicate", guid, "--local")[0] == 2, "unknown command exits 2")
+        check(shm("write", guid, "-", "--local", "--speakers")[0] == 2, "--speakers without a value exits 2")
+        check(shm("write", guid, "-", "--local", "--speakers", "upmix=sideways")[0] == 2,
+              "unreadable --speakers exits 2")
 
         print("before any engine")
         code, js = shm("status", guid, "--local")
@@ -93,14 +106,14 @@ def main() -> int:
               "status reports engine idle")
 
         print("with an instance served from another process")
-        server = subprocess.Popen([str(selftest), "--serve", guid, "9"], cwd=selftest.parent,
+        server = subprocess.Popen([str(selftest), "--serve", guid, "14"], cwd=selftest.parent,
                                   stdout=subprocess.PIPE, text=True)
         time.sleep(1.3)
 
         code, js = shm("status", guid, "--local")
         check(code == 0 and js["open"] and js["heartbeat_advancing"], "status sees a live heartbeat")
-        check(js.get("sample_rate") == 48000 and js.get("channels") == 2
-              and js.get("host_state") == "running", "rate, channels and state are published")
+        check(js.get("sample_rate") == 48000 and js.get("channels") == 2 and js.get("speaker_mask") == "0x3"
+              and js.get("host_state") == "running", "rate, channels, layout and state are published")
         check(js.get("band_count") == 1 and js["ring"]["channels"] == 2
               and js["ring"]["writer"] != "0x0000000000000000", "seeded band and a claimed ring")
 
@@ -131,6 +144,38 @@ def main() -> int:
             check(abs(lvl) < 0.01, "bypassed ring audio measures 0 dB", f"{lvl:+.3f} dB")
         else:
             check(False, "capture after bypass")
+
+        # 0.25 ms is 12 samples at 48 kHz: -90 degrees at 1 kHz.
+        code, js = shm("write", guid, str(cfg), "--local", "--speakers", "delay_ms=0,0.25")
+        check(code == 0 and js["written"] and js["speakers"].startswith("delay_ms=0,0.25,"),
+              "write with --speakers delaying channel 1")
+        time.sleep(0.3)
+        code, js = shm("capture", guid, "1", str(wav), "--local")
+        if code == 0:
+            ph = phase_1k_deg(wav, 1)
+            check(abs(ph + 90.0) < 0.1 and abs(level_1k_db(wav, 0.5, 1) + 6.0) < 0.01,
+                  "channel 1 lags 90 degrees at -6 dB", f"{ph:+.2f} deg")
+        else:
+            check(False, "capture after the delay")
+
+        code, js = shm("write", guid, str(cfg), "--local", "--speakers", "delay_ms=0,0.25 inverted=0x2")
+        time.sleep(0.3)
+        code, js = shm("capture", guid, "1", str(wav), "--local")
+        if code == 0:
+            ph = phase_1k_deg(wav, 1)
+            check(abs(ph - 90.0) < 0.1, "inverting it moves it to +90 degrees", f"{ph:+.2f} deg")
+        else:
+            check(False, "capture after the inversion")
+
+        code, js = shm("write", guid, str(cfg), "--local", "--speakers", "muted=0x2")
+        time.sleep(0.3)
+        code, js = shm("capture", guid, "1", str(wav), "--local")
+        if code == 0:
+            l0, l1 = level_1k_db(wav, 0.5, 0), level_1k_db(wav, 0.5, 1)
+            check(abs(l0 + 6.0) < 0.01 and l1 < -120.0, "muting channel 1 leaves channel 0 alone",
+                  f"{l0:+.3f} / {l1:+.1f} dB")
+        else:
+            check(False, "capture after the mute")
 
         code, js = shm("write", guid, "-", "--local", stdin="")
         check(code == 0 and js["bands"] == 0, "an empty config on stdin clears the bands")

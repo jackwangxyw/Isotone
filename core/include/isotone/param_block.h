@@ -23,8 +23,9 @@ namespace isotone {
 
 inline constexpr uint32_t kParamMagic   = 0x544F5349u;  // 'ISOT' little-endian
 // Covers the whole shared region below, not only ParamBlock. 2: audio ring
-// header gained pending_index, epoch and writer. 3: mono removed.
-inline constexpr uint32_t kParamVersion = 3u;
+// header gained pending_index, epoch and writer. 3: mono removed. 4: speaker
+// setup.
+inline constexpr uint32_t kParamVersion = 4u;
 inline constexpr uint32_t kParamMaxBands = 64u;
 
 enum class HostState : uint32_t {
@@ -59,18 +60,39 @@ struct ParamBlockHeader {
     uint32_t channels;         // written by the host
     uint32_t host_state;       // HostState, written by the host
     uint32_t host_heartbeat;   // incremented by the host once per process call
+    uint32_t speaker_mask;     // written by the host; which speaker each channel is (speakers.h)
+    uint32_t host_reserved[3];
 };
-static_assert(sizeof(ParamBlockHeader) == 32, "header layout must stay fixed");
+static_assert(sizeof(ParamBlockHeader) == 48, "header layout must stay fixed");
+
+// SpeakerSetup flattened. Masks are ChannelMask; upmix is Upmix.
+struct ParamSpeakers {
+    float    delay_ms[kMaxChannels];
+    uint32_t inverted;
+    uint32_t muted;
+    float    lip_sync_ms;
+    uint32_t flags;             // kSpeakerFlag*
+    uint32_t upmix;
+    float    crossover_hz;
+    uint32_t small_speakers;
+    float    lfe_lowpass_hz;
+    float    reserved[4];
+};
+static_assert(sizeof(ParamSpeakers) == 80, "ParamSpeakers layout must stay fixed");
+
+inline constexpr uint32_t kSpeakerFlagSwapLeftRight = 1u << 0;
+inline constexpr uint32_t kSpeakerFlagSwapFrontRear = 1u << 1;
+inline constexpr uint32_t kSpeakerFlagBassManagement = 1u << 2;
 
 struct ParamBlock {
     ParamBlockHeader hdr;
-    uint32_t  bypass;
-    uint32_t  mute;
-    uint32_t  band_count;
-    float     preamp_db;
-    float     channel_gain_db[kMaxChannels];
-    float     reserved[4];      // keeps bands[] 16-byte aligned and leaves room
-    ParamBand bands[kParamMaxBands];
+    uint32_t      bypass;
+    uint32_t      mute;
+    uint32_t      band_count;
+    float         preamp_db;
+    float         channel_gain_db[kMaxChannels];
+    ParamSpeakers speakers;
+    ParamBand     bands[kParamMaxBands];
 };
 static_assert(sizeof(ParamBlock) % 16 == 0, "ParamBlock should stay 16-byte aligned");
 static_assert(std::atomic_ref<uint32_t>::is_always_lock_free,
@@ -107,9 +129,10 @@ bool shared_region_valid(const void* base, size_t bytes);
 // Host side. The header fields after `seq` belong to the host; the UI only
 // reads them. Several APO instances can share one region, so updates are atomic.
 inline void host_publish_format(ParamBlock* block, uint32_t sample_rate, uint32_t channels,
-                                HostState state) {
+                                uint32_t speaker_mask, HostState state) {
     std::atomic_ref<uint32_t>(block->hdr.sample_rate).store(sample_rate, std::memory_order_relaxed);
     std::atomic_ref<uint32_t>(block->hdr.channels).store(channels, std::memory_order_relaxed);
+    std::atomic_ref<uint32_t>(block->hdr.speaker_mask).store(speaker_mask, std::memory_order_relaxed);
     std::atomic_ref<uint32_t>(block->hdr.host_state)
         .store(static_cast<uint32_t>(state), std::memory_order_relaxed);
 }

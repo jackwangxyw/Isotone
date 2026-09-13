@@ -377,11 +377,12 @@ TEST_CASE("the shared region is self-describing") {
 TEST_CASE("host header updates leave the parameter seqlock alone") {
     ParamBlock b{};
     init_param_block(&b);
-    host_publish_format(&b, 96000, 6, HostState::Running);
+    host_publish_format(&b, 96000, 6, 0x60F, HostState::Running);
     host_heartbeat(&b);
     host_heartbeat(&b);
     CHECK(b.hdr.sample_rate == 96000);
     CHECK(b.hdr.channels == 6);
+    CHECK(b.hdr.speaker_mask == 0x60F);
     CHECK(b.hdr.host_state == static_cast<uint32_t>(HostState::Running));
     CHECK(b.hdr.host_heartbeat == 2);
     CHECK(param_block_seq(&b) == 0);

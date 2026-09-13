@@ -5,6 +5,7 @@ add_library(isotone_core STATIC
     src/param_block.cpp
     src/processor.cpp
     src/response.cpp
+    src/speakers.cpp
 )
 
 target_include_directories(isotone_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

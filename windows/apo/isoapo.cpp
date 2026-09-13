@@ -267,6 +267,10 @@ HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** in
     // Windows tears down and recreates an APO whenever the device format
     // changes, so every LockForProcess is a cold start (plan 5.4).
     channels_ = format.dwSamplesPerFrame;
+    // A stream that reports no mask gets upstream's default for its channel
+    // count, which is also what the processor assumes for 0.
+    const uint32_t speaker_mask =
+        format.dwChannelMask != 0 ? format.dwChannelMask : isotone::default_speaker_mask(channels_);
     if (!mapping_.is_open()) {
         load_parameters();
     } else if (isotone::param_block_read(mapping_.params(), &block_, 1000)) {
@@ -282,13 +286,13 @@ HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** in
     state_.bands.reserve(isotone::kParamMaxBands);
 
     processor_.initialize(format.fFramesPerSecond, channels_, inputs[0]->u32MaxFrameCount,
-                          isotone::kParamMaxBands);
+                          isotone::kParamMaxBands, speaker_mask);
     processor_.set_target(state_);
     processor_.reset();
 
     if (mapping_.is_open()) {
         isotone::host_publish_format(mapping_.params(), static_cast<uint32_t>(format.fFramesPerSecond),
-                                     channels_, isotone::HostState::Running);
+                                     channels_, speaker_mask, isotone::HostState::Running);
         ring_.set_channels(channels_);
         ring_.claim(ring_token_);
     }

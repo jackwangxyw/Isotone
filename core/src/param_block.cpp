@@ -56,6 +56,23 @@ void to_param_block(const EqState& state, ParamBlock* out) {
         out->channel_gain_db[c] = static_cast<float>(state.channel_gain_db[c]);
     }
 
+    const SpeakerSetup& sp = state.speakers;
+    ParamSpeakers& ps = out->speakers;
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        ps.delay_ms[c] = static_cast<float>(sp.delay_ms[c]);
+    }
+    ps.inverted       = sp.inverted;
+    ps.muted          = sp.muted;
+    ps.lip_sync_ms    = static_cast<float>(sp.lip_sync_ms);
+    ps.flags          = (sp.swap_left_right ? kSpeakerFlagSwapLeftRight : 0u) |
+                        (sp.swap_front_rear ? kSpeakerFlagSwapFrontRear : 0u) |
+                        (sp.bass_management ? kSpeakerFlagBassManagement : 0u);
+    ps.upmix          = static_cast<uint32_t>(sp.upmix);
+    ps.crossover_hz   = static_cast<float>(sp.crossover_hz);
+    ps.small_speakers = sp.small_speakers;
+    ps.lfe_lowpass_hz = static_cast<float>(sp.lfe_lowpass_hz);
+    std::memset(ps.reserved, 0, sizeof(ps.reserved));
+
     const uint32_t count =
         static_cast<uint32_t>(std::min<size_t>(state.bands.size(), kParamMaxBands));
     out->band_count = count;
@@ -87,6 +104,24 @@ void from_param_block(const ParamBlock& block, EqState* out) {
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         out->channel_gain_db[c] = block.channel_gain_db[c];
     }
+
+    // Values are range-checked where they are used (Processor::set_target); only
+    // the enum needs clamping here so it is never out of range as a type.
+    const ParamSpeakers& ps = block.speakers;
+    SpeakerSetup& sp = out->speakers;
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        sp.delay_ms[c] = ps.delay_ms[c];
+    }
+    sp.inverted        = ps.inverted;
+    sp.muted           = ps.muted;
+    sp.lip_sync_ms     = ps.lip_sync_ms;
+    sp.swap_left_right = (ps.flags & kSpeakerFlagSwapLeftRight) != 0;
+    sp.swap_front_rear = (ps.flags & kSpeakerFlagSwapFrontRear) != 0;
+    sp.upmix           = static_cast<Upmix>(std::min<uint32_t>(ps.upmix, 2));
+    sp.bass_management = (ps.flags & kSpeakerFlagBassManagement) != 0;
+    sp.crossover_hz    = ps.crossover_hz;
+    sp.small_speakers  = ps.small_speakers;
+    sp.lfe_lowpass_hz  = ps.lfe_lowpass_hz;
 
     const uint32_t count = std::min(block.band_count, kParamMaxBands);
     out->bands.clear();

@@ -581,6 +581,27 @@ int main(int argc, char** argv) {
         ui_write(shared, peaking_state(1000.0, -6.0, 1.0));
     }
 
+    {
+        // The speaker setup travels in the same block: delay channel 0 by 62
+        // samples (1.3 ms) and invert channel 1, with no bands so the samples
+        // can be compared directly.
+        isotone::EqState speakers;
+        speakers.speakers.delay_ms[0] = 1.3;
+        speakers.speakers.inverted = isotone::ChannelMask{1} << 1;
+        ui_write(shared, speakers);
+        captured = run_sine(first.rt, buffer, 1000.0, 48000);
+        double err0 = 0.0, err1 = 0.0;
+        for (size_t i = 24000; i < 48000; ++i) {
+            const double now = std::sin(2.0 * kPi * 1000.0 * static_cast<double>(i) / kRate);
+            const double late = std::sin(2.0 * kPi * 1000.0 * static_cast<double>(i - 62) / kRate);
+            err0 = (std::max)(err0, std::abs(captured[i * kChannels] - late));
+            err1 = (std::max)(err1, std::abs(captured[i * kChannels + 1] + now));
+        }
+        check(!captured.empty() && err0 < 1e-4, "a speaker delay written by the UI delays that channel");
+        check(!captured.empty() && err1 < 1e-4, "a polarity flip written by the UI inverts that channel");
+        ui_write(shared, peaking_state(1000.0, -6.0, 1.0));
+    }
+
     // ------------------------------------------------------------------
     std::printf("\nseveral instances on one endpoint\n");
 
@@ -667,6 +688,8 @@ int main(int argc, char** argv) {
                  "LockForProcess at 12 channels");
         check(shared->hdr.channels == kWide && ring->channels == isotone::kMaxChannels,
               "the header says 12 channels and the ring stores the first 8");
+        check(shared->hdr.speaker_mask == wide_format.dwChannelMask,
+              "the header carries the stream's speaker mask");
 
         // Channel c carries amplitude (c + 1) / 16, so a channel read from the
         // wrong slot shows up as a level error.
