@@ -139,14 +139,14 @@ int cmd_status(const std::wstring& name) {
 
     std::printf("{\"name\":%s,\"open\":true,\"version\":%u,\"sample_rate\":%u,\"channels\":%u,"
                 "\"host_state\":\"%s\",\"heartbeat\":%u,\"heartbeat_advancing\":%s,"
-                "\"seq\":%u,\"params_consistent\":%s,\"bypass\":%s,\"mute\":%s,\"mono\":%s,"
+                "\"seq\":%u,\"params_consistent\":%s,\"bypass\":%s,\"mute\":%s,"
                 "\"preamp_db\":%g,\"band_count\":%u,"
                 "\"ring\":{\"writer\":\"%s\",\"channels\":%u,\"capacity\":%u,\"write_index\":%u}}\n",
                 json_string(narrow(name)).c_str(), b->hdr.version, b->hdr.sample_rate,
                 b->hdr.channels, host_state_name(b->hdr.host_state), beat1,
                 beat1 != beat0 ? "true" : "false", copy.hdr.seq, consistent ? "true" : "false",
                 copy.bypass ? "true" : "false", copy.mute ? "true" : "false",
-                copy.mono ? "true" : "false", static_cast<double>(copy.preamp_db),
+                static_cast<double>(copy.preamp_db),
                 copy.band_count, writer, ring->channels, ring->capacity, ring->write_index);
     return 0;
 }

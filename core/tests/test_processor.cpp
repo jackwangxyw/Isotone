@@ -182,21 +182,6 @@ TEST_CASE("preamp, channel trim and mute are applied in the right order") {
     }
 }
 
-TEST_CASE("mono downmix averages the channels") {
-    EqState s;
-    s.mono = true;
-    Processor p = make(s);
-
-    std::vector<float> l(64, 1.0f), r(64, -0.5f);
-    float* ptr[2] = {l.data(), r.data()};
-    p.process(ptr, 64);
-
-    for (size_t i = 0; i < 64; ++i) {
-        CHECK(l[i] == doctest::Approx(0.25f).epsilon(1e-5));
-        CHECK(r[i] == doctest::Approx(0.25f).epsilon(1e-5));
-    }
-}
-
 TEST_CASE("bypass passes the dry signal") {
     EqState s;
     s.bands.push_back(peaking(1000.0, -24.0, 1.0));

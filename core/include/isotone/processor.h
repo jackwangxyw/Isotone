@@ -125,7 +125,6 @@ private:
     double trim_target_[kMaxChannels] = {};
     double trim_cur_[kMaxChannels]    = {};
     double mute_target_ = 1.0, mute_cur_ = 1.0;   // linear, 1 = audible
-    double mono_target_ = 0.0, mono_cur_ = 0.0;   // 0 = stereo, 1 = fully mono
     double bypass_target_ = 0.0, bypass_cur_ = 0.0;  // 1 = fully dry
 
     std::vector<float>  dry_;        // one control block of pre-EQ audio, per channel

@@ -23,8 +23,8 @@ namespace isotone {
 
 inline constexpr uint32_t kParamMagic   = 0x544F5349u;  // 'ISOT' little-endian
 // Covers the whole shared region below, not only ParamBlock. 2: audio ring
-// header gained pending_index, epoch and writer.
-inline constexpr uint32_t kParamVersion = 2u;
+// header gained pending_index, epoch and writer. 3: mono removed.
+inline constexpr uint32_t kParamVersion = 3u;
 inline constexpr uint32_t kParamMaxBands = 64u;
 
 enum class HostState : uint32_t {
@@ -66,11 +66,10 @@ struct ParamBlock {
     ParamBlockHeader hdr;
     uint32_t  bypass;
     uint32_t  mute;
-    uint32_t  mono;
     uint32_t  band_count;
     float     preamp_db;
     float     channel_gain_db[kMaxChannels];
-    float     reserved[3];      // keeps bands[] 16-byte aligned and leaves room
+    float     reserved[4];      // keeps bands[] 16-byte aligned and leaves room
     ParamBand bands[kParamMaxBands];
 };
 static_assert(sizeof(ParamBlock) % 16 == 0, "ParamBlock should stay 16-byte aligned");

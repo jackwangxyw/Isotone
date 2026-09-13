@@ -64,7 +64,6 @@ TEST_CASE("an EqState survives a trip through the block") {
     EqState s;
     s.bypass = true;
     s.mute = false;
-    s.mono = true;
     s.preamp_db = -6.5;
     s.channel_gain_db[0] = -1.5;
     s.channel_gain_db[1] = 2.25;
@@ -98,7 +97,6 @@ TEST_CASE("an EqState survives a trip through the block") {
 
     CHECK(back.bypass == s.bypass);
     CHECK(back.mute == s.mute);
-    CHECK(back.mono == s.mono);
     CHECK(back.preamp_db == doctest::Approx(s.preamp_db));
     CHECK(back.channel_gain_db[0] == doctest::Approx(s.channel_gain_db[0]));
     CHECK(back.channel_gain_db[1] == doctest::Approx(s.channel_gain_db[1]));

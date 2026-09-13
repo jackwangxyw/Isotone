@@ -69,7 +69,6 @@ struct EqState {
     std::vector<Band> bands;                        // unbounded in the core
     double            channel_gain_db[kMaxChannels] = {0, 0, 0, 0, 0, 0, 0, 0};
     bool              mute        = false;
-    bool              mono        = false;
 };
 
 // True if `band` contributes to output channel `channel`.

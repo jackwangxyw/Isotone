@@ -98,7 +98,6 @@ void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_f
         trim_target_[c] = trim_cur_[c] = 0.0;
     }
     mute_target_   = mute_cur_   = 1.0;
-    mono_target_   = mono_cur_   = 0.0;
     bypass_target_ = bypass_cur_ = 0.0;
 }
 
@@ -217,7 +216,6 @@ void Processor::set_target(const EqState& state) {
         }
     }
     mute_target_   = state.mute ? 0.0 : 1.0;
-    mono_target_   = state.mono ? 1.0 : 0.0;
     bypass_target_ = state.bypass ? 1.0 : 0.0;
 }
 
@@ -227,7 +225,6 @@ void Processor::reset() {
         trim_cur_[c] = trim_target_[c];
     }
     mute_cur_   = mute_target_;
-    mono_cur_   = mono_target_;
     bypass_cur_ = bypass_target_;
 
     for (BandSlot& b : bands_) {
@@ -247,7 +244,6 @@ void Processor::advance_smoothers(uint32_t) {
         approach(trim_cur_[c], trim_target_[c], smoothing_coef_);
     }
     approach(mute_cur_, mute_target_, smoothing_coef_);
-    approach(mono_cur_, mono_target_, smoothing_coef_);
 
     bypass_cur_ += std::clamp(bypass_target_ - bypass_cur_, -fade_step_, fade_step_);
 
@@ -272,7 +268,6 @@ bool Processor::is_settling() const {
         if (!near_enough(trim_cur_[c], trim_target_[c], 1e-4)) return true;
     }
     if (!near_enough(mute_cur_, mute_target_, 1e-5)) return true;
-    if (!near_enough(mono_cur_, mono_target_, 1e-5)) return true;
     if (!near_enough(bypass_cur_, bypass_target_, 1e-5)) return true;
 
     for (const BandSlot& b : bands_) {
@@ -287,22 +282,6 @@ bool Processor::is_settling() const {
 
 void Processor::process_block(float* const* planar, uint32_t offset, uint32_t frames) {
     const double preamp = db_to_linear(preamp_cur_);
-
-    // Mono downmix comes first, before anything else touches the signal.
-    if (mono_cur_ > 1e-6 && channels_ > 1) {
-        const double mix = mono_cur_;
-        for (uint32_t n = 0; n < frames; ++n) {
-            double sum = 0.0;
-            for (uint32_t c = 0; c < channels_; ++c) {
-                sum += planar[c][offset + n];
-            }
-            const double mean = sum / static_cast<double>(channels_);
-            for (uint32_t c = 0; c < channels_; ++c) {
-                float& s = planar[c][offset + n];
-                s = static_cast<float>(s * (1.0 - mix) + mean * mix);
-            }
-        }
-    }
 
     for (uint32_t c = 0; c < channels_; ++c) {
         // Only the first kMaxChannels channels have a trim; the rest sit at 0 dB.
