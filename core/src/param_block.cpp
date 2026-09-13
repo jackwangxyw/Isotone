@@ -48,9 +48,9 @@ bool param_block_valid(const ParamBlock& block) {
            block.hdr.size == sizeof(ParamBlock) && block.band_count <= kParamMaxBands;
 }
 
-void to_param_block(const EqState& state, ParamBlock* out) {
+bool to_param_block(const EqState& state, ParamBlock* out) {
     if (out == nullptr) {
-        return;
+        return false;
     }
     out->bypass = state.bypass ? 1u : 0u;
     out->mute   = state.mute ? 1u : 0u;
@@ -95,6 +95,7 @@ void to_param_block(const EqState& state, ParamBlock* out) {
     for (uint32_t i = count; i < kParamMaxBands; ++i) {
         std::memset(&out->bands[i], 0, sizeof(ParamBand));
     }
+    return state.bands.size() <= kParamMaxBands;
 }
 
 void from_param_block(const ParamBlock& block, EqState* out) {

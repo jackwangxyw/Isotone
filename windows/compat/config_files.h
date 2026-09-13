@@ -39,7 +39,9 @@ DWORD write_file_atomically(const std::filesystem::path& path, const std::string
 // before the first ':', trimmed, compared case-sensitively.
 struct ConfigInspection {
     DWORD error = ERROR_SUCCESS;
-    bool isotone_included = false;   // an Include line naming Isotone.txt
+    bool isotone_included = false;   // an Include line naming Isotone.txt that every device reaches
+    bool isotone_included_conditionally = false;   // one under a Device line other than `all`, or
+                                                   // inside an If: only some devices reach it
     bool peace_included = false;     // an Include line naming peace.txt: Peace and
                                      // Isotone would fight over the same devices
     bool attached_by_isotone = false;// the block attach_include appends is the file's tail
@@ -59,7 +61,9 @@ struct AttachResult {
     ConfigInspection before;
 };
 
-// Appends, once, to config.txt:
+// Appends, once, to config.txt (nothing, with ERROR_ALREADY_EXISTS, when
+// Isotone.txt is already included conditionally: appending would include it
+// twice for the devices that reach the first include):
 //
 //   # Added by Isotone. Remove these three lines to detach it.
 //   Device: all

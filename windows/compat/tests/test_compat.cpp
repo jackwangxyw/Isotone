@@ -82,6 +82,17 @@ std::string block(const char* nl) {
 // ---------------------------------------------------------------------------
 // The guard that keeps tools off a live install
 
+TEST_CASE("a protected root that exists but cannot be identified protects everything") {
+    // The guard compares file IDs; a root on a file system that reports none
+    // must refuse, not wave every path through. The named-pipe root exists and
+    // has no file ID.
+    Sandbox s;
+    const fs::path pipes = L"\\\\.\\pipe\\";
+    REQUIRE(GetFileAttributesW(pipes.c_str()) != INVALID_FILE_ATTRIBUTES);
+    CHECK(path_is_inside(s.dir, pipes));
+    CHECK_FALSE(path_is_inside(s.dir, s.dir / "no-such-root"));
+}
+
 TEST_CASE("a protected directory is recognised however its path is spelled") {
     // The first version compared path text, and the short name
     // C:\PROGRA~1\EqualizerAPO\config walked straight past it onto the owner's
@@ -292,6 +303,24 @@ TEST_CASE("an Include is recognised the way upstream reads it") {
 
     put(s.dir / "config.txt", "If: 1 == 1\r\nEndIf:\r\n");
     CHECK(inspect_config(s.dir).has_conditionals);
+
+    // An include that only some devices reach is not attached for all of them,
+    // and attaching again would include the file twice for the ones it does.
+    for (const char* scoped : {"Device: Speakers\r\nInclude: Isotone.txt\r\n",
+                               "If: sampleRate == 44100\r\nInclude: Isotone.txt\r\nEndIf:\r\n"}) {
+        CAPTURE(scoped);
+        put(s.dir / "config.txt", scoped);
+        const ConfigInspection i = inspect_config(s.dir);
+        CHECK_FALSE(i.isotone_included);
+        CHECK(i.isotone_included_conditionally);
+        const AttachResult refused = attach_include(s.dir);
+        CHECK(refused.error != ERROR_SUCCESS);
+        CHECK_FALSE(refused.appended);
+        CHECK(get(s.dir / "config.txt") == scoped);
+    }
+    put(s.dir / "config.txt", "Device: Speakers\r\nPreamp: -3 dB\r\nDevice: all\r\nInclude: Isotone.txt\r\n");
+    CHECK(inspect_config(s.dir).isotone_included);
+    CHECK_FALSE(inspect_config(s.dir).isotone_included_conditionally);
 }
 
 TEST_CASE("detach removes the block only while it is still the file's tail") {
@@ -451,24 +480,43 @@ TEST_CASE("Isotone.txt re-parses to the same state for every device") {
     check_same_state(parsed[0].state, a.state);
     check_same_state(parsed[1].state, b.state);
 
-    SUBCASE("bypassed, the curve is kept but upstream sees none of it") {
+    SUBCASE("bypassed, the curve is kept, and upstream plays no preamp and no bands") {
         DeviceConfig off = a;
         off.state.bypass = true;
         const std::string bypassed = update_isotone_file(text, off);
         const std::vector<ParsedDevice> back = parse_isotone_file(bypassed, layout_for);
         REQUIRE(back.size() == 2);
+        CHECK(back[0].warnings.empty());
         check_same_state(back[0].state, off.state);
 
-        // Upstream's view: in the bypassed block only Device and Channel: all
-        // are commands; everything else is a comment.
+        // Upstream's view: no band is a command, and the one Preamp left is the
+        // trim under its Channel line.
         const std::string block_text = format_device_block(off);
         std::istringstream in(block_text);
-        std::string line;
-        int commands = 0;
+        std::string line, previous;
+        int filters = 0, preamps = 0;
         while (std::getline(in, line)) {
-            if (!line.empty() && line[0] != '#') ++commands;
+            if (line.rfind("Filter ", 0) == 0) ++filters;
+            if (line.rfind("Preamp:", 0) == 0) {
+                ++preamps;
+                CHECK(previous == "Channel: L");
+            }
+            previous = line;
         }
-        CHECK(commands == 2);
+        CHECK(filters == 0);
+        CHECK(preamps == 1);
+    }
+
+    SUBCASE("a bypassed block written before bypass left the speaker setup on still reads") {
+        const std::string old =
+            "Device: {798436D2-8C71-4834-9248-00CCBAACA00A}\nChannel: all\n# Isotone: bypass\n"
+            "# Preamp: -3 dB\n# Filter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n";
+        const std::vector<ParsedDevice> back = parse_isotone_file(old, layout_for);
+        REQUIRE(back.size() == 1);
+        CHECK(back[0].warnings.empty());
+        CHECK(back[0].state.bypass);
+        CHECK(back[0].state.preamp_db == -3.0);
+        CHECK(back[0].state.bands.size() == 1);
     }
 }
 
@@ -482,7 +530,7 @@ TEST_CASE("the file speaks only upstream's commands") {
         const std::string key = line.substr(0, line.find(':'));
         CAPTURE(line);
         CHECK((key == "Device" || key == "Channel" || key == "Preamp" || key == "Copy" ||
-               key == "Delay" || key == "Filter" || key.rfind("Filter ", 0) == 0));
+               key == "Delay" || key == "Filter" || key.rfind("Filter ", 0) == 0 || key == "If" || key == "EndIf"));
     }
     CHECK(text.find("Device: {798436D2-8C71-4834-9248-00CCBAACA00A}\nChannel: all\n") !=
           std::string::npos);
@@ -502,6 +550,11 @@ namespace {
 //            zero; channels that are not targets keep their samples
 //            (CopyFilter, FilterConfiguration::process).
 //   Delay    whole samples, rate * ms / 1000 + 0.5, on the selection (DelayFilter).
+//   If       outputChannelCount == N and sampleRate >= X, the forms Isotone
+//            writes; lines up to the matching EndIf are skipped when false.
+// A channel word is a 1-based number within the device's channel count, or a
+// name, with the SL/RL and SR/RR substitutes (ChannelHelper). A Copy source that
+// names no channel is added as its factor, a constant (CopyFilter::process).
 class UpstreamModel {
 public:
     UpstreamModel(const ChannelLayout& layout, double rate) : rate_(rate) {
@@ -509,10 +562,25 @@ public:
         names_.resize(layout.channels);
     }
 
+    // Whether `expression` holds on this device; only the forms Isotone writes.
+    bool holds(const std::string& expression) {
+        std::istringstream in(expression);
+        std::string name, op;
+        double value = 0;
+        in >> name >> op >> value;
+        if (name == "outputChannelCount" && op == "==") return names_.size() == value;
+        if (name == "sampleRate" && op == ">=") return rate_ >= value;
+        FAIL("an If the model does not know: " << expression);
+        return false;
+    }
+
     // [channel][frame] in, the device channels out.
     std::vector<std::vector<double>> run(const std::string& block, std::vector<std::vector<double>> x) {
         const size_t frames = x[0].size();
-        std::vector<std::string> selection = names_;
+        std::vector<long> selection;
+        for (size_t c = 0; c < names_.size(); ++c) selection.push_back(static_cast<long>(c));
+        const std::vector<long> all = selection;
+        int skipping = 0;   // depth of false Ifs
         std::istringstream in(block);
         std::string line;
         while (std::getline(in, line)) {
@@ -522,25 +590,35 @@ public:
             const std::string key = line.substr(0, colon);
             const std::string value = line.substr(colon + 1);
             std::istringstream words(value);
+            if (key == "If") {
+                if (skipping > 0 || !holds(value)) ++skipping;
+                continue;
+            }
+            if (key == "EndIf") {
+                if (skipping > 0) --skipping;
+                continue;
+            }
+            if (skipping > 0) continue;
             if (key == "Device") continue;
             if (key == "Channel") {
                 selection.clear();
                 std::string w;
                 while (words >> w) {
-                    if (w == "all") selection = names_;
-                    else selection.push_back(w);
+                    if (w == "all") selection = all;
+                    else if (index(w) >= 0) selection.push_back(index(w));
                 }
             } else if (key == "Preamp") {
                 double db = 0;
                 words >> db;
-                for (const std::string& n : selection) for (double& v : x[index(n)]) v *= std::pow(10.0, db / 20.0);
+                const double gain = static_cast<float>(std::pow(10.0, db / 20.0));   // upstream's float gain
+                for (long n : selection) for (double& v : x[n]) v *= gain;
             } else if (key == "Filter" || key.rfind("Filter ", 0) == 0) {
                 const ApoParseResult r = parse_apo_config(line + "\n");
                 REQUIRE(r.state.bands.size() == 1);
                 const BiquadCoeffs k = design(r.state.bands[0], rate_);
-                for (const std::string& n : selection) {
+                for (long n : selection) {
                     double s1 = 0, s2 = 0;
-                    for (double& v : x[index(n)]) {
+                    for (double& v : x[n]) {
                         const double y = k.b0 * v + s1;
                         s1 = k.b1 * v - k.a1 * y + s2;
                         s2 = k.b2 * v - k.a2 * y;
@@ -558,19 +636,26 @@ public:
                     std::string term;
                     while (std::getline(sum, term, '+')) {
                         const size_t star = term.find('*');
-                        if (star == std::string::npos) {
-                            REQUIRE(term == "0");
-                            continue;
+                        std::string factor_text, channel;
+                        if (star != std::string::npos) {
+                            factor_text = term.substr(0, star);
+                            channel = term.substr(star + 1);
+                        } else if (term == "0" || term.find('.') != std::string::npos) {
+                            factor_text = term;
+                        } else {
+                            channel = term;
                         }
-                        const double factor = std::stod(term.substr(0, star));
-                        const std::vector<double>& src = input[index(term.substr(star + 1))];
-                        for (size_t f = 0; f < frames; ++f) out[f] += factor * src[f];
+                        const double factor = factor_text.empty() ? 1.0 : std::stod(factor_text);
+                        const long source = channel.empty() ? -1 : index(channel);
+                        for (size_t f = 0; f < frames; ++f) out[f] += source < 0 ? factor : factor * input[source][f];
                     }
-                    if (std::find(names_.begin(), names_.end(), target) == names_.end()) {
+                    long t = index(target);
+                    if (t < 0) {
                         virtuals_.push_back(target);
                         x.emplace_back(frames, 0.0);
+                        t = static_cast<long>(x.size() - 1);
                     }
-                    x[index(target)] = out;
+                    x[t] = out;
                 }
             } else if (key == "Delay") {
                 double ms = 0;
@@ -578,8 +663,8 @@ public:
                 words >> ms >> unit;
                 REQUIRE(unit == "ms");
                 const size_t n = static_cast<size_t>(rate_ * ms / 1000.0 + 0.5);
-                for (const std::string& name : selection) {
-                    std::vector<double>& v = x[index(name)];
+                for (long c : selection) {
+                    std::vector<double>& v = x[c];
                     v.insert(v.begin(), n, 0.0);
                     v.resize(frames);
                 }
@@ -592,12 +677,24 @@ public:
     }
 
 private:
-    size_t index(const std::string& name) {
-        auto it = std::find(names_.begin(), names_.end(), name);
-        if (it != names_.end()) return static_cast<size_t>(it - names_.begin());
-        auto v = std::find(virtuals_.begin(), virtuals_.end(), name);
-        REQUIRE(v != virtuals_.end());
-        return names_.size() + static_cast<size_t>(v - virtuals_.begin());
+    // -1 for a word that names no channel.
+    long index(const std::string& name) {
+        if (!name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) {
+            const long n = std::stol(name) - 1;
+            return n >= 0 && n < static_cast<long>(names_.size()) ? n : -1;
+        }
+        const auto find = [&](const std::string& w) -> long {
+            auto it = std::find(names_.begin(), names_.end(), w);
+            if (it != names_.end()) return static_cast<long>(it - names_.begin());
+            auto v = std::find(virtuals_.begin(), virtuals_.end(), w);
+            return v != virtuals_.end() ? static_cast<long>(names_.size() + (v - virtuals_.begin())) : -1;
+        };
+        long i = find(name);
+        if (i < 0 && name == "SL") i = find("RL");
+        if (i < 0 && name == "SR") i = find("RR");
+        if (i < 0 && name == "RL") i = find("SL");
+        if (i < 0 && name == "RR") i = find("SR");
+        return i;
     }
 
     double rate_;
@@ -874,6 +971,34 @@ TEST_CASE("the writer coalesces live edits on disk and persists at once") {
     CompatWriter again(s.dir, clock.fn());
     REQUIRE(again.load() == ERROR_SUCCESS);
     CHECK(again.text() == writer.text());
+
+    // And each keeps the other's devices: a write never reverts a block the
+    // other wrote since this one last read the file.
+    DeviceConfig other = height_device();
+    REQUIRE(again.persist(other) == ERROR_SUCCESS);
+    d.state.preamp_db = -9;
+    REQUIRE(writer.persist(d) == ERROR_SUCCESS);
+    const std::vector<ParsedDevice> both = parse_isotone_file(get(writer.path()), layout_for);
+    REQUIRE(both.size() == 2);
+    CHECK(both[0].state.preamp_db == -9.0);
+    CHECK(both[1].endpoint_guid == kHeight);
+}
+
+TEST_CASE("a live edit still pending when the writer goes away is written") {
+    Sandbox s;
+    FakeClock clock;
+    DeviceConfig d = stereo_device();
+    {
+        CompatWriter writer(s.dir, clock.fn());
+        REQUIRE(writer.load() == ERROR_SUCCESS);
+        REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+        d.state.preamp_db = -11;
+        REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+        REQUIRE(writer.has_pending());
+    }
+    const std::vector<ParsedDevice> back = parse_isotone_file(get(s.dir / "Isotone.txt"), layout_for);
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].state.preamp_db == -11.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -952,8 +1077,19 @@ TEST_CASE("mute in Isotone.txt is silence, and reads back as mute") {
     d.state.mute = true;
     const std::string block = format_device_block(d);
     CAPTURE(block);
-    CHECK(block.find("-100") == std::string::npos);
+    // Not a -100 dB cut: a gain that underflows upstream's float to zero.
+    CHECK(block.find("Preamp: -100 dB\n") == std::string::npos);
+    CHECK(block.find("Preamp: -1000 dB\n") != std::string::npos);
     CHECK(model_vs_processor(d) < 1e-6);
+    // Silence on whatever layout the device reports when Equalizer APO loads.
+    for (const ChannelLayout device : {ChannelLayout{2, 0x3}, ChannelLayout{8, 0x63F}}) {
+        std::vector<std::vector<double>> input(device.channels, std::vector<double>(480, 0.5));
+        const std::vector<std::vector<double>> out = UpstreamModel(device, 48000.0).run(block, input);
+        double loudest = 0.0;
+        for (const auto& ch : out) for (double v : ch) loudest = std::max(loudest, std::abs(v));
+        CAPTURE(device.channels);
+        CHECK(loudest == 0.0);
+    }
     const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
     REQUIRE(parsed.size() == 1);
     CHECK(parsed[0].state.mute);
@@ -968,7 +1104,145 @@ TEST_CASE("a layout given with no speaker mask gets the default one, so speaker 
     d.state.speakers.swap_left_right = true;
     const std::string block = format_device_block(d);
     CAPTURE(block);
-    CHECK(block.find("Copy: L=1*R R=1*L") != std::string::npos);
+    CHECK(block.find("Copy: 1=1*2 2=1*1") != std::string::npos);
+}
+
+TEST_CASE("a block written for one layout plays no DC on a device that reports another") {
+    // Equalizer APO applies Isotone.txt to the format the device has when it
+    // loads, which can differ from the one Isotone wrote for. A Copy source
+    // naming a channel the device lacks is added as a constant: full-scale DC.
+    const ChannelLayout layouts[] = {{2, 0x3},   {3, 0xB},   {3, 0x7},   {4, 0x33},
+                                     {4, 0x107}, {6, 0x60F}, {6, 0x3F},  {8, 0x63F}};
+    for (const ChannelLayout& written : layouts) {
+        DeviceConfig d;
+        d.endpoint_guid = kStereo;
+        d.layout = written;
+        d.state.bands.push_back(band(FilterType::Peaking, 1000, -6, 1, WidthMode::Q));
+        SpeakerSetup& sp = d.state.speakers;
+        sp.swap_left_right = true;
+        sp.swap_front_rear = true;
+        sp.upmix = Upmix::All;
+        sp.bass_management = true;
+        sp.small_speakers = 0xFF;
+        sp.inverted = 1u << 1;
+        sp.muted = 1u << 2;
+        sp.delay_ms[0] = 1.0;
+        const std::string block = format_device_block(d);
+        CAPTURE(block);
+        // On its own layout the text is still what the processor does.
+        CHECK(model_vs_processor(d) < 1e-4);
+        for (const ChannelLayout& device : layouts) {
+            CAPTURE(device.channels);
+            CAPTURE(device.speaker_mask);
+            constexpr size_t kFrames = 9600;
+            std::vector<std::vector<double>> input(device.channels, std::vector<double>(kFrames));
+            for (uint32_t c = 0; c < device.channels; ++c) {
+                for (size_t f = 0; f < kFrames; ++f) {
+                    input[c][f] = 0.5 * std::sin(2 * 3.14159265358979 * (500.0 + 100 * c) * f / 48000.0);
+                }
+            }
+            const std::vector<std::vector<double>> out = UpstreamModel(device, 48000.0).run(block, input);
+            for (uint32_t c = 0; c < device.channels; ++c) {
+                double mean = 0.0;
+                for (size_t f = kFrames / 2; f < kFrames; ++f) mean += out[c][f];
+                mean /= static_cast<double>(kFrames / 2);
+                CAPTURE(c);
+                CHECK(std::abs(mean) < 1e-3);
+            }
+        }
+    }
+}
+
+TEST_CASE("bands are guarded by the lowest rate they are stable at") {
+    // A band written at 22800 Hz for a 48 kHz device is above Nyquist at
+    // 44.1 kHz, where upstream designs it unstable.
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {2, 0x3};
+    d.sample_rate = 48000.0;
+    d.state.channel_gain_db[0] = -2.0;
+    d.state.bands.push_back(band(FilterType::Peaking, 23000, -6, 1, WidthMode::Q));
+    d.state.bands.push_back(band(FilterType::Peaking, 1000, -6, 1, WidthMode::Q));
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    CHECK(block.find("If: sampleRate >= 48000\n") != std::string::npos);
+
+    std::vector<std::vector<double>> input(2, std::vector<double>(4800));
+    for (size_t f = 0; f < 4800; ++f) input[0][f] = input[1][f] = std::sin(2 * 3.14159265358979 * 1000.0 * f / 44100.0);
+    // At 44.1 kHz the bands do nothing, and the trim, which has no frequency, stays.
+    const std::vector<std::vector<double>> low = UpstreamModel(d.layout, 44100.0).run(block, input);
+    double err = 0.0;
+    for (size_t f = 0; f < 4800; ++f) {
+        err = std::max(err, std::abs(low[1][f] - input[1][f]));
+        err = std::max(err, std::abs(low[0][f] - input[0][f] * static_cast<float>(std::pow(10.0, -2.0 / 20.0))));
+    }
+    CHECK(err < 1e-6);
+    // At the rate it was written for it is the processor's curve.
+    CHECK(model_vs_processor(d) < 1e-4);
+
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
+    REQUIRE(parsed.size() == 1);
+    CHECK(parsed[0].warnings.empty());
+    CHECK(parsed[0].unsupported.empty());
+    CHECK(parsed[0].state.bands.size() == 2);
+
+    // Low bands need no more than a low rate.
+    d.state.bands.erase(d.state.bands.begin());
+    CHECK(format_device_block(d).find("If: sampleRate >= 2106\n") != std::string::npos);
+}
+
+TEST_CASE("bypass turns off the preamp and bands, and nothing else, in Equalizer APO too") {
+    DeviceConfig d = stereo_device();
+    d.state.bypass = true;
+    d.state.mute = false;
+    CHECK(model_vs_processor(d) < 1e-4);
+    DeviceConfig on = d;
+    on.state.bypass = false;
+    CHECK(model_vs_processor(on) < 1e-4);
+}
+
+TEST_CASE("a second block for the same device is removed on update and reported on read") {
+    DeviceConfig a = stereo_device();
+    DeviceConfig other = height_device();
+    const std::string one = format_device_block(a);
+    a.state.preamp_db = -9;
+    const std::string stale = format_device_block(a);
+    const std::string text = one + "\n" + format_device_block(other) + "\n" + stale;
+    const std::vector<ParsedDevice> read = parse_isotone_file(text, layout_for);
+    REQUIRE(read.size() == 3);
+    CHECK(read[0].warnings.empty());
+    CHECK_FALSE(read[2].warnings.empty());
+
+    a.state.preamp_db = -1;
+    const std::string updated = update_isotone_file(text, a);
+    const std::vector<ParsedDevice> back = parse_isotone_file(updated, layout_for);
+    REQUIRE(back.size() == 2);
+    CHECK(back[0].state.preamp_db == -1.0);
+    CHECK(back[1].endpoint_guid == kHeight);
+    CHECK(remove_device(text, kStereo) == format_device_block(other) + "\n");
+}
+
+TEST_CASE("a full device ID names the endpoint by its GUID") {
+    DeviceConfig d = stereo_device();
+    d.endpoint_guid = "{0.0.0.00000000}.{798436D2-8C71-4834-9248-00CCBAACA00A}";
+    const std::string text = update_isotone_file("", d);
+    CHECK(text.find("Device: {798436D2-8C71-4834-9248-00CCBAACA00A}\n") != std::string::npos);
+    DeviceConfig bare = stereo_device();
+    bare.state.preamp_db = -2;
+    const std::vector<ParsedDevice> back = parse_isotone_file(update_isotone_file(text, bare), layout_for);
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].state.preamp_db == -2.0);
+}
+
+TEST_CASE("a routing section that lost its end marker costs the section, not the curve") {
+    const std::string text = "Device: {798436D2-8C71-4834-9248-00CCBAACA00A}\nChannel: all\n# Isotone: routing\n"
+                             "If: outputChannelCount == 2\nCopy: 1=1*2 2=1*1\nEndIf:\nChannel: all\n"
+                             "Preamp: -3 dB\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n";
+    const std::vector<ParsedDevice> back = parse_isotone_file(text, layout_for);
+    REQUIRE(back.size() == 1);
+    CHECK_FALSE(back[0].warnings.empty());
+    CHECK(back[0].state.preamp_db == -3.0);
+    CHECK(back[0].state.bands.size() == 1);
 }
 
 TEST_CASE("an Include of Isotone.txt by absolute path counts as attached") {

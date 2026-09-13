@@ -7,8 +7,12 @@
 //
 //   isotone-shm status  <endpoint>
 //   isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]
+//   isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]
+//   isotone-shm forget  <endpoint>
 //   isotone-shm capture <endpoint> <seconds> <out.wav>
 //
+// persist saves the state a device starts with when no UI is running
+// (persisted_state.h); forget deletes it, so the device starts flat.
 // <endpoint> is an endpoint GUID, with or without braces, or a full device ID
 // such as {0.0.0.00000000}.{guid}. SETTINGS is the speaker setup text of
 // isotone/speakers.h, quoted as one argument. Add --local to use the Local\
@@ -25,6 +29,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -38,6 +43,7 @@
 #include "isotone/audio_ring.h"
 #include "isotone/param_block.h"
 #include "isotone/speakers.h"
+#include "persisted_state.h"
 #include "shared_mapping.h"
 
 namespace {
@@ -47,6 +53,8 @@ int usage() {
                  "usage:\n"
                  "  isotone-shm status  <endpoint> [--local]\n"
                  "  isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--local]\n"
+                 "  isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--local]\n"
+                 "  isotone-shm forget  <endpoint> [--local]\n"
                  "  isotone-shm capture <endpoint> <seconds> <out.wav> [--local]\n");
     return 2;
 }
@@ -147,37 +155,85 @@ int cmd_status(const std::wstring& name) {
     std::snprintf(writer, sizeof(writer), "0x%016llx",
                   static_cast<unsigned long long>(ring->writer));
 
+    // Shared memory is writable by any local user: a non-finite preamp is
+    // reported as null, which JSON can hold.
+    char preamp[32] = "null";
+    if (std::isfinite(copy.preamp_db)) std::snprintf(preamp, sizeof(preamp), "%g", static_cast<double>(copy.preamp_db));
     std::printf("{\"name\":%s,\"open\":true,\"version\":%u,\"sample_rate\":%u,\"channels\":%u,"
                 "\"speaker_mask\":\"0x%x\",\"host_state\":\"%s\",\"heartbeat\":%u,\"heartbeat_advancing\":%s,"
                 "\"seq\":%u,\"params_consistent\":%s,\"bypass\":%s,\"mute\":%s,"
-                "\"preamp_db\":%g,\"band_count\":%u,"
+                "\"preamp_db\":%s,\"band_count\":%u,"
                 "\"ring\":{\"writer\":\"%s\",\"channels\":%u,\"capacity\":%u,\"write_index\":%u}}\n",
                 json_string(narrow(name)).c_str(), b->hdr.version, b->hdr.sample_rate,
                 b->hdr.channels, b->hdr.speaker_mask, host_state_name(b->hdr.host_state), beat1,
                 beat1 != beat0 ? "true" : "false", copy.hdr.seq, consistent ? "true" : "false",
-                copy.bypass ? "true" : "false", copy.mute ? "true" : "false",
-                static_cast<double>(copy.preamp_db),
+                copy.bypass ? "true" : "false", copy.mute ? "true" : "false", preamp,
                 copy.band_count, writer, ring->channels, ring->capacity, ring->write_index);
     return 0;
+}
+
+// The text of a config file, or of stdin for "-". Prints the failure as JSON
+// with `verb` as the result key.
+bool read_config(const std::string& path, const char* verb, std::string* text) {
+    if (path == "-") {
+        std::ostringstream ss;
+        ss << std::cin.rdbuf();
+        *text = ss.str();
+        return true;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::printf("{\"%s\":false,\"reason\":%s}\n", verb, json_string("cannot read " + path).c_str());
+        return false;
+    }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    *text = ss.str();
+    return true;
+}
+
+// Parses for `layout` and checks the result fits a block; prints the failure
+// as JSON with `verb` as the result key.
+bool parse_for_block(const std::string& text, const isotone::ChannelLayout& layout, bool bypass,
+                     const isotone::SpeakerSetup& speakers, const char* verb, isotone::ApoParseResult* parsed) {
+    *parsed = isotone::parse_apo_config(text, layout);
+    parsed->state.bypass = bypass;
+    parsed->state.speakers = speakers;
+    // Say so rather than silently truncate: the block holds a fixed number.
+    if (parsed->state.bands.size() > isotone::kParamMaxBands) {
+        std::printf("{\"%s\":false,\"reason\":%s}\n", verb,
+                    json_string("config has " + std::to_string(parsed->state.bands.size()) +
+                                " bands; the param block holds " + std::to_string(isotone::kParamMaxBands))
+                        .c_str());
+        return false;
+    }
+    return true;
+}
+
+std::string warnings_json(const isotone::ApoParseResult& parsed) {
+    std::string warnings = "[";
+    for (size_t i = 0; i < parsed.warnings.size(); ++i) {
+        if (i) warnings += ",";
+        warnings += "{\"line\":" + std::to_string(parsed.warnings[i].line) +
+                    ",\"text\":" + json_string(parsed.warnings[i].text) + "}";
+    }
+    return warnings + "]";
+}
+
+std::string unsupported_json(const isotone::ApoParseResult& parsed) {
+    std::string unsupported = "[";
+    for (size_t i = 0; i < parsed.unsupported.size(); ++i) {
+        if (i) unsupported += ",";
+        unsupported += json_string(parsed.unsupported[i]);
+    }
+    return unsupported + "]";
 }
 
 int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
               const isotone::SpeakerSetup& speakers) {
     std::string text;
-    if (path == "-") {
-        std::ostringstream ss;
-        ss << std::cin.rdbuf();
-        text = ss.str();
-    } else {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
-            std::printf("{\"written\":false,\"reason\":%s}\n",
-                        json_string("cannot read " + path).c_str());
-            return 1;
-        }
-        std::ostringstream ss;
-        ss << in.rdbuf();
-        text = ss.str();
+    if (!read_config(path, "written", &text)) {
+        return 1;
     }
 
     isotone::win::SharedMapping mapping;
@@ -192,35 +248,16 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
         layout.channels = mapping.params()->hdr.channels;
         layout.speaker_mask = mapping.params()->hdr.speaker_mask;
     }
-    isotone::ApoParseResult parsed = isotone::parse_apo_config(text, layout);
-    parsed.state.bypass = bypass;
-    parsed.state.speakers = speakers;
-
-    // Say so rather than silently truncate: the block holds a fixed number.
-    if (parsed.state.bands.size() > isotone::kParamMaxBands) {
-        std::printf("{\"written\":false,\"reason\":%s}\n",
-                    json_string("config has " + std::to_string(parsed.state.bands.size()) +
-                                " bands; the param block holds " +
-                                std::to_string(isotone::kParamMaxBands)).c_str());
+    isotone::ApoParseResult parsed;
+    if (!parse_for_block(text, layout, bypass, speakers, "written", &parsed)) {
         return 1;
     }
     isotone::param_block_write(mapping.params(), [&](isotone::ParamBlock* b) {
         isotone::to_param_block(parsed.state, b);
     });
 
-    std::string warnings = "[";
-    for (size_t i = 0; i < parsed.warnings.size(); ++i) {
-        if (i) warnings += ",";
-        warnings += "{\"line\":" + std::to_string(parsed.warnings[i].line) +
-                    ",\"text\":" + json_string(parsed.warnings[i].text) + "}";
-    }
-    warnings += "]";
-    std::string unsupported = "[";
-    for (size_t i = 0; i < parsed.unsupported.size(); ++i) {
-        if (i) unsupported += ",";
-        unsupported += json_string(parsed.unsupported[i]);
-    }
-    unsupported += "]";
+    const std::string warnings = warnings_json(parsed);
+    const std::string unsupported = unsupported_json(parsed);
 
     std::printf("{\"written\":true,\"seq\":%u,\"bands\":%zu,\"preamp_db\":%g,\"bypass\":%s,"
                 "\"layout\":{\"channels\":%u,\"speaker_mask\":\"0x%x\"},\"speakers\":%s,"
@@ -230,6 +267,52 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
                 json_string(isotone::format_speaker_setup(speakers)).c_str(), warnings.c_str(),
                 unsupported.c_str());
     return 0;
+}
+
+int cmd_persist(const std::wstring& name, const std::wstring& file, const std::string& path, bool bypass,
+                const isotone::SpeakerSetup& speakers) {
+    std::string text;
+    if (!read_config(path, "persisted", &text)) {
+        return 1;
+    }
+    // The device's layout if an engine has published it; 7.1 otherwise, and
+    // the output says which.
+    isotone::ChannelLayout layout;
+    isotone::win::SharedMapping mapping;
+    const bool published = mapping.open(name) == ERROR_SUCCESS && mapping.params()->hdr.channels != 0;
+    if (published) {
+        layout.channels = mapping.params()->hdr.channels;
+        layout.speaker_mask = mapping.params()->hdr.speaker_mask;
+    }
+    isotone::ApoParseResult parsed;
+    if (!parse_for_block(text, layout, bypass, speakers, "persisted", &parsed)) {
+        return 1;
+    }
+    isotone::ParamBlock block{};
+    isotone::init_param_block(&block);
+    isotone::to_param_block(parsed.state, &block);
+    const DWORD error = isotone::win::write_persisted_state(file, block);
+    if (error != ERROR_SUCCESS) {
+        std::printf("{\"persisted\":false,\"path\":%s,\"error\":%lu}\n", json_string(narrow(file)).c_str(), error);
+        return 1;
+    }
+    std::printf("{\"persisted\":true,\"path\":%s,\"bands\":%zu,\"preamp_db\":%g,\"bypass\":%s,"
+                "\"layout\":{\"channels\":%u,\"speaker_mask\":\"0x%x\",\"from_engine\":%s},\"speakers\":%s,"
+                "\"warnings\":%s,\"unsupported\":%s}\n",
+                json_string(narrow(file)).c_str(), parsed.state.bands.size(), parsed.state.preamp_db,
+                bypass ? "true" : "false", layout.channels, layout.speaker_mask, published ? "true" : "false",
+                json_string(isotone::format_speaker_setup(speakers)).c_str(), warnings_json(parsed).c_str(),
+                unsupported_json(parsed).c_str());
+    return 0;
+}
+
+int cmd_forget(const std::wstring& file) {
+    const bool deleted = DeleteFileW(file.c_str()) != 0;
+    const DWORD error = deleted ? ERROR_SUCCESS : GetLastError();
+    std::printf("{\"forgotten\":%s,\"path\":%s,\"error\":%lu}\n",
+                deleted || error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? "true" : "false",
+                json_string(narrow(file)).c_str(), error);
+    return deleted || error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? 0 : 1;
 }
 
 bool write_wav(const std::string& path, const std::vector<float>& samples, uint32_t channels,
@@ -278,6 +361,7 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
     std::vector<float> samples;
     uint32_t channels = 0, ch = 0;
     uint64_t frames = 0;
+    uint64_t dropped = 0;
     uint32_t resyncs = 0;
 
     // Drain at about 100 Hz, which leaves the ring far from full at any rate.
@@ -287,8 +371,11 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
     uint32_t epoch = cursor.epoch;
     while (frames < wanted && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const isotone::AudioRingCursor before = cursor;
         const uint32_t n = isotone::audio_ring_read(mapping.ring(), isotone::kRingCapacityFrames, &cursor, chunk.data(),
                                                     isotone::kRingCapacityFrames, &ch);
+        // Frames the ring moved past that the read did not return were lost.
+        if (cursor.epoch == before.epoch) dropped += (cursor.next - before.next) - n;
         if (cursor.epoch != epoch) {
             ++resyncs;   // the layout changed; what came before is a different stream
             epoch = cursor.epoch;
@@ -308,10 +395,12 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
                                             : "cannot write " + path).c_str());
         return 1;
     }
+    // Complete means every frame asked for, from one stream, contiguous.
     std::printf("{\"captured\":true,\"path\":%s,\"frames\":%llu,\"channels\":%u,\"sample_rate\":%u,"
-                "\"complete\":%s,\"resyncs\":%u}\n",
+                "\"complete\":%s,\"resyncs\":%u,\"dropped_frames\":%llu}\n",
                 json_string(path).c_str(), static_cast<unsigned long long>(frames), channels, rate,
-                frames == wanted ? "true" : "false", resyncs);
+                frames == wanted && resyncs == 0 && dropped == 0 ? "true" : "false", resyncs,
+                static_cast<unsigned long long>(dropped));
     return 0;
 }
 
@@ -348,6 +437,13 @@ int main(int argc, char** argv) {
     }
     if (args[0] == "write" && args.size() == 3) {
         return cmd_write(name, args[2], bypass, speakers);
+    }
+    const std::wstring saved = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(local), guid);
+    if (args[0] == "persist" && args.size() == 3) {
+        return cmd_persist(name, saved, args[2], bypass, speakers);
+    }
+    if (args[0] == "forget" && args.size() == 2) {
+        return cmd_forget(saved);
     }
     if (args[0] == "capture" && args.size() == 4) {
         char* end = nullptr;

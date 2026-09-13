@@ -64,6 +64,14 @@ public:
 
     // Sets the destination for every smoothed parameter. Bands beyond
     // max_bands() are ignored. Real-time safe: no allocation.
+    //
+    // Bands are matched to their filters by Band::id, not by position, so
+    // deleting, inserting or reordering bands changes only the bands concerned.
+    // Ids must be unique within a state; bands that share an id are matched in
+    // list order.
+    //
+    // Bypass (EqState::bypass) crossfades the bands and the preamp out. Mute,
+    // trims, polarity, speaker mute, routing, bass management and delay stay.
     void set_target(const EqState& state);
 
     // Jumps every smoothed parameter to its target with no ramp, and clears
@@ -137,11 +145,13 @@ private:
     };
 
     void recompute_band(BandSlot& b);
+    void match_bands(const EqState& state, uint32_t count);
     void apply_band(uint32_t index, const Band& in);
     void remove_band(uint32_t index);
     void advance_smoothers(uint32_t frames);
     void begin_crossfade(uint32_t index);
-    void process_block(float* const* planar, uint32_t offset, uint32_t frames);
+    void process_block(float* const* planar, uint32_t offset, uint32_t frames, double bypass_begin,
+                       double bypass_end);
 
     void set_speaker_targets(const SpeakerSetup& sp);
     void recompute_bass_filters();
@@ -160,6 +170,10 @@ private:
     double fade_step_      = 1.0;   // per control block
 
     std::vector<BandSlot> bands_;
+    // set_target's working storage: which slots are taken, and the slot each
+    // incoming band goes to.
+    std::vector<uint8_t>  slot_claimed_;
+    std::vector<uint32_t> band_slot_;
     std::vector<State>    state_new_;   // [band * channels + channel]
     std::vector<State>    state_old_;
 
@@ -169,9 +183,8 @@ private:
     double trim_target_[kMaxChannels] = {};
     double trim_cur_[kMaxChannels]    = {};
     double mute_target_ = 1.0, mute_cur_ = 1.0;   // linear, 1 = audible
-    double bypass_target_ = 0.0, bypass_cur_ = 0.0;  // 1 = fully dry
+    double bypass_target_ = 0.0, bypass_cur_ = 0.0;  // 1 = EQ fully bypassed
 
-    std::vector<float>  dry_;        // one control block of pre-EQ audio, per channel
     std::vector<float>  scratch_;    // interleaving scratch
     std::vector<float*> pointers_;   // planar pointers into scratch_
 

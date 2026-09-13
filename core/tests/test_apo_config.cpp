@@ -246,7 +246,11 @@ TEST_CASE("channel names follow the device's speaker layout, as upstream Channel
     CHECK(joined(apo_channel_names({8, default_speaker_mask(8)})) == "L R C LFE RL RR SL SR");
     // Positions upstream has no name for, and channels past the mask, are numbered.
     CHECK(joined(apo_channel_names({12, kSpeaker714})) == "L R C LFE RL RR SL SR 9 10 11 12");
-    CHECK(joined(apo_channel_names({4, 0})) == "1 2 3 4");
+    // A layout with no mask gets upstream's default for its count (FilterEngine
+    // applies getDefaultChannelMask before naming); a count with no default is
+    // numbered.
+    CHECK(joined(apo_channel_names({4, 0})) == "L R RL RR");
+    CHECK(joined(apo_channel_names({3, 0})) == "1 2 3");
 
     // getDefaultChannelMask: only these counts have a default.
     CHECK(default_speaker_mask(1) == 0x4);
@@ -549,5 +553,112 @@ TEST_CASE("Preamp lines add up, and inside a Channel scope they are trims") {
             CHECK(wide.state.channel_gain_db[c] == doctest::Approx(0.0));
         }
         CHECK(wide.warnings.size() == 3);   // channel 11 trim, BOGUS, trim on nothing
+    }
+}
+
+TEST_CASE("a layout with no speaker mask resolves channel names by the default mask") {
+    const ApoParseResult r = parse_apo_config("Channel: R\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n", {2, 0});
+    CHECK(r.warnings.empty());
+    REQUIRE(r.state.bands.size() == 1);
+    CHECK(r.state.bands[0].channels == 0x2u);
+}
+
+TEST_CASE("a non-breaking space thousands separator in Fc is removed, as upstream does") {
+    // BiQuadFilterFactory::getFreq, "for locales utilizing non-breaking space":
+    // as UTF-8, or as the lone byte upstream's code-page fallback decodes.
+    for (const char* text : {"Filter 1: ON PK Fc 1\xC2\xA0" "200 Hz Gain -6 dB Q 1\n",
+                             "Filter 1: ON PK Fc 1\xA0" "200 Hz Gain -6 dB Q 1\n"}) {
+        const ApoParseResult r = parse_apo_config(text);
+        CHECK(r.warnings.empty());
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].fc == doctest::Approx(1200.0));
+    }
+}
+
+TEST_CASE("filter lines are read with upstream's patterns: case-sensitive, units required") {
+    // Each of these is a line Equalizer APO plays differently from a lenient
+    // reading; an import must measure the same as it does there.
+    struct Case { const char* text; bool band; };
+    const Case dropped[] = {
+        {"Filter 1: on PK Fc 100 Hz Gain -6 dB Q 1\n", false},    // ON is case-sensitive
+        {"Filter 1: ON pk Fc 100 Hz Gain -6 dB Q 1\n", false},    // so are the types
+        {"Filter 1: ON MODAL Fc 100 Hz Gain -6 dB Q 1\n", false},
+        {"Filter 1: ON PK fc 100 Hz Gain -6 dB Q 1\n", false},
+        {"Filter 1: ON PK Fc 100 hz Gain -6 dB Q 1\n", false},
+        {"Filter 1: ON PK Fc 100 Gain -6 dB Q 1\n", false},       // no Hz: no frequency
+        {"Filter 1: ON PK Fc 100 Hz Gain -6 Q 1\n", false},       // no dB: no gain
+        {"Filter 1: ON PK Fc 1 000 Hz Gain -6 dB Q 1\n", false},  // a plain space is no separator
+        {"Channel:\tR\nFilter 1: ON PK Fc 100 Hz Gain -6 dB Q 1\n", false},   // words split on spaces only
+    };
+    for (const Case& c : dropped) {
+        CAPTURE(c.text);
+        const ApoParseResult r = parse_apo_config(c.text);
+        CHECK(r.state.bands.empty());
+        CHECK_FALSE(r.warnings.empty());
+    }
+
+    SUBCASE("whitespace upstream's patterns allow") {
+        const ApoParseResult r = parse_apo_config(
+            "Filter 1: ON PK Fc 100 H z Gain -6 dB BW  Oct 1\n"
+            "Filter 2: ON PK Fc200Hz Gain-3dB Q2\n");
+        CHECK(r.warnings.empty());
+        REQUIRE(r.state.bands.size() == 2);
+        CHECK(r.state.bands[0].width_mode == WidthMode::BandwidthOct);
+        CHECK(r.state.bands[0].width == doctest::Approx(1.0));
+        CHECK(r.state.bands[1].fc == doctest::Approx(200.0));
+        CHECK(r.state.bands[1].gain_db == doctest::Approx(-3.0));
+        CHECK(r.state.bands[1].width == doctest::Approx(2.0));
+    }
+    SUBCASE("a shelf with both a dB slope and a Q uses the slope, which upstream reads last") {
+        const ApoParseResult r = parse_apo_config("Filter 1: ON LS 6 dB Fc 100 Hz Gain 6 dB Q 0.7\n");
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].width_mode == WidthMode::SlopeDb);
+        CHECK(r.state.bands[0].width == doctest::Approx(6.0));
+        CHECK(r.state.bands[0].shelf_corner);
+    }
+    SUBCASE("a negative width, which upstream designs unstable, is reported and dropped") {
+        const ApoParseResult r = parse_apo_config("Filter 1: ON LPQ Fc 100 Hz Q -1\n");
+        CHECK(r.state.bands.empty());
+        CHECK_FALSE(r.warnings.empty());
+    }
+}
+
+TEST_CASE("only a line starting with # is a comment, as upstream reads it") {
+    const ApoParseResult r = parse_apo_config(
+        "Include: EQ #2.txt\n"
+        "Filter 1: ON PK Fc 100 Hz # Gain 3 dB Q 1\n"
+        "  # Filter 2: ON PK Fc 200 Hz Gain 3 dB Q 1\n"
+        "#no colon either\n");
+    CHECK(r.warnings.empty());
+    REQUIRE(r.unsupported.size() == 1);
+    CHECK(r.unsupported[0] == "Include: EQ #2.txt");
+    REQUIRE(r.state.bands.size() == 1);
+    CHECK(r.state.bands[0].gain_db == doctest::Approx(3.0));
+}
+
+TEST_CASE("conditional sections are not merged silently") {
+    SUBCASE("a Stage section for capture only is skipped; playback stages are read") {
+        const ApoParseResult r = parse_apo_config(
+            "Stage: capture\n"
+            "Preamp: -6 dB\n"
+            "Filter 1: ON PK Fc 1000 Hz Gain 6 dB Q 1\n"
+            "Stage: pre-mix post-mix\n"
+            "Filter 2: ON PK Fc 2000 Hz Gain 6 dB Q 1\n"
+            "Stage: post-mix\n"
+            "Filter 3: ON PK Fc 3000 Hz Gain 6 dB Q 1\n");
+        CHECK(r.state.preamp_db == 0.0);
+        REQUIRE(r.state.bands.size() == 2);
+        CHECK(r.state.bands[0].fc == doctest::Approx(2000.0));
+        CHECK(r.state.bands[1].fc == doctest::Approx(3000.0));
+        CHECK_FALSE(r.warnings.empty());   // the skipped section is reported
+    }
+    SUBCASE("If and Else branches, which only Equalizer APO can evaluate, are reported") {
+        const ApoParseResult r = parse_apo_config(
+            "If: sampleRate == 44100\nPreamp: -3 dB\nElse:\nPreamp: -4 dB\nEndIf:\n");
+        CHECK_FALSE(r.ok());
+    }
+    SUBCASE("Device sections for particular devices are reported; Device: all is not") {
+        CHECK_FALSE(parse_apo_config("Device: Speakers\nPreamp: -6 dB\nDevice: Headphones\nPreamp: -3 dB\n").ok());
+        CHECK(parse_apo_config("Device: all\nPreamp: -6 dB\n").ok());
     }
 }

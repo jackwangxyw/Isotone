@@ -35,6 +35,10 @@ inline const float* audio_ring_samples(const AudioRingHeader* ring) {
     return reinterpret_cast<const float*>(ring + 1);
 }
 
+// Claims from another process that must see the owner's write index stand
+// still before they take the ring over.
+inline constexpr uint32_t kRingStaleClaims = 50;
+
 // Called once by whichever side creates the region.
 void audio_ring_init(AudioRingHeader* ring, uint32_t capacity);
 
@@ -51,9 +55,12 @@ public:
     void set_channels(uint32_t channels);
 
     // Tries to become the ring's writer. Succeeds if nobody holds it, or if the
-    // holder's token names a different process: an owner from another process
-    // means the audio engine restarted while the UI kept the mapping open, and
-    // that owner is dead. Real-time safe: one compare-and-swap.
+    // holder's token names a different process and its write index has stood
+    // still for kRingStaleClaims calls in a row: that owner is dead (the audio
+    // engine restarted while the UI kept the mapping open) or no longer
+    // playing. A live owner in another process keeps the ring, so two processes
+    // hosting one endpoint do not take it from each other on every call. Call it
+    // again on later process calls while it fails. Real-time safe.
     // Token layout: process id in the high 32 bits, an instance serial below.
     bool claim(uint64_t token);
     void release();
@@ -76,6 +83,11 @@ private:
     uint32_t         next_     = 0;
     uint64_t         token_    = 0;
     bool             owner_    = false;
+    // The other process's claim and write index as the last failed claim saw
+    // them, and how many claims in a row have seen them unchanged.
+    uint64_t         seen_writer_ = 0;
+    uint32_t         seen_index_  = 0;
+    uint32_t         stale_       = 0;
 };
 
 // Reader side. A fresh cursor, or one whose epoch has moved on, synchronises to

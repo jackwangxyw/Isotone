@@ -38,7 +38,8 @@ uint32_t default_speaker_mask(uint32_t channels);
 
 // Upstream's name for each channel of a layout (getChannelNames): L R C LFE RL
 // RR RC SL SR for those positions, and the 1-based channel number for any
-// other position or for channels the mask does not cover. On input, `SUB` is an
+// other position or for channels the mask does not cover. A mask of 0 is
+// replaced by default_speaker_mask first, as upstream's FilterEngine does. On input, `SUB` is an
 // alias for LFE, and SL/SR and RL/RR stand in for each other when the layout
 // has only one pair.
 std::vector<std::string> apo_channel_names(const ChannelLayout& layout);
@@ -52,9 +53,9 @@ struct ApoParseResult {
     EqState state;
 
     // Lines the importer understood but cannot represent: convolution, VST,
-    // GraphicEQ, Delay, Copy, Include, If/Stage expressions. Kept verbatim so an
-    // exporter can write them back out and a user's config is not silently
-    // destroyed on a round trip.
+    // GraphicEQ, Delay, Copy, Include, If/Else. Kept verbatim so an exporter
+    // can write them back out and a user's config is not silently destroyed on
+    // a round trip. Lines under a Stage that is not for playback are skipped.
     std::vector<std::string> unsupported;
 
     // Device: patterns seen, in order. Empty means the file was unscoped.
@@ -67,6 +68,16 @@ struct ApoParseResult {
 
 // Parses an Equalizer APO configuration. Never throws and never fails outright:
 // unparseable lines become warnings, exactly as upstream logs and skips them.
+// Filter lines are read with upstream's own patterns, so a line it ignores
+// (lower-case `on`, a frequency without `Hz`) is ignored here too, with a
+// warning. A result with warnings may not measure as the file does in
+// Equalizer APO: Device sections for particular devices and If/Else branches
+// are all imported, since only the device the file runs on can decide them.
+//
+// `layout` must be the layout of the device the result is for. Channel names
+// resolve through it, and mute is recognised only as a Copy line silencing
+// every channel it has: mute written for stereo and read as 7.1 is not mute,
+// as it is not on a 7.1 device in Equalizer APO.
 ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& layout = {});
 
 struct ApoFormatOptions {

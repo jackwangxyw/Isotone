@@ -1340,6 +1340,131 @@ hosted, unhosted, Equalizer APO unregistered). With the takeover disabled the
 replacing runs fail and the plain ones do not. Dry run on CABLE Input: its record
 takes `!VALUE` for SFX and MFX and Equalizer APO's record is deleted.
 
+## 2026-09-13: Pre-UI review
+
+Six read-only reviewers (core DSP, core model and transport, IsoAPO, compat
+backend, devicetool and tools, test suite) before stage 4. Every finding was
+checked with a test that failed first, fixed, and mutation-checked: the fix
+reverted, the test must fail. 90 mutations, all caught; the three that first
+survived exposed weak tests, which were strengthened. Owner's decision: bypass is
+EQ only.
+
+**Core DSP**
+- **Bands keep their slot by `Band::id`**, not list position. Deleting,
+  inserting or reordering a band used to crossfade every band after it. Ids must
+  be unique within a state.
+- **Bypass turns off the bands and the preamp only.** Mute, trims, balance,
+  polarity, speaker mute, routing, bass management and delay stay. Same in
+  `magnitude_db`, `flat_gain_db`, `composite_peak_db` and the compat file.
+- A change queued behind a crossfade starts after the fade's last sample; it
+  skipped the last step.
+- A NaN on one input no longer resets every routed output (0 × NaN in the
+  matrix); outputs past float range are cleared, not played as inf.
+- Bandwidth is clamped to an equivalent Q of 1e-4, so a wide band near Nyquist
+  cannot design a2 = −1.
+- The param block writer takes the seqlock with a compare-and-swap. Two writers
+  used to both hold it: 126 torn blocks in 13,565 reads, and the engine then
+  never re-read.
+
+**Config format**
+- **Export writes what the processor plays:** a bandwidth shelf as LSC/HSC with
+  the Q for the device's rate (LS + Q was 3.6 dB off); a dB slope past the
+  processor's limit at that limit (upstream takes the root of a negative number);
+  bands with no width as OFF; nothing non-finite; gains and levels clamped.
+- **Import reads filter lines with upstream's own patterns:** case-sensitive
+  tokens, `Hz` and `dB` required, a shelf's dB slope over its Q, channel words
+  split on spaces only, `#` a comment only at the start of a line, U+00A0 in Fc
+  removed. Lines upstream ignores are ignored with a warning.
+- Sections under `Stage:` for capture only are skipped. `Device:` lines other
+  than `all` and `If:`/`Else:` branches are imported, with a warning each.
+- A layout with no speaker mask names channels by the default mask.
+- `to_param_block` returns false when bands past 64 were dropped.
+- A ring claim from another process waits for the owner's write index to stand
+  still for 50 claims. Two live hosts took it from each other on every call.
+
+**IsoAPO**
+- **Saved state per endpoint:** `%ProgramData%\IsoAPO\devices\{guid}.bin`, a
+  `ParamBlock` as bytes (`windows/transport/persisted_state.h`). A file that
+  exists is the device's state, flat included. No file: flat. An invalid file:
+  flat. Read before the region is created, so sibling instances never wait on
+  disk. `config.txt` is no longer read. The self-test build keeps the -12 dB
+  default. `isotone-shm persist` and `forget` write and delete it.
+- A region Initialize could not create is created at LockForProcess.
+- An IsoAPO initialized inside its own child's creation refuses. A wrapper APO
+  whose record names IsoAPO would otherwise recurse until audiodg's stack
+  overflowed.
+- A child that fails its lock is dropped only when IsoAPO can process the format
+  alone; otherwise the lock fails and the child is kept for the next attempt.
+- The output flags are set before the child runs; the max frame count falls back
+  to the output's; `Reset` clears the processor and reaches the child; a
+  discovery-only instance does no work; a second lock is refused before the
+  child is touched.
+
+**Compat backend**
+- **Routing and output sections address channels by number inside
+  `If: outputChannelCount == N`.** Equalizer APO applies Isotone.txt to whatever
+  format the device has when it loads. A Copy source naming a channel the
+  layout lacks is added as a constant: a block written for 7.1 put DC of 1.0 on
+  a stereo device, and 3.0 on the LFE of a 2.1 device. Tested on every pair of 8
+  layouts through the upstream model.
+- **Bands are guarded by `If: sampleRate >= X`**, the lowest rate at which every
+  written frequency is below the processor's clamp. At a lower rate upstream
+  designs the band unstable.
+- **Mute is `Preamp: -1000 dB`.** Upstream stores the gain as a float, so it is
+  exactly 0 on any layout; the Copy form left channels a grown layout added
+  playing.
+- **Bypass comments out the preamp and bands, and ends at `# Isotone: end`.**
+  Files written before, with everything commented to the end, still read.
+- A second block for a device is removed on update and reported on read; a full
+  device ID names the endpoint by its GUID; a routing section without its end
+  marker no longer swallows the curve.
+- An include of Isotone.txt under a narrower `Device:` or inside `If:` is not
+  attached, and attach refuses rather than include it twice.
+- Each write re-reads Isotone.txt and keeps another writer's blocks; a pending
+  live edit is written when the writer goes away.
+- The install guard refuses everything when a root exists but reports no file ID.
+- `isotone-compat apply` requires `--channels` and `--rate`.
+
+**devicetool and tools**
+- Replacing Equalizer APO takes its originals for the slots its install deleted.
+- Uninstall on a detached endpoint leaves the driver's mode lists alone; the
+  install mode is recorded and repair reuses it; a `--mode` that would delete a
+  slot where Equalizer APO hosts an APO is refused; uninstall works on a device
+  that is no longer present.
+- **Rollback** covers FxProperties' creation, both install records and their
+  parent keys, and runs on the replacement path, uninstall and repair, not only
+  install. `roundtrip` checks it: 27 dry runs on 6 present outputs pass, and 4
+  rollback mutations fail them. Not covered: upstream's ownership and ACL change
+  on an endpoint key with no FxProperties.
+- Dry runs route DWORD and type reads through the hook, nest, keep a deleted and
+  recreated key empty, and print their operations on failure.
+- `roundtrip --simulate-equalizerapo` refuses an endpoint without Equalizer APO,
+  where the simulation meant nothing.
+- `isotone-measure` keeps 50 ms queued instead of 200 ms, retakes a window with a
+  capture discontinuity or render underrun (up to 3 times), and reports glitches
+  and each channel's residual after the fitted sine. On the cable: 0 glitches,
+  residual -106 dB. This may explain the 0.3 to 0.65 dB drops seen earlier;
+  not yet confirmed.
+- Loopback and ring captures report dropped frames and discontinuities, and are
+  `complete` only without them. JSON never carries nan.
+- `gen_reference.py`: the Peace cases were mislabelled (a 0.9 dB slope, not
+  upstream's no-width default). The real no-width cases and LS/HS with a Q and
+  the corner shift are added; the core matches scipy on all 26.
+
+**Not changed, noted:** the backups directory is writable by standard users (the
+trust decision covers it); the `unregistered` roundtrip simulation passes by
+construction since the record takeover; `equalizerapo_slots_removed` does not
+count slots upstream's install deleted.
+
+**Tests:** `core_tests` 177 cases, `compat_tests` 35, APO self test and the shm
+transport check pass on MSVC; `core_tests` passes on GCC 16.1 with no warnings.
+
+**Not yet verified live** (needs the new DLL staged, and for the compat items
+Equalizer APO on an endpoint that can be measured): saved state loaded by
+audiodg as LocalService from ProgramData; Equalizer APO evaluating
+`outputChannelCount`, `sampleRate >= X` and a -1000 dB preamp as modelled; the
+two-reload question for `Isotone.txt.tmp`.
+
 ---
 
 # Where things stand (end of 2026-09-13)
@@ -1352,7 +1477,7 @@ takes `!VALUE` for SFX and MFX and Equalizer APO's record is deleted.
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (144 cases now) |
+| 2. Core | complete | 177 cases green on MSVC 19.51 and GCC 16.1.0 after the pre-UI review |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; `compat_tests` 19 cases |
 | 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
@@ -1382,10 +1507,10 @@ core/                  the DSP core: types, biquad design, response evaluation,
 core/tests/            10 test files; reference data from scipy at 4 sample rates
 tools/gen_reference.py independent scipy implementation that generates it
 tools/check_shm_transport.py  cross-process transport check, runs in CI
-windows/transport/     the named shared mapping, used by the APO and the tools
+windows/transport/     the named shared mapping and the per-endpoint saved state
 windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test
 windows/measure/       isotone-measure: endpoint list, stepped-sine measurement
-windows/shmtool/       isotone-shm: status / write / capture on a live region
+windows/shmtool/       isotone-shm: status / write / persist / forget / capture
 windows/devicetool/    isotone-devicetool, with upstream's registration code vendored
 windows/compat/        isotone-compat: the Equalizer APO backend (Isotone.txt)
 docs/decisions.md      this file
@@ -1416,10 +1541,12 @@ can be built UI-first.
 `--replace-equalizerapo`, in MFX (`,6`). SFX (`,5`) is empty: Equalizer APO no
 longer runs on CABLE Input (its pre-mix class there had been applying
 `peace.txt`). CABLE Output, the capture side, still has Equalizer APO. Every
-other endpoint is untouched. A stream opened on CABLE Input with no region
-already held gets the default seed, a -12 dB band at 1 kHz. Nothing the owner
-listens to routes through the cable. The staged DLL is the `d02eddc` build
-(param block v4), without the mute snap.
+other endpoint is untouched. Nothing the owner listens to routes through the
+cable. The staged DLL is the one staged for the mute snap measurement
+(2026-09-13), before the pre-UI review. With it, a stream opened on CABLE
+Input with no region already held gets the old default, a -12 dB band at 1 kHz;
+the reviewed DLL starts flat unless `%ProgramData%\IsoAPO\devices` has a file
+for the endpoint.
 
 **CABLE Input and CABLE Output are 7.1** (8 channels, 24-bit, 48 kHz, `0x63F`),
 set for the multichannel measurement; they were 2 channels, 24-bit, `0x3`.
@@ -1429,9 +1556,12 @@ CABLE Input > Configure > Stereo, and CABLE Output > Properties > Advanced >
 
 To remove it, elevated:
 `.\build\windows\devicetool\isotone-devicetool.exe uninstall '{798436d2-8c71-4834-9248-00ccbaaca00a}'`
-then `Restart-Service Audiosrv -Force`. Its dry run restores `,5` and `,6` to
-Equalizer APO's pre-mix and post-mix classes, the same values as the older
-`windows/apo/IsoAPO-backup-Render-798436d2-....reg`.
+then `Restart-Service Audiosrv -Force`. Since the owner ran the record takeover
+(2026-09-13), Equalizer APO's record for CABLE Input is gone and IsoAPO's record
+says every slot was empty before either EQ; the uninstall dry run deletes `,6`
+and the record and leaves CABLE Input with no effects. The older
+`windows/apo/IsoAPO-backup-Render-798436d2-....reg` still holds Equalizer APO's
+classes if they are wanted back.
 
 ## Standing rules
 

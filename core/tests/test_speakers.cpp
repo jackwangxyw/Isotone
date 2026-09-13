@@ -325,9 +325,9 @@ TEST_CASE("bass management: a small speaker and the sub sum flat through the cro
             sum[i] = main[i] + sub[i];
         }
         CAPTURE(f);
-        CHECK(db(amplitude(sum, bin)) == doctest::Approx(0.0).epsilon(0.0).scale(1.0).epsilon(0.02));
-        CHECK(db(amplitude(main, bin)) == doctest::Approx(lr4_db(FilterType::HighPass, 80.0, f)).scale(1.0).epsilon(0.02));
-        CHECK(db(amplitude(sub, bin)) == doctest::Approx(lr4_db(FilterType::LowPass, 80.0, f)).scale(1.0).epsilon(0.02));
+        CHECK(std::abs(db(amplitude(sum, bin))) < 0.02);
+        CHECK(std::abs(db(amplitude(main, bin)) - lr4_db(FilterType::HighPass, 80.0, f)) < 0.02);
+        CHECK(std::abs(db(amplitude(sub, bin)) - lr4_db(FilterType::LowPass, 80.0, f)) < 0.02);
         std::vector<double> other(kN);
         for (size_t i = 0; i < kN; ++i) other[i] = out[FR][i];
         CHECK(amplitude(other, bin) < 1e-6);   // a speaker that is not small gets none of it
@@ -388,7 +388,7 @@ TEST_CASE("the LFE low-pass filters the LFE channel's own content") {
         const auto out = run(p, kN, tone, 256, 32768);
         std::vector<double> sub(out[LFE].begin(), out[LFE].end());
         CAPTURE(f);
-        CHECK(db(amplitude(sub, bin)) == doctest::Approx(lr4_db(FilterType::LowPass, 120.0, f)).scale(1.0).epsilon(0.02));
+        CHECK(std::abs(db(amplitude(sub, bin)) - lr4_db(FilterType::LowPass, 120.0, f)) < 0.02);
     }
 }
 
@@ -454,8 +454,64 @@ TEST_CASE("hostile speaker values cannot poison the processor") {
     Processor p = make(8, kMask71, s);
     const auto out = run(p, 96000, [](uint32_t c, size_t i) { return std::sin(0.01 * static_cast<double>(i) * (c + 1)); });
     bool finite = true;
-    for (const auto& ch : out) for (float v : ch) finite &= std::isfinite(v);
+    double loudest = 0.0;
+    for (const auto& ch : out) {
+        for (float v : ch) {
+            finite &= std::isfinite(v);
+            loudest = std::max(loudest, std::abs(static_cast<double>(v)));
+        }
+    }
     CHECK(finite);
+    CHECK(loudest > 0.1);   // finite silence would also pass the check above
+}
+
+TEST_CASE("a delay rounds to the nearest whole sample") {
+    // 0.7 ms is 33.6 samples at 48 kHz and 30.87 at 44.1 kHz: the rounding
+    // Equalizer APO's DelayFilter does, not truncation.
+    for (const auto& [fs, expected] : {std::pair{48000.0, size_t{34}}, std::pair{44100.0, size_t{31}}}) {
+        EqState s;
+        s.speakers.delay_ms[0] = 0.7;
+        Processor p;
+        p.initialize(fs, 2, 1024, 64, 0x3);
+        p.set_target(s);
+        p.reset();
+        const auto out = run(p, 256, [](uint32_t, size_t i) { return i == 10 ? 1.0 : 0.0; });
+        CAPTURE(fs);
+        CHECK(out[0][10 + expected] == doctest::Approx(1.0f));
+    }
+}
+
+TEST_CASE("lip sync delays channels past the eighth too") {
+    EqState s;
+    s.speakers.lip_sync_ms = 1.0;   // 48 samples
+    Processor p = make(12, 0x2D63F, s);
+    const auto out = run(p, 256, [](uint32_t, size_t i) { return i == 5 ? 1.0 : 0.0; });
+    for (uint32_t c = 0; c < 12; ++c) {
+        CAPTURE(c);
+        CHECK(out[c][53] == doctest::Approx(1.0f));
+        CHECK(out[c][5] == 0.0f);
+    }
+}
+
+TEST_CASE("a delay changed again while its crossfade runs ends on the last value, without a click") {
+    constexpr double kFreq = 50.0;
+    auto sine = [](uint32_t, size_t i) { return std::sin(2.0 * kPi * kFreq * static_cast<double>(i) / kFs); };
+    EqState s;
+    Processor p = make(2, 0x3, s);
+    auto a = run(p, 4800, sine);
+    s.speakers.delay_ms[0] = 2.0;
+    p.set_target(s);
+    auto b = run(p, 96, sine, 48, 4800);          // 2 ms into the 10 ms delay fade
+    s.speakers.delay_ms[0] = 5.0;                  // 240 samples
+    p.set_target(s);
+    auto c = run(p, 19104, sine, 48, 4896);
+    std::vector<float> joined = a[0];
+    joined.insert(joined.end(), b[0].begin(), b[0].end());
+    joined.insert(joined.end(), c[0].begin(), c[0].end());
+    CHECK(worst_step(joined) < 2.0 * std::sin(kPi * kFreq / kFs) * 1.10);
+    double err = 0.0;
+    for (size_t i = 9600; i < c[0].size(); ++i) err = std::max(err, std::abs(c[0][i] - sine(0, 4896 + i - 240)));
+    CHECK(err < 1e-5);
 }
 
 TEST_CASE("the speaker setup survives a trip through the param block") {

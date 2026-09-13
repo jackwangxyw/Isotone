@@ -12,6 +12,11 @@ namespace {
 constexpr double kPi  = 3.14159265358979323846;
 constexpr double kLn2 = 0.69314718055994530942;
 
+// The narrowest band a bandwidth may describe, as an equivalent Q. sinh grows
+// so fast that a wide bandwidth near Nyquist rounds a2 to exactly -1, poles on
+// the unit circle; this is the same floor the processor puts under Q.
+constexpr double kMinEquivalentQ = 1e-4;
+
 bool finite(double v) { return std::isfinite(v); }
 
 // Width term of the RBJ formulas. alpha sets how wide in frequency the filter
@@ -24,7 +29,7 @@ double alpha_for(WidthMode mode, double width, double sin_w0, double w0, double 
         case WidthMode::BandwidthOct:
             // sinh form; the w0/sin(w0) factor undoes the bilinear frequency warp
             // so the -3 dB points land a true `width` octaves apart.
-            return sin_w0 * std::sinh(kLn2 / 2.0 * width * w0 / sin_w0);
+            return std::min(sin_w0 * std::sinh(kLn2 / 2.0 * width * w0 / sin_w0), sin_w0 / (2.0 * kMinEquivalentQ));
         case WidthMode::SlopeDb: {
             // S is normalised so S = 1 is the steepest shelf without overshoot.
             // Upstream divides a dB-per-octave slope by 12 to get S.

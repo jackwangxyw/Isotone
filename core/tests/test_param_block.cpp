@@ -155,7 +155,7 @@ TEST_CASE("bands beyond the block capacity are dropped, not overflowed") {
 
     ParamBlock block{};
     init_param_block(&block);
-    to_param_block(s, &block);
+    CHECK_FALSE(to_param_block(s, &block));   // the caller learns bands were dropped
     CHECK(block.band_count == kParamMaxBands);
     CHECK(param_block_valid(block));
 
@@ -252,15 +252,17 @@ struct SeqlockRun {
 // time between writes, standing in for the gap between UI updates. It must be
 // wall-clock rather than a spin count: a busy-wait stops being a time proxy the
 // moment the machine is loaded, and made this test flaky on a busy CI box.
-SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap) {
+SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writers = 1) {
     ParamBlock shared{};
     init_param_block(&shared);
 
     std::atomic<bool> stop{false};
     std::atomic<int> accepted{0}, rejected{0}, torn{0};
 
-    std::thread writer([&] {
-        uint32_t generation = 1;
+    // Each writer's generations carry its own number in the top byte, so two
+    // writers never write the same generation.
+    auto write_loop = [&](uint32_t who) {
+        uint32_t generation = (who << 24) + 1;
         while (!stop.load(std::memory_order_relaxed)) {
             param_block_write(&shared, [&](ParamBlock* b) {
                 b->band_count = kParamMaxBands;
@@ -278,7 +280,9 @@ SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap) {
                 std::this_thread::sleep_for(writer_gap);
             }
         }
-    });
+    };
+    std::vector<std::thread> threads;
+    for (int w = 0; w < writers; ++w) threads.emplace_back(write_loop, static_cast<uint32_t>(w));
 
     std::thread reader([&] {
         ParamBlock copy{};
@@ -308,7 +312,7 @@ SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap) {
     });
 
     reader.join();
-    writer.join();
+    for (std::thread& t : threads) t.join();
     return {accepted.load(), rejected.load(), torn.load()};
 }
 
@@ -325,6 +329,63 @@ TEST_CASE("a reader never observes a half-written block, even under full content
     CHECK(r.torn == 0);
 }
 
+TEST_CASE("two writers at once never publish a half-written block") {
+    // The UI and isotone-shm, or two users' UIs, can write the same region. With
+    // both taking the lock by storing an odd value, the first to finish marked
+    // the other's half-written block consistent (review 2026-09-13). Forced
+    // here: B starts while A is writing, A finishes, and the block is read
+    // before B does. A waits at most 50 ms for B, well under the time after
+    // which a writer treats a held lock as abandoned.
+    using namespace std::chrono_literals;
+    ParamBlock shared{};
+    init_param_block(&shared);
+    std::atomic<bool> a_inside{false}, b_inside{false}, a_done{false}, read_taken{false};
+    auto wait_for = [](const std::atomic<bool>& flag, std::chrono::milliseconds limit) {
+        const auto until = std::chrono::steady_clock::now() + limit;
+        while (!flag.load() && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(1ms);
+    };
+    auto fill = [](ParamBlock* b, uint32_t from, uint32_t to, float value) {
+        for (uint32_t i = from; i < to; ++i) b->bands[i].fc = value;
+    };
+
+    std::thread a([&] {
+        param_block_write(&shared, [&](ParamBlock* b) {
+            b->band_count = kParamMaxBands;
+            fill(b, 0, kParamMaxBands, 100.0f);
+            a_inside = true;
+            wait_for(b_inside, 50ms);
+        });
+        a_done = true;
+    });
+    wait_for(a_inside, 2000ms);
+    std::thread b([&] {
+        param_block_write(&shared, [&](ParamBlock* blk) {
+            b_inside = true;
+            fill(blk, 0, kParamMaxBands / 2, 200.0f);
+            wait_for(a_done, 2000ms);
+            wait_for(read_taken, 2000ms);
+            fill(blk, kParamMaxBands / 2, kParamMaxBands, 200.0f);
+        });
+    });
+    wait_for(a_done, 2000ms);
+    ParamBlock copy{};
+    const bool accepted = param_block_read(&shared, &copy);
+    read_taken = true;
+    a.join();
+    b.join();
+
+    if (accepted) {
+        const float first = copy.bands[0].fc;
+        bool consistent = true;
+        for (uint32_t i = 0; i < kParamMaxBands; ++i) consistent &= copy.bands[i].fc == first;
+        CHECK(consistent);
+    }
+    ParamBlock after{};
+    REQUIRE(param_block_read(&shared, &after));
+    CHECK(after.bands[0].fc == 200.0f);
+    CHECK(after.bands[kParamMaxBands - 1].fc == 200.0f);
+}
+
 TEST_CASE("at a realistic update rate almost every read succeeds") {
     // The UI writes tens to a couple of hundred times a second while dragging,
     // and the host reads once per audio block. Reads should essentially always
@@ -334,6 +395,18 @@ TEST_CASE("at a realistic update rate almost every read succeeds") {
     CAPTURE(r.rejected);
     CHECK(r.torn == 0);
     CHECK(r.accepted > r.rejected * 10);
+}
+
+TEST_CASE("a consistent read of an invalid block still fails") {
+    ParamBlock shared{};
+    init_param_block(&shared);
+    ParamBlock out{};
+    REQUIRE(param_block_read(&shared, &out));
+    shared.band_count = kParamMaxBands + 1;
+    CHECK_FALSE(param_block_read(&shared, &out));
+    shared.band_count = 0;
+    shared.hdr.magic = 0;
+    CHECK_FALSE(param_block_read(&shared, &out));
 }
 
 TEST_CASE("a write in progress is reported as a failed read, not a bad one") {

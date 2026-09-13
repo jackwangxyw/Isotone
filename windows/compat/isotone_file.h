@@ -62,20 +62,24 @@
 namespace isotone::compat {
 
 struct DeviceConfig {
-    std::string   endpoint_guid;   // with or without braces
+    std::string   endpoint_guid;   // with or without braces, or a full device ID
     ChannelLayout layout;          // the device's mix format: channel count and speaker mask
     double        sample_rate = 0; // the device's rate; 0 writes frequencies unclamped
     EqState       state;
 };
 
-// The block for one device, ending in a newline.
+// The block for one device, ending in a newline. Routing and output are
+// written for `layout`'s channel count and do nothing on another; bands are
+// written for `sample_rate` and do nothing at a rate where they would be
+// unstable. Bypass comments out the preamp and bands only.
 std::string format_device_block(const DeviceConfig& device);
 
 // Replaces the block for `device` in an existing Isotone.txt, or appends one.
-// Every other byte of `existing`, other devices' blocks included, is kept.
+// Every other byte of `existing`, other devices' blocks included, is kept,
+// except further blocks for the same device, which are removed.
 std::string update_isotone_file(const std::string& existing, const DeviceConfig& device);
 
-// Removes a device's block; returns `existing` unchanged if there is none.
+// Removes a device's blocks; returns `existing` unchanged if there are none.
 std::string remove_device(const std::string& existing, const std::string& endpoint_guid);
 
 struct ParsedDevice {

@@ -7,6 +7,7 @@ add_executable(core_tests
     test_param_block.cpp
     test_processor.cpp
     test_smoothing.cpp
+    test_dynamics.cpp
     test_response.cpp
     test_reference.cpp
     test_hardening.cpp

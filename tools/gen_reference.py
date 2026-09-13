@@ -160,11 +160,20 @@ CASES = [
     ("lsc_105_p6p4_q0p7",  "low_shelf",   105.0,   6.4, 0.70,  "q",     False),
     ("hsc_10k_m2p1_q0p7",  "high_shelf",10000.0,  -2.1, 0.70,  "q",     False),
     ("lsc_200_m6_q1",      "low_shelf",   200.0,  -6.0, 1.0,   "q",     False),
-    # Peace emits LS/HS with no Q, i.e. default slope and shelf_corner True.
+    # A dB slope with the corner shift: LS/HS with a slope before Fc. A slope of
+    # 0.9 dB is S = 0.075, a very gentle shelf, not upstream's no-width default.
     ("ls_1100_m3_corner",  "low_shelf",  1100.0,  -3.0, 0.9,   "slope", True),
     ("hs_3000_p4_corner",  "high_shelf", 3000.0,   4.0, 0.9,   "slope", True),
     ("ls_100_p6_slope6",   "low_shelf",   100.0,   6.0, 6.0,   "slope", True),
     ("hsc_8k_p5_slope12",  "high_shelf", 8000.0,   5.0, 12.0,  "slope", False),
+    # Peace emits LS/HS with no width. Upstream then uses S = 0.9 directly, with
+    # no division by 12 and no corner shift; the parser stores that as a 10.8 dB
+    # slope without the corner flag.
+    ("ls_1100_m3_nowidth", "low_shelf",  1100.0,  -3.0, 10.8,  "slope", False),
+    ("hs_3000_p4_nowidth", "high_shelf", 3000.0,   4.0, 10.8,  "slope", False),
+    # LS/HS with a Q: the corner shift through the Q to S conversion.
+    ("ls_300_p6_q0p7_corner", "low_shelf",  300.0,  6.0, 0.7,  "q",     True),
+    ("hs_4k_m4_q1_corner",    "high_shelf", 4000.0, -4.0, 1.0, "q",     True),
 ]
 
 

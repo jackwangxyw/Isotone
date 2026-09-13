@@ -62,7 +62,8 @@ TEST_CASE("zero gain peaking is the identity") {
 
 TEST_CASE("peaking gain is symmetric in sign") {
     // A +6 dB bell and a -6 dB bell of the same Q are mirror images. This is a
-    // property of the RBJ peaking form, and it catches an A vs 1/A swap.
+    // property of the RBJ peaking form. It does not catch an A vs 1/A swap,
+    // which maps +g to -g and keeps the symmetry; the gain-at-fc test does.
     const double up   = mag_at(peaking(1000.0, 6.0, 2.0), 1200.0, kFs);
     const double down = mag_at(peaking(1000.0, -6.0, 2.0), 1200.0, kFs);
     CHECK(up == doctest::Approx(-down).epsilon(1e-9));
@@ -289,4 +290,50 @@ TEST_CASE("response outside the valid band is unity") {
     CHECK(std::abs(response(c, -5.0, kFs)) == doctest::Approx(1.0));
     CHECK(std::abs(response(c, 0.0, kFs)) == doctest::Approx(1.0));
     CHECK(std::abs(response(c, 30000.0, kFs)) == doctest::Approx(1.0));
+}
+
+TEST_CASE("an LS shelf with a Q width shifts fc by the slope that Q implies") {
+    // Upstream converts Q to the slope S = 1 / ((1/Q^2 - 2) / (A + 1/A) + 1) and
+    // shifts fc by 10^(|gain| / 80 / S). At Q = 1/sqrt(2), S = 1 exactly, so an LS
+    // at 1 kHz and +6 dB designs the same filter as LSC at 1000 * 10^(6/80).
+    Band ls;
+    ls.type = FilterType::LowShelf;
+    ls.fc = 1000.0;
+    ls.gain_db = 6.0;
+    ls.width = 1.0 / std::sqrt(2.0);
+    ls.shelf_corner = true;
+    Band lsc = ls;
+    lsc.shelf_corner = false;
+    lsc.fc = 1000.0 * std::pow(10.0, 6.0 / 80.0);
+    for (const FilterType type : {FilterType::LowShelf, FilterType::HighShelf}) {
+        ls.type = lsc.type = type;
+        lsc.fc = type == FilterType::LowShelf ? 1000.0 * std::pow(10.0, 6.0 / 80.0) : 1000.0 / std::pow(10.0, 6.0 / 80.0);
+        const BiquadCoeffs a = design(ls, kFs);
+        const BiquadCoeffs b = design(lsc, kFs);
+        CHECK(std::abs(a.b0 - b.b0) < 1e-9);
+        CHECK(std::abs(a.b1 - b.b1) < 1e-9);
+        CHECK(std::abs(a.b2 - b.b2) < 1e-9);
+        CHECK(std::abs(a.a1 - b.a1) < 1e-9);
+        CHECK(std::abs(a.a2 - b.a2) < 1e-9);
+    }
+}
+
+TEST_CASE("a wide bandwidth near Nyquist still designs a stable filter") {
+    // sinh in the bandwidth form grows fast enough that a2 rounded to exactly -1
+    // (review 2026-09-13); the alpha floor keeps the poles inside the unit circle.
+    for (double bw : {6.0, 10.0, 30.0}) {
+        for (double fc : {20000.0, 22800.0}) {
+            Band b;
+            b.type = FilterType::Peaking;
+            b.fc = fc;
+            b.gain_db = 6.0;
+            b.width = bw;
+            b.width_mode = WidthMode::BandwidthOct;
+            const BiquadCoeffs c = design(b, 48000.0);
+            CAPTURE(bw);
+            CAPTURE(fc);
+            CHECK(std::abs(c.a2) < 1.0);
+            CHECK(std::abs(c.a1) < 1.0 + c.a2);
+        }
+    }
 }

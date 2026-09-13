@@ -82,7 +82,13 @@ bool same(const Identity& a, const Identity& b) {
 
 bool path_is_inside(const std::filesystem::path& candidate, const std::filesystem::path& root) {
     Identity root_id;
-    if (root.empty() || !identity_of(root, &root_id)) return false;   // no such root, nothing to protect
+    if (root.empty()) return false;
+    if (!identity_of(root, &root_id)) {
+        // No such root, nothing to protect. A root that exists but reports no
+        // identity (a file system without file IDs) cannot be compared against:
+        // refuse everything rather than nothing.
+        return GetFileAttributesW(root.c_str()) != INVALID_FILE_ATTRIBUTES;
+    }
 
     std::error_code ec;
     std::filesystem::path p = std::filesystem::absolute(candidate, ec).lexically_normal();

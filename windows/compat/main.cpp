@@ -7,8 +7,11 @@
 //   isotone-compat inspect  [root]
 //   isotone-compat attach   [root]
 //   isotone-compat detach   [root]
-//   isotone-compat apply    [root] --device <guid> [--channels N --mask 0xMASK] [--rate HZ]
+//   isotone-compat apply    [root] --device <guid> --channels N [--mask 0xMASK] --rate HZ
 //                           [--bypass] [--mute] [--speakers "key=value ..."] <config.txt | ->
+//
+// apply needs the device's format: the block is written for that channel count
+// and rate, and does nothing on another.
 //   isotone-compat show     [root] [--channels N --mask 0xMASK]
 //   isotone-compat loopback --render <guid> --seconds <s> <out.wav>
 //
@@ -58,7 +61,7 @@ int usage() {
                  "  isotone-compat attach   [--root DIR | --real-install]\n"
                  "  isotone-compat detach   [--root DIR | --real-install]\n"
                  "  isotone-compat apply    [--root DIR | --real-install] --device GUID\n"
-                 "                          [--channels N --mask 0xMASK] [--rate HZ] [--bypass] [--mute] [--speakers SETTINGS]\n"
+                 "                          --channels N [--mask 0xMASK] --rate HZ [--bypass] [--mute] [--speakers SETTINGS]\n"
                  "                          <config.txt | ->\n"
                  "  isotone-compat show     [--root DIR | --real-install] [--channels N --mask 0xMASK]\n"
                  "  isotone-compat loopback --render GUID --seconds S <out.wav>\n");
@@ -219,6 +222,7 @@ std::string inspection_json(const ConfigInspection& i) {
     }
     includes += "]";
     return std::string("{\"isotone_included\":") + (i.isotone_included ? "true" : "false") +
+           ",\"isotone_included_conditionally\":" + (i.isotone_included_conditionally ? "true" : "false") +
            ",\"attached_by_isotone\":" + (i.attached_by_isotone ? "true" : "false") +
            ",\"peace_included\":" + (i.peace_included ? "true" : "false") +
            ",\"has_stage_lines\":" + (i.has_stage_lines ? "true" : "false") +
@@ -277,11 +281,17 @@ int cmd_loopback(const Args& a) {
     uint64_t frames = 0;
     // Synchronise first, so the capture starts now rather than with stale frames.
     capture.read(&cursor, chunk.data(), kRingCapacityFrames, &ch);
+    // A glitch before this point is not in the capture.
+    const uint32_t glitches_before = capture.discontinuities();
+    uint64_t dropped = 0;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(static_cast<long long>(a.seconds * 1000) + 3000);
     while (frames < wanted && std::chrono::steady_clock::now() < deadline && capture.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const AudioRingCursor before = cursor;
         const uint32_t n = capture.read(&cursor, chunk.data(), kRingCapacityFrames, &ch);
+        // Frames the ring moved past that the read did not return were lost.
+        if (cursor.epoch == before.epoch) dropped += (cursor.next - before.next) - n;
         if (n == 0) continue;
         if (channels == 0) channels = ch;
         if (ch != channels) break;
@@ -291,6 +301,7 @@ int cmd_loopback(const Args& a) {
     }
     const HRESULT thread_hr = capture.thread_error();
     const uint32_t rate = capture.sample_rate();
+    const uint32_t glitches = capture.discontinuities() - glitches_before;
     capture.stop();
     if (frames == 0) {
         return fail(FAILED(thread_hr) ? "loopback stream failed" : "no audio arrived: loopback delivers nothing while the endpoint is idle",
@@ -299,10 +310,13 @@ int cmd_loopback(const Args& a) {
     if (const DWORD e = write_wav(out_path, samples, channels, rate); e != ERROR_SUCCESS) {
         return fail("cannot write " + a.positional[1], e);
     }
+    // Complete means every frame asked for, contiguous: a phase or level read
+    // across a glitch is not a measurement.
     std::printf("{\"ok\":true,\"path\":%s,\"frames\":%llu,\"channels\":%u,\"stream_channels\":%u,"
-                "\"sample_rate\":%u,\"complete\":%s}\n",
+                "\"sample_rate\":%u,\"discontinuities\":%u,\"dropped_frames\":%llu,\"complete\":%s}\n",
                 json_string(a.positional[1]).c_str(), static_cast<unsigned long long>(frames), channels,
-                capture.channels(), rate, frames == wanted ? "true" : "false");
+                capture.channels(), rate, glitches, static_cast<unsigned long long>(dropped),
+                frames == wanted && glitches == 0 && dropped == 0 ? "true" : "false");
     return 0;
 }
 
@@ -341,6 +355,11 @@ int main(int argc, char** argv) {
     }
     if (cmd == "attach" && a.positional.size() == 1) {
         const AttachResult r = attach_include(root);
+        if (r.error == ERROR_ALREADY_EXISTS) {
+            return fail("Isotone.txt is already included under a Device or If line, where only some devices reach it; "
+                        "remove that line by hand",
+                        r.error);
+        }
         if (r.error != ERROR_SUCCESS) return fail("attach failed in " + utf8(root), r.error);
         std::printf("{\"ok\":true,\"root\":%s,\"appended\":%s,\"backup\":%s,\"before\":%s}\n",
                     json_string(utf8(root)).c_str(), r.appended ? "true" : "false",
@@ -360,7 +379,7 @@ int main(int argc, char** argv) {
                     removed ? "true" : "false");
         return 0;
     }
-    if (cmd == "apply" && a.positional.size() == 2 && !a.device.empty()) {
+    if (cmd == "apply" && a.positional.size() == 2 && !a.device.empty() && a.channels != 0 && a.rate > 0.0) {
         std::string text;
         if (a.positional[1] == "-") {
             std::ostringstream ss;

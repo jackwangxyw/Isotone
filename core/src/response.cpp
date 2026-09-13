@@ -34,11 +34,12 @@ std::complex<double> composite_at(const EqState& state, uint32_t channel, double
 }
 
 // Every gain that is flat in frequency: preamp, the channel trim, mute.
+// Bypass removes the preamp with the bands; trim and mute stay.
 double flat_gain_db(const EqState& state, uint32_t channel) {
     if (state.mute) {
         return -std::numeric_limits<double>::infinity();
     }
-    double db = state.preamp_db;
+    double db = state.bypass ? 0.0 : state.preamp_db;
     if (channel < kMaxChannels) {
         db += state.channel_gain_db[channel];
     }
@@ -52,13 +53,9 @@ void magnitude_db(const EqState& state, uint32_t channel, const double* freqs, s
     if (freqs == nullptr || out == nullptr) {
         return;
     }
-    if (state.bypass) {
-        std::fill(out, out + n, 0.0);
-        return;
-    }
     const double flat = flat_gain_db(state, channel);
     for (size_t i = 0; i < n; ++i) {
-        const double mag = std::abs(composite_at(state, channel, freqs[i], sample_rate));
+        const double mag = state.bypass ? 1.0 : std::abs(composite_at(state, channel, freqs[i], sample_rate));
         out[i] = flat + 20.0 * std::log10(mag);
     }
 }
@@ -90,7 +87,7 @@ void band_magnitude_db(const Band& band, const double* freqs, size_t n, double s
 
 double composite_peak_db(const EqState& state, uint32_t channels, uint32_t speaker_mask,
                          const double* freqs, size_t n, double sample_rate) {
-    if (state.bypass || channels == 0) {
+    if (channels == 0) {
         return 0.0;
     }
     double peak = -std::numeric_limits<double>::infinity();
@@ -144,7 +141,9 @@ double composite_peak_db(const EqState& state, uint32_t channels, uint32_t speak
         if (ch < kMaskChannels && (sp.muted & (ChannelMask{1} << ch)) != 0) {
             return;
         }
-        const double mag = std::abs(composite_at(state, ch, freq, sample_rate)) * speaker_gain(ch, freq);
+        // Bypass removes the bands; the speaker stages and trims still apply.
+        const double bands = state.bypass ? 1.0 : std::abs(composite_at(state, ch, freq, sample_rate));
+        const double mag = bands * speaker_gain(ch, freq);
         double db = 20.0 * std::log10(mag);
         if (ch < kMaxChannels) {
             db += state.channel_gain_db[ch];

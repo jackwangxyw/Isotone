@@ -223,6 +223,12 @@ ConfigInspection inspect_config(const fs::path& config_dir) {
 
 ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& config_dir) {
     ConfigInspection r;
+    // Upstream skips what follows a Device line that does not match the device,
+    // and what is inside an If that is false. Which devices match, and which
+    // conditions hold, only the device can say; `Device: all` and no If reach
+    // every device.
+    bool every_device = true;
+    int if_depth = 0;
     for (const std::string& line : config_lines(bytes)) {
         const size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
@@ -230,12 +236,20 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
         const std::string value = line.substr(colon + 1);
         if (key == "Include") {
             r.includes.push_back(trim(value));
-            r.isotone_included |= names_isotone_file(value, config_dir);
+            if (names_isotone_file(value, config_dir)) {
+                (every_device && if_depth == 0 ? r.isotone_included : r.isotone_included_conditionally) = true;
+            }
             r.peace_included |= names_peace_file(value);
+        } else if (key == "Device") {
+            std::string pattern = trim(value);
+            for (char& c : pattern) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            every_device = pattern == "all";
         } else if (key == "Stage") {
             r.has_stage_lines = true;
         } else if (key == "If" || key == "ElseIf" || key == "Else" || key == "EndIf") {
             r.has_conditionals = true;
+            if (key == "If") ++if_depth;
+            if (key == "EndIf" && if_depth > 0) --if_depth;
         }
     }
     r.attached_by_isotone =
@@ -256,6 +270,10 @@ AttachResult attach_include(const fs::path& config_dir) {
     }
     r.before = inspect_config_text(snapshot, config_dir);
     if (r.before.isotone_included) {
+        return r;
+    }
+    if (r.before.isotone_included_conditionally) {
+        r.error = ERROR_ALREADY_EXISTS;
         return r;
     }
     r.backup = config_dir / kConfigBackupName;

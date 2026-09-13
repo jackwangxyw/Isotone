@@ -64,10 +64,12 @@ Settings pages share one header with tabs: General, Appearance, Shortcuts, About
   reimplemented in QML.
 - Parameters go out through `param_block_write` on the shared region; spectrum
   audio comes in through `audio_ring_read`. Compat-backend devices use
-  `windows/compat` (Isotone.txt) and WASAPI loopback. Each device's block is
-  written with its current sample rate (`DeviceConfig::sample_rate`) and
-  rewritten when the device format changes, so out-of-range frequencies are
-  clamped as the processor clamps them.
+  `windows/compat` (`CompatWriter`, Isotone.txt) and WASAPI loopback
+  (`LoopbackCapture`). Each device's block is written for its current channel
+  count, speaker mask and sample rate (`DeviceConfig`), and rewritten when the
+  device format changes: Equalizer APO skips the routing and output sections on
+  another channel count and the bands below the lowest rate they are stable at,
+  so a stale block does nothing rather than something wrong.
 - The EQ-by-ear tone is native audio (WASAPI render, as `windows/measure` does),
   not Web Audio.
 - Device operations shell out to `isotone-devicetool` elevated.
@@ -191,12 +193,45 @@ band), custom colour rows with hex values, live preview.
 setup wizard in stage 6): the user chooses between replacing Equalizer APO on
 that output with IsoAPO, or keeping Equalizer APO and using the compat backend.
 Replacing runs `isotone-devicetool install <guid> --replace-equalizerapo`, which
-removes Equalizer APO from every effect slot of that output; uninstalling IsoAPO
-puts it back.
+removes Equalizer APO from every effect slot of that output and takes over its
+install record; uninstalling IsoAPO later restores the output as it was before
+either EQ (the driver's own APOs), not Equalizer APO.
 
 **Bass management** follows AV receivers: no slope control, Linkwitz-Riley
 24 dB/oct. Crossover 40–250 Hz, default 80 Hz; LFE low-pass 80–250 Hz, default
 120 Hz; both in 10 Hz steps.
+
+## Engine contracts the UI must keep
+
+From the pre-UI review (`decisions.md`, 2026-09-13). Each is enforced or tested
+in the engine; the UI must not break it.
+
+- **Band ids are unique within a state.** The processor matches bands to filter
+  slots by `Band::id`: give a new band a fresh id, keep a band's id when it is
+  edited, moved or re-sorted. Reusing an id makes two bands share a slot.
+- **At most 64 bands** (`kParamMaxBands`). `to_param_block` returns false when
+  it dropped bands; the UI must not create more (Add band disabled at 64). The
+  compat backend has no limit, but a device can switch engines.
+- **The EQ toggle is bypass: bands and preamp only.** Mute, balance and trims,
+  and the whole speaker setup stay on. The curve drawn while bypassed is
+  `magnitude_db` with `bypass` set, which already follows this.
+- **Saved state.** Whenever a device's state is saved (preset assigned or saved,
+  speaker setup changed), write it with `isotone::win::write_persisted_state`
+  to `persisted_state_path(persisted_state_dir(false), guid)`, as well as to the
+  region. That file is what IsoAPO starts with when no UI is running: a file
+  that exists is the state, flat included; no file is flat. When the engine is
+  idle (no region), write only the file. The first write creates
+  `%ProgramData%\IsoAPO\devices`; a file one Windows account writes cannot be
+  replaced by another until the installer sets the directory's ACL (stage 6).
+- **Import parses for the device the preset is for.** Call `parse_apo_config`
+  with that device's layout (`hdr.channels` / `hdr.speaker_mask` from the region,
+  or `devicetool status`). Show `warnings` in the import dialog's skipped lines:
+  they include lines Equalizer APO would ignore (lower-case `on`, a frequency
+  without `Hz`), `Device:` sections and `If:` branches, which import regardless.
+  Mute read from a file is mute only for the layout it was written for.
+- **Auto preamp** is −`composite_peak_db` with the device's speaker mask (above).
+- **Compat writes need the format.** `DeviceConfig::layout` and `sample_rate`
+  must be the device's; there is no safe default.
 
 ## Engine support for the speaker controls
 

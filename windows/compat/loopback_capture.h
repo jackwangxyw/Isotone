@@ -47,6 +47,9 @@ public:
     uint32_t sample_rate() const { return sample_rate_; }
     uint32_t channels() const { return channels_; }   // of the stream; read() gives at most kMaxChannels
     HRESULT thread_error() const { return thread_error_.load(); }
+    // Packets WASAPI flagged as not continuous with the one before: a glitch in
+    // what was captured. Counted from start(); the first packet may carry one.
+    uint32_t discontinuities() const { return discontinuities_.load(); }
 
     // As audio_ring_read. `out` holds max_frames * kMaxChannels samples.
     uint32_t read(AudioRingCursor* cursor, float* out, uint32_t max_frames, uint32_t* channels) const;
@@ -58,6 +61,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> running_{false};
     std::atomic<HRESULT> thread_error_{S_OK};
+    std::atomic<uint32_t> discontinuities_{0};
     uint32_t sample_rate_ = 0;
     uint32_t channels_ = 0;
     void* region_ = nullptr;   // AudioRingHeader then samples

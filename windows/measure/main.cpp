@@ -239,6 +239,10 @@ public:
                                   nullptr),
               "render Initialize");
         CHECK(client_->GetBufferSize(&buffer_frames_), "render GetBufferSize");
+        // Keep only about 50 ms queued, so a new frequency reaches the endpoint
+        // within that of being asked for rather than after a full 200 ms buffer
+        // of the old one, which ate most of the settle time.
+        lead_frames_ = std::min(buffer_frames_, fmt_.sample_rate / 20);
         CHECK(client_->GetService(__uuidof(IAudioRenderClient),
                                   reinterpret_cast<void**>(&render_)),
               "GetService IAudioRenderClient");
@@ -251,12 +255,16 @@ public:
     // it at 1, so an empty list is the same tone everywhere.
     void set_channel_gains(const std::vector<double>& gains) { gains_ = gains; }
 
-    // Writes as many frames of the tone as the buffer has room for.
+    // Tops the queue up to about 50 ms of the tone.
     void pump(double frequency, double amplitude, double* phase) {
         UINT32 padding = 0;
         if (FAILED(client_->GetCurrentPadding(&padding))) return;
-        const UINT32 free_frames = buffer_frames_ - padding;
-        if (free_frames == 0) return;
+        // An empty queue once the tone has started is an underrun: the endpoint
+        // played a gap, which splices the sine.
+        if (primed_ && padding == 0) ++underruns_;
+        if (padding >= lead_frames_) return;
+        const UINT32 free_frames = lead_frames_ - padding;
+        primed_ = true;
 
         BYTE* data = nullptr;
         if (FAILED(render_->GetBuffer(free_frames, &data))) return;
@@ -275,6 +283,7 @@ public:
     }
 
     const StreamFormat& format() const { return fmt_; }
+    uint32_t underruns() const { return underruns_; }
 
     ~RenderStream() {
         if (render_) render_->Release();
@@ -304,6 +313,9 @@ private:
     WAVEFORMATEX*       format_ = nullptr;
     StreamFormat        fmt_{};
     UINT32              buffer_frames_ = 0;
+    UINT32              lead_frames_ = 0;
+    bool                primed_ = false;
+    uint32_t            underruns_ = 0;
     std::vector<double> gains_;
 };
 
@@ -342,6 +354,7 @@ public:
             UINT32 frames = 0;
             DWORD flags = 0;
             if (FAILED(capture_->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) return;
+            if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) ++discontinuities_;
 
             if (sink != nullptr) {
                 const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
@@ -359,6 +372,8 @@ public:
     }
 
     const StreamFormat& format() const { return fmt_; }
+    // Packets flagged as not continuous with the one before.
+    uint32_t discontinuities() const { return discontinuities_; }
 
     ~CaptureStream() {
         if (capture_) capture_->Release();
@@ -391,6 +406,7 @@ private:
     IAudioCaptureClient* capture_ = nullptr;
     WAVEFORMATEX*        format_  = nullptr;
     StreamFormat         fmt_{};
+    uint32_t             discontinuities_ = 0;
 };
 
 // A single frequency, measured with a Hann-windowed DFT evaluated at exactly that
@@ -414,11 +430,25 @@ std::complex<double> dft_at(const std::vector<float>& x, double frequency, doubl
     return {2.0 * re / wsum, 2.0 * im / wsum};
 }
 
-double rms(const std::vector<float>& x) {
+// RMS of what is left of `x` once the sine dft_at found is taken out. A clean
+// capture leaves noise; a splice of two out-of-phase pieces leaves a lot.
+double residual_rms(const std::vector<float>& x, std::complex<double> fit, double frequency, double sample_rate) {
     if (x.empty()) return 0.0;
+    const double a = std::abs(fit), p = std::arg(fit);
     double sum = 0.0;
-    for (float v : x) sum += static_cast<double>(v) * v;
+    for (size_t i = 0; i < x.size(); ++i) {
+        const double r = x[i] - a * std::cos(2.0 * kPi * frequency * static_cast<double>(i) / sample_rate + p);
+        sum += r * r;
+    }
     return std::sqrt(sum / static_cast<double>(x.size()));
+}
+
+// A JSON number, or null for what JSON cannot hold.
+std::string json_number(double v) {
+    if (!std::isfinite(v)) return "null";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.6f", v);
+    return buf;
 }
 
 std::vector<double> default_frequencies() {
@@ -531,46 +561,74 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
     // All channels come from one capture stream, so they share a clock: a delay
     // of d seconds on channel c reads as -360 * f * d, an inverted channel as 180.
     std::vector<std::vector<double>> phases(cf.channels);
+    // Residual after the fitted sine, relative to the played tone's RMS, dB.
+    std::vector<std::vector<double>> residuals(cf.channels);
+    // Glitches (capture discontinuities and render underruns) around the window
+    // that was kept, and how many windows were taken.
+    std::vector<uint32_t> glitches, attempts;
+    constexpr int kMaxAttempts = 3;
 
     for (double freq : opt.frequencies) {
-        // Settle: keep the tone running but throw the capture away, so the
-        // measurement window is clear of the path latency and of any transient
-        // from the filter that is being measured.
-        const int settle_ticks = static_cast<int>(opt.settle_s * 1000.0 / 10.0);
-        for (int t = 0; t < settle_ticks; ++t) {
-            render.pump(freq, opt.amplitude, &phase);
-            capture.pump(nullptr);
-            Sleep(10);
-        }
-
         std::vector<std::vector<float>> captured;
-        const int measure_ticks = static_cast<int>(opt.measure_s * 1000.0 / 10.0);
-        for (int t = 0; t < measure_ticks; ++t) {
-            render.pump(freq, opt.amplitude, &phase);
-            capture.pump(&captured);
-            Sleep(10);
+        uint32_t glitched = 0;
+        int attempt = 0;
+        for (;;) {
+            ++attempt;
+            // Settle: keep the tone running but throw the capture away, so the
+            // measurement window is clear of the path latency and of any transient
+            // from the filter that is being measured. Glitches are counted from
+            // 100 ms before the window, since one reaches the capture only after
+            // the path's latency.
+            const int settle_ticks = static_cast<int>(opt.settle_s * 1000.0 / 10.0);
+            uint32_t before = capture.discontinuities() + render.underruns();
+            for (int t = 0; t < settle_ticks; ++t) {
+                if (t == settle_ticks - 10) before = capture.discontinuities() + render.underruns();
+                render.pump(freq, opt.amplitude, &phase);
+                capture.pump(nullptr);
+                Sleep(10);
+            }
+
+            captured.clear();
+            const int measure_ticks = static_cast<int>(opt.measure_s * 1000.0 / 10.0);
+            for (int t = 0; t < measure_ticks; ++t) {
+                render.pump(freq, opt.amplitude, &phase);
+                capture.pump(&captured);
+                Sleep(10);
+            }
+            glitched = capture.discontinuities() + render.underruns() - before;
+            if (glitched == 0 || attempt == kMaxAttempts) break;
         }
+        glitches.push_back(glitched);
+        attempts.push_back(static_cast<uint32_t>(attempt));
 
         std::complex<double> reference = 0.0;
         for (uint32_t c = 0; c < cf.channels; ++c) {
             double db = -200.0;
+            double residual_db = -200.0;
             std::complex<double> x = 0.0;
             if (c < captured.size() && !captured[c].empty()) {
                 x = dft_at(captured[c], freq, cf.sample_rate);
                 const double a = std::abs(x);
                 db = a > 0.0 ? 20.0 * std::log10(a) : -200.0;
+                const double r = residual_rms(captured[c], x, freq, cf.sample_rate);
+                residual_db = r > 0.0 ? 20.0 * std::log10(r / (opt.amplitude / std::sqrt(2.0))) : -200.0;
             }
             if (c == 0) reference = x;
             results[c].push_back(db);
             phases[c].push_back(std::arg(x * std::conj(reference)) * 180.0 / kPi);
+            residuals[c].push_back(residual_db);
         }
 
         if (!opt.json) {
             std::printf("%10.2f Hz", freq);
+            double worst_residual = -200.0;
             for (uint32_t c = 0; c < cf.channels; ++c) {
                 std::printf("   ch%u %+8.3f dB", c, results[c].back());
                 if (c > 0) std::printf(" %+7.2f deg", phases[c].back());
+                worst_residual = std::max(worst_residual, residuals[c].back());
             }
+            std::printf("   residual %+.1f dB", worst_residual);
+            if (glitched != 0) std::printf("   GLITCH x%u after %d attempts", glitched, attempt);
             std::printf("\n");
             std::fflush(stdout);
         }
@@ -588,28 +646,34 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
                     json_string(capture_id).c_str());
         std::printf("  \"render_rate\": %u,\n  \"capture_rate\": %u,\n  \"channels\": %u,\n",
                     rf.sample_rate, cf.sample_rate, cf.channels);
-        std::printf("  \"amplitude\": %.6f,\n", opt.amplitude);
+        std::printf("  \"amplitude\": %s,\n", json_number(opt.amplitude).c_str());
         std::printf("  \"frequencies\": [");
         for (size_t i = 0; i < opt.frequencies.size(); ++i) {
-            std::printf("%s%.6f", i ? ", " : "", opt.frequencies[i]);
+            std::printf("%s%s", i ? ", " : "", json_number(opt.frequencies[i]).c_str());
         }
-        std::printf("],\n  \"magnitude_db\": [\n");
-        for (uint32_t c = 0; c < cf.channels; ++c) {
-            std::printf("    [");
-            for (size_t i = 0; i < results[c].size(); ++i) {
-                std::printf("%s%.6f", i ? ", " : "", results[c][i]);
+        const auto matrix = [&](const char* name, const std::vector<std::vector<double>>& m, bool last) {
+            std::printf("  \"%s\": [\n", name);
+            for (uint32_t c = 0; c < cf.channels; ++c) {
+                std::printf("    [");
+                for (size_t i = 0; i < m[c].size(); ++i) {
+                    std::printf("%s%s", i ? ", " : "", json_number(m[c][i]).c_str());
+                }
+                std::printf("]%s\n", c + 1 < cf.channels ? "," : "");
             }
-            std::printf("]%s\n", c + 1 < cf.channels ? "," : "");
-        }
-        std::printf("  ],\n  \"phase_deg\": [\n");
-        for (uint32_t c = 0; c < cf.channels; ++c) {
-            std::printf("    [");
-            for (size_t i = 0; i < phases[c].size(); ++i) {
-                std::printf("%s%.6f", i ? ", " : "", phases[c][i]);
-            }
-            std::printf("]%s\n", c + 1 < cf.channels ? "," : "");
-        }
-        std::printf("  ]\n}\n");
+            std::printf("  ]%s\n", last ? "" : ",");
+        };
+        const auto counts = [&](const char* name, const std::vector<uint32_t>& v) {
+            std::printf("  \"%s\": [", name);
+            for (size_t i = 0; i < v.size(); ++i) std::printf("%s%u", i ? ", " : "", v[i]);
+            std::printf("],\n");
+        };
+        std::printf("],\n");
+        counts("glitches", glitches);
+        counts("attempts", attempts);
+        matrix("magnitude_db", results, false);
+        matrix("phase_deg", phases, false);
+        matrix("residual_db", residuals, true);
+        std::printf("}\n");
     }
     return 0;
 }
@@ -653,6 +717,9 @@ void usage() {
         "                         (default 1 for every channel)\n"
         "      --settle s         seconds to discard before each measurement (default 0.30)\n"
         "      --window s         seconds to measure (default 0.30)\n"
+        "      A window with a capture discontinuity or a render underrun near it is\n"
+        "      taken again, up to 3 times; glitches, attempts and each channel's\n"
+        "      residual after the fitted sine (dB re the tone) are reported.\n"
         "      --label text       copied into the JSON output\n"
         "      --json             machine-readable output\n"
         "\n"

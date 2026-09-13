@@ -94,6 +94,17 @@ TEST_CASE("frames written are the frames read, in order") {
     CHECK(audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch) == 0);  // drained
 }
 
+TEST_CASE("a writer given a capacity that is not a power of two stays detached") {
+    TestRing r(1024);
+    AudioRingWriter w;
+    w.attach(r.header(), 1000);
+    w.set_channels(2);
+    CHECK_FALSE(w.claim(token(1, 1)));
+    const std::vector<float> a = ramp(0, 16, 2);
+    w.write(a.data(), 2, 16);
+    CHECK(r.header()->write_index == 0);
+}
+
 TEST_CASE("a new reader starts at the newest frame") {
     TestRing r(256);
     AudioRingWriter w;
@@ -255,9 +266,55 @@ TEST_CASE("only one writer at a time, and a dead process's claim can be taken ov
     CHECK(r.header()->writer == 0);
     CHECK(second.claim(token(100, 2)));
 
-    // The audio engine restarts: new process id, old claim never released.
+    // The audio engine restarts: new process id, old claim never released. The
+    // dead owner writes nothing more, so after kRingStaleClaims claims that see
+    // its write index stand still, the claim is taken over.
+    for (uint32_t i = 0; i < kRingStaleClaims; ++i) {
+        CHECK_FALSE(later.claim(token(200, 1)));
+    }
     CHECK(later.claim(token(200, 1)));
     CHECK(r.header()->writer == token(200, 1));
+}
+
+TEST_CASE("two live processes writing one ring do not take the claim from each other") {
+    // Both call claim on every process call while they do not own the ring, as
+    // IsoAPO does. The live owner keeps writing, so the other never takes over:
+    // no epoch churn, and the reader gets every frame.
+    TestRing r(1024);
+    AudioRingWriter a, b;
+    a.attach(r.header(), r.capacity);
+    b.attach(r.header(), r.capacity);
+    a.set_channels(1);
+    b.set_channels(1);
+    REQUIRE(a.claim(token(100, 1)));
+
+    AudioRingCursor cursor;
+    std::vector<float> out(1024 * kMaxChannels);
+    uint32_t ch = 0;
+    audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch);
+    const uint32_t epoch = r.header()->epoch;
+    uint32_t read = 0;
+    for (uint32_t call = 0; call < 10 * kRingStaleClaims; ++call) {
+        const std::vector<float> frames = ramp(call * 8, 8, 1);
+        for (AudioRingWriter* w : {&a, &b}) {
+            if (!w->owns()) w->claim(w == &a ? token(100, 1) : token(200, 1));
+            w->write(frames.data(), 1, 8);
+        }
+        read += audio_ring_read(r.header(), r.capacity, &cursor, out.data(), 1024, &ch);
+    }
+    CHECK(r.header()->writer == token(100, 1));
+    CHECK(r.header()->epoch == epoch);
+    CHECK(read == 10 * kRingStaleClaims * 8);
+
+    SUBCASE("when the owner stops writing, the other process takes over") {
+        uint32_t calls = 0;
+        while (!b.owns() && calls < 2 * kRingStaleClaims) {
+            b.claim(token(200, 1));
+            ++calls;
+        }
+        CHECK(b.owns());
+        CHECK(calls == kRingStaleClaims);
+    }
 }
 
 TEST_CASE("corrupt layout fields in shared memory cannot steer a write out of bounds") {

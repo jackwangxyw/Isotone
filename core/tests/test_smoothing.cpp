@@ -130,7 +130,7 @@ TEST_CASE("an instant 12 dB gain jump does not click") {
     CHECK(worst_step(out) < sine_step_limit(1.0) * 1.10);
 
     const double tail = *std::max_element(out.end() - 4096, out.end());
-    CHECK(tail == doctest::Approx(std::pow(10.0, -12.0 / 20.0)).epsilon(0.02));
+    CHECK(std::abs(20.0 * std::log10(tail) + 12.0) < 0.05);
 }
 
 TEST_CASE("an instant frequency jump across three octaves does not click") {

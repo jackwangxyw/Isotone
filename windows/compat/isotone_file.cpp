@@ -11,6 +11,7 @@
 #include <map>
 #include <sstream>
 
+#include "isotone/biquad.h"
 #include "isotone/processor.h"
 #include "isotone/speakers.h"
 
@@ -25,6 +26,12 @@ constexpr char kSpeakersMarker[] = "# Isotone: speakers";
 constexpr char kRoutingMarker[]  = "# Isotone: routing";
 constexpr char kOutputMarker[]   = "# Isotone: output";
 constexpr char kEndMarker[]      = "# Isotone: end";
+constexpr char kRateGuard[]      = "If: sampleRate >= ";
+constexpr char kLayoutGuard[]    = "If: outputChannelCount == ";
+constexpr char kEndGuard[]       = "EndIf:";
+// Upstream stores a preamp as a float gain, and 10^(-1000/20) is below the
+// smallest float: exact silence on every channel, whatever the layout.
+constexpr char kSilence[]        = "Preamp: -1000 dB";
 
 // Letters only: a word starting with a digit is a channel number to upstream.
 constexpr char kBassChannel[] = "ISOTONEBASS";
@@ -36,10 +43,17 @@ std::string trim(const std::string& s) {
     return s.substr(begin, end - begin + 1);
 }
 
+// The endpoint GUID of a GUID or a full device ID ({0.0.0.00000000}.{guid}),
+// which names the endpoint by its last brace group.
+std::string endpoint_part(const std::string& id) {
+    const size_t open = id.rfind('{');
+    return open == std::string::npos ? id : id.substr(open);
+}
+
 // Braces, whitespace and case do not distinguish endpoints.
-std::string guid_key(const std::string& guid) {
+std::string guid_key(const std::string& id) {
     std::string k;
-    for (char c : guid) {
+    for (char c : endpoint_part(id)) {
         if (c == '{' || c == '}' || std::isspace(static_cast<unsigned char>(c))) continue;
         k += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
@@ -215,6 +229,35 @@ std::string output_lines(const SpeakerSetup& sp, const ChannelLayout& layout,
     return out;
 }
 
+// Channel numbers 1..channels. Upstream resolves a number within the layout's
+// channel count whatever the speaker mask; a name the layout lacks resolves to
+// nothing, and as a Copy source that is added as a constant (CopyFilter), which
+// is DC on the output. Under the channel count guard a number always resolves.
+std::vector<std::string> channel_numbers(uint32_t channels) {
+    std::vector<std::string> numbers;
+    for (uint32_t c = 1; c <= channels; ++c) numbers.push_back(std::to_string(c));
+    return numbers;
+}
+
+// Upstream designs a frequency above Nyquist unstable. The lowest rate at which
+// every band of `state` is written below the processor's clamp, so a block
+// guarded by it plays at every rate where it designs what the processor does.
+// 0 when there is no band to guard.
+double lowest_stable_rate(const EqState& state, double sample_rate) {
+    double lowest = 0.0;
+    for (const Band& b : state.bands) {
+        if (!b.enabled || !std::isfinite(b.fc)) continue;
+        lowest = std::max(lowest, std::ceil(clamp_fc(b.fc, sample_rate) / (0.5 * kMaxFcOfNyquist)));
+    }
+    return lowest;
+}
+
+std::string comment_lines(const std::string& text) {
+    std::string out;
+    for (const std::string& line : split_lines(text)) out += "# " + line + "\n";
+    return out;
+}
+
 }  // namespace
 
 // A layout with no speaker mask gets the default for its channel count, as
@@ -231,51 +274,61 @@ std::string format_device_block(const DeviceConfig& given) {
     DeviceConfig device = given;
     device.layout = with_mask(given.layout);
     const SpeakerSetup& sp = device.state.speakers;
-    const std::vector<std::string> names = apo_channel_names(device.layout);
+    const std::vector<std::string> numbers = channel_numbers(device.layout.channels);
+    const std::string layout_guard = kLayoutGuard + std::to_string(device.layout.channels) + "\n";
     std::ostringstream body;
 
+    // Routing and output address channels by position, so they are written for
+    // one channel count and guarded by it: Equalizer APO applies the file to
+    // whatever format the device has when it loads, with or without Isotone
+    // running, and on another count they do nothing.
     if (!is_default(sp)) {
         body << kSpeakersMarker << " " << format_speaker_setup(sp) << "\n";
     }
-    const std::string routing = routing_lines(sp, device.layout, names);
+    const std::string routing = routing_lines(sp, device.layout, numbers);
     if (!routing.empty()) {
-        body << kRoutingMarker << "\n" << routing << "Channel: all\n" << kEndMarker << "\n";
+        body << kRoutingMarker << "\n" << layout_guard << routing << kEndGuard << "\nChannel: all\n" << kEndMarker << "\n";
     }
 
-    EqState curve = device.state;
-    curve.mute = false;
-    curve.bypass = false;
-    curve.speakers = SpeakerSetup{};
+    // The curve: preamp and bands, which bypass turns off, then the trims,
+    // which it does not. Bands are guarded by the lowest rate they are stable at.
+    EqState eq = device.state;
+    eq.mute = false;
+    eq.bypass = false;
+    eq.speakers = SpeakerSetup{};
+    EqState trims;
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        trims.channel_gain_db[c] = eq.channel_gain_db[c];
+        eq.channel_gain_db[c] = 0.0;
+    }
     ApoFormatOptions options;
     options.layout = device.layout;
     options.sample_rate = device.sample_rate;
-    body << format_apo_config(curve, options);
+    std::string eq_text = format_apo_config(eq, options);
+    const double rate_floor = device.sample_rate > 0.0 ? lowest_stable_rate(eq, device.sample_rate) : 0.0;
+    if (!eq_text.empty() && rate_floor > 0.0) {
+        eq_text = kRateGuard + num(rate_floor) + "\n" + eq_text + kEndGuard + "\n";
+    }
+    if (device.state.bypass) {
+        body << kBypassMarker << "\n" << comment_lines(eq_text) << kEndMarker << "\n";
+    } else {
+        body << eq_text;
+    }
+    body << format_apo_config(trims, options);
 
-    const std::string output = output_lines(sp, device.layout, names);
+    const std::string output = output_lines(sp, device.layout, numbers);
     if (!output.empty()) {
-        body << kOutputMarker << "\nChannel: all\n" << output << "Channel: all\n" << kEndMarker << "\n";
+        body << kOutputMarker << "\n" << layout_guard << "Channel: all\n" << output << kEndGuard << "\nChannel: all\n"
+             << kEndMarker << "\n";
     }
 
     if (device.state.mute) {
-        // Silence, as the processor's mute is: every output channel copied from
-        // nothing, after everything else.
-        std::string copy = "Copy:";
-        for (uint32_t c = 0; c < device.layout.channels && c < names.size(); ++c) {
-            copy += " " + names[c] + "=0";
-        }
-        body << kMuteMarker << "\nChannel: all\n" << copy << "\n";
+        // Silence, as the processor's mute is, after everything else.
+        body << kMuteMarker << "\nChannel: all\n" << kSilence << "\n";
     }
 
-    std::string out = "Device: " + apo_device_pattern_for_guid(device.endpoint_guid) + "\n" +
-                      "Channel: all\n";
-    if (!device.state.bypass) {
-        return out + body.str();
-    }
-    out += std::string(kBypassMarker) + "\n";
-    for (const std::string& line : split_lines(body.str())) {
-        out += "# " + line + "\n";
-    }
-    return out;
+    return "Device: " + apo_device_pattern_for_guid(endpoint_part(device.endpoint_guid)) + "\n" + "Channel: all\n" +
+           body.str();
 }
 
 std::string update_isotone_file(const std::string& existing, const DeviceConfig& device) {
@@ -286,8 +339,17 @@ std::string update_isotone_file(const std::string& existing, const DeviceConfig&
     const std::vector<Segment> segs = segments(existing);
     for (size_t i = 1; i < segs.size(); ++i) {
         if (guid_key(segs[i].device) == guid_key(device.endpoint_guid)) {
-            const size_t blank = trailing_blank_start(existing, segs[i]);
-            return existing.substr(0, segs[i].begin) + block + existing.substr(blank);
+            // Upstream applies every block that matches, so a second block for
+            // the device (a hand edit, another writer) is removed, not left stale.
+            std::string rest;
+            size_t from = trailing_blank_start(existing, segs[i]);
+            for (size_t j = i + 1; j < segs.size(); ++j) {
+                if (guid_key(segs[j].device) != guid_key(device.endpoint_guid)) continue;
+                rest += existing.substr(from, segs[j].begin - from);
+                from = segs[j].end;
+            }
+            rest += existing.substr(from);
+            return existing.substr(0, segs[i].begin) + block + rest;
         }
     }
     std::string out = existing;
@@ -298,12 +360,14 @@ std::string update_isotone_file(const std::string& existing, const DeviceConfig&
 
 std::string remove_device(const std::string& existing, const std::string& endpoint_guid) {
     const std::vector<Segment> segs = segments(existing);
+    std::string out;
+    size_t from = 0;
     for (size_t i = 1; i < segs.size(); ++i) {
-        if (guid_key(segs[i].device) == guid_key(endpoint_guid)) {
-            return existing.substr(0, segs[i].begin) + existing.substr(segs[i].end);
-        }
+        if (guid_key(segs[i].device) != guid_key(endpoint_guid)) continue;
+        out += existing.substr(from, segs[i].begin - from);
+        from = segs[i].end;
     }
-    return existing;
+    return from == 0 ? existing : out + existing.substr(from);
 }
 
 std::vector<ParsedDevice> parse_isotone_file(
@@ -318,15 +382,29 @@ std::vector<ParsedDevice> parse_isotone_file(
 
         ParsedDevice d;
         d.endpoint_guid = segs[i].device;
+        for (size_t j = 1; j < i; ++j) {
+            if (guid_key(segs[j].device) == guid_key(d.endpoint_guid)) {
+                d.warnings.push_back({0, "a second block for this device; Equalizer APO applies both"});
+                break;
+            }
+        }
 
-        // Bypass first: it comments out everything after it.
-        bool bypass = false;
+        // Bypass first. Its section runs to the end marker; a file written
+        // before bypass left the speaker setup on has no end marker, and the
+        // section runs to the end of the block.
+        bool bypass = false, in_bypass = false;
         for (std::string& line : lines) {
-            if (bypass) {
-                if (line.rfind("# ", 0) == 0) line = line.substr(2);
-                else if (line == "#") line.clear();
+            if (in_bypass) {
+                if (line == kEndMarker) {
+                    in_bypass = false;
+                    line.clear();
+                } else if (line.rfind("# ", 0) == 0) {
+                    line = line.substr(2);
+                } else if (line == "#") {
+                    line.clear();
+                }
             } else if (trim(line) == kBypassMarker) {
-                bypass = true;
+                bypass = in_bypass = true;
                 line.clear();
             }
         }
@@ -345,19 +423,40 @@ std::vector<ParsedDevice> parse_isotone_file(
                 continue;
             }
             if (t == kRoutingMarker || t == kOutputMarker) {
-                // Generated from the speaker setup; skip to the end marker.
-                while (k + 1 < lines.size() && trim(lines[k + 1]) != kEndMarker) ++k;
-                ++k;
+                // Generated from the speaker setup; skip to the end marker. Only
+                // commands a section writes are skipped, so a hand edit that lost
+                // the marker costs the section, not the curve after it.
+                size_t end = k + 1;
+                while (end < lines.size() && trim(lines[end]) != kEndMarker) {
+                    const std::string s = trim(lines[end]);
+                    if (!(s.rfind("Copy:", 0) == 0 || s.rfind("Channel:", 0) == 0 || s.rfind("Filter:", 0) == 0 ||
+                          s.rfind("Delay:", 0) == 0 || s.rfind(kLayoutGuard, 0) == 0 || s == kEndGuard)) {
+                        break;
+                    }
+                    ++end;
+                }
+                if (end == lines.size() || trim(lines[end]) != kEndMarker) {
+                    d.warnings.push_back({k + 2, "no end marker after " + t + "; the section ends at line " +
+                                                     std::to_string(end + 2)});
+                    k = end - 1;
+                } else {
+                    k = end;
+                }
                 continue;
             }
             if (t == kMuteMarker) {
                 mute = true;
-                // The silence that follows the marker: Copy zeros now, a
-                // -100 dB preamp in files written before.
+                // The silence that follows the marker: a -1000 dB preamp now;
+                // Copy zeros, or a -100 dB preamp, in files written before.
                 if (k + 2 < lines.size() && trim(lines[k + 1]) == "Channel: all" &&
-                    (trim(lines[k + 2]).rfind("Copy:", 0) == 0 || trim(lines[k + 2]) == "Preamp: -100 dB")) {
+                    (trim(lines[k + 2]) == kSilence || trim(lines[k + 2]).rfind("Copy:", 0) == 0 ||
+                     trim(lines[k + 2]) == "Preamp: -100 dB")) {
                     k += 2;
                 }
+                continue;
+            }
+            // The rate guard around the bands.
+            if (t.rfind(kRateGuard, 0) == 0 || t == kEndGuard) {
                 continue;
             }
             curve += lines[k] + "\n";

@@ -9,9 +9,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <regex>
 #include <sstream>
 
 #include "isotone/biquad.h"
+#include "isotone/processor.h"
 
 namespace isotone {
 namespace {
@@ -47,6 +49,28 @@ std::string to_upper(std::string s) {
     return s;
 }
 
+std::string to_lower(std::string s) {
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+// Upstream splits Channel and Stage values on spaces only; a tab is part of a word.
+std::vector<std::string> split_spaces(const std::string& s) {
+    std::vector<std::string> words;
+    std::string word;
+    for (char c : s + " ") {
+        if (c != ' ') {
+            word += c;
+        } else if (!word.empty()) {
+            words.push_back(word);
+            word.clear();
+        }
+    }
+    return words;
+}
+
 // Upstream normalises a comma decimal mark to a period before parsing, so a
 // config written on a European locale machine loads correctly.
 std::string normalise_decimal(std::string s) {
@@ -55,6 +79,26 @@ std::string normalise_decimal(std::string s) {
 }
 
 bool parse_double(const std::string& s, double* out) { return parse_apo_number(s, out); }
+
+// Upstream reads widths and gains with wcstod, which gives 0 for no number.
+double number_or_zero(const std::string& s) {
+    double v = 0.0;
+    return parse_double(s, &v) ? v : 0.0;
+}
+
+// Removes the non-breaking spaces a locale writes as a thousands separator:
+// U+00A0 as UTF-8, or the lone byte upstream's code-page fallback reads as it.
+std::string strip_nbsp(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\xC2' && i + 1 < s.size() && s[i + 1] == '\xA0') {
+            ++i;
+        } else if (s[i] != '\xA0') {
+            out += s[i];
+        }
+    }
+    return out;
+}
 
 // Room EQ Wizard writes a thousands separator as a period, so "1.000" means
 // 1000 Hz rather than 1 Hz. Upstream's rule, reproduced exactly: a string of at
@@ -82,7 +126,7 @@ bool lookup_token(const std::string& token, TokenInfo* out) {
     static const struct { const char* name; FilterType type; bool corner; } kMap[] = {
         {"PK",    FilterType::Peaking,   false},
         {"PEQ",   FilterType::Peaking,   false},
-        {"MODAL", FilterType::Peaking,   false},
+        {"Modal", FilterType::Peaking,   false},
         {"LP",    FilterType::LowPass,   false},
         {"LPQ",   FilterType::LowPass,   false},
         {"HP",    FilterType::HighPass,  false},
@@ -95,9 +139,9 @@ bool lookup_token(const std::string& token, TokenInfo* out) {
         {"LSC",   FilterType::LowShelf,  false},
         {"HSC",   FilterType::HighShelf, false},
     };
-    const std::string upper = to_upper(token);
+    // Case-sensitive, as upstream's filterNameToTypeMap is.
     for (const auto& e : kMap) {
-        if (upper == e.name) {
+        if (token == e.name) {
             out->type = e.type;
             out->corner_freq = e.corner;
             return true;
@@ -106,41 +150,21 @@ bool lookup_token(const std::string& token, TokenInfo* out) {
     return false;
 }
 
-// Finds `key` as a whole word and returns the numeric run that follows it.
-// Mirrors upstream's regex searches, which are position-independent within the
-// parameter text rather than requiring a fixed field order.
-bool find_value_after(const std::string& text, const std::string& key, std::string* raw,
-                      size_t* found_at = nullptr) {
-    const std::string upper = to_upper(text);
-    const std::string ukey  = to_upper(key);
-    size_t pos = 0;
-    while ((pos = upper.find(ukey, pos)) != std::string::npos) {
-        const bool space_before = pos == 0 || std::isspace(static_cast<unsigned char>(text[pos - 1]));
-        size_t after = pos + ukey.size();
-        if (!space_before) {
-            pos = after;
-            continue;
-        }
-        while (after < text.size() && std::isspace(static_cast<unsigned char>(text[after]))) {
-            ++after;
-        }
-        const size_t start = after;
-        while (after < text.size() &&
-               (std::isdigit(static_cast<unsigned char>(text[after])) || text[after] == '.' ||
-                text[after] == '-' || text[after] == '+' || text[after] == 'e' ||
-                text[after] == 'E')) {
-            ++after;
-        }
-        if (after > start) {
-            *raw = text.substr(start, after - start);
-            if (found_at != nullptr) {
-                *found_at = pos;
-            }
-            return true;
-        }
-        pos = after;
-    }
-    return false;
+// Upstream's filter-line patterns (BiQuadFilterFactory.cpp), unchanged but for
+// U+00A0 in Fc, which is matched as either of its byte forms: case-sensitive,
+// units required, searched anywhere in the text after the type.
+struct FilterPatterns {
+    std::regex type{R"(^\s*ON\s+([A-Za-z]+))"};
+    std::regex freq{"\\s+Fc\\s*((?:[-+0-9.eE]|\xC2\xA0|\xA0)+)\\s*H\\s*z"};
+    std::regex gain{R"(\s+Gain\s*([-+0-9.eE]+)\s*dB)"};
+    std::regex q{R"(\s+Q\s*([-+0-9.eE]+))"};
+    std::regex bw{R"(\s+BW\s+Oct\s*([-+0-9.eE]+))"};
+    std::regex slope{R"(^\s*([-+0-9.eE]+)\s*dB)"};
+};
+
+const FilterPatterns& filter_patterns() {
+    static const FilterPatterns patterns;
+    return patterns;
 }
 
 // Returns false when the words select no channel. Upstream's ChannelFilter
@@ -194,12 +218,24 @@ bool mask_from_channel_words(const std::vector<std::string>& words,
 
 std::string format_double(double v) { return format_apo_number(v); }
 
+// A band's gain as the processor uses it.
+double written_gain(const Band& b) { return std::clamp(b.gain_db, -kMaxBandGainDb, kMaxBandGainDb); }
+
+// The steepest dB slope a shelf of this gain can have and stay the filter the
+// processor designs: design() holds the term under the square root at 0.01,
+// and upstream, which does not, takes the root of a negative number past it.
+double written_slope(const Band& b) {
+    const double A = std::pow(10.0, written_gain(b) / 40.0);
+    const double steepest = 12.0 / (1.0 - 1.99 / (A + 1.0 / A));   // inner = 0.01
+    return std::min(b.width, steepest);
+}
+
 // The width field of a filter line, in a form the parser reads back to the same
 // filter. The parser follows upstream: bandwidth is not accepted for shelves
 // and a dB slope only for shelves. For those combinations, which only the UI can
 // create, the width is written as the Q that designs the same filter; for a
-// shelf bandwidth that Q is exact at 48 kHz.
-std::string width_text(const Band& b) {
+// shelf bandwidth that Q is exact at `sample_rate`.
+std::string width_text(const Band& b, double sample_rate) {
     const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
     switch (b.width_mode) {
         case WidthMode::Q:
@@ -209,7 +245,7 @@ std::string width_text(const Band& b) {
                 return " BW Oct " + format_apo_number(b.width);
             } else {
                 constexpr double kPi = 3.14159265358979323846;
-                const double w0 = 2.0 * kPi * std::min(b.fc, 20000.0) / 48000.0;
+                const double w0 = 2.0 * kPi * clamp_fc(b.fc, sample_rate) / sample_rate;
                 const double alpha = std::sin(w0) * std::sinh(std::log(2.0) / 2.0 * b.width * w0 / std::sin(w0));
                 return " Q " + format_apo_number(std::sin(w0) / (2.0 * alpha));
             }
@@ -290,11 +326,14 @@ uint32_t default_speaker_mask(uint32_t channels) {
 
 std::vector<std::string> apo_channel_names(const ChannelLayout& layout) {
     std::vector<std::string> names;
+    // A stream with no mask gets the default for its channel count, as upstream's
+    // FilterEngine gives it before naming channels.
+    const uint32_t mask = layout.speaker_mask != 0 ? layout.speaker_mask : default_speaker_mask(layout.channels);
     // Upstream walks bits 0 to 30, naming each position present in the mask in
     // order, then numbers whatever channels the mask did not cover.
     for (uint32_t i = 0; i < 31; ++i) {
         const uint32_t bit = uint32_t{1} << i;
-        if ((layout.speaker_mask & bit) == 0) {
+        if ((mask & bit) == 0) {
             continue;
         }
         const char* name = nullptr;
@@ -329,6 +368,7 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
     const std::vector<std::string> channel_names = apo_channel_names(layout);
     ChannelMask current_mask = kAllChannels;
     bool no_channel_selected = false;
+    bool stage_matches = true;
     uint32_t next_id = 1;
     size_t line_no = 0;
 
@@ -337,13 +377,10 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
     while (std::getline(in, line)) {
         ++line_no;
 
-        // Upstream strips a trailing comment starting at '#'.
-        const size_t hash = line.find('#');
-        if (hash != std::string::npos) {
-            line = line.substr(0, hash);
-        }
+        // A comment is a line starting with '#' (ExpressionFilterFactory); a '#'
+        // later in a line is part of it, as in `Include: EQ #2.txt`.
         line = trim(line);
-        if (line.empty()) {
+        if (line.empty() || line[0] == '#') {
             continue;
         }
 
@@ -355,17 +392,40 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
         const std::string command = trim(line.substr(0, colon));
         const std::string params  = line.substr(colon + 1);
 
-        if (command == "Device") {
-            result.devices.push_back(trim(params));
+        // Upstream skips the lines under a Stage that does not match its own.
+        // What is imported here plays on the render path, which both pre-mix and
+        // post-mix are; a section only for capture is not.
+        if (command == "Stage") {
+            stage_matches = false;
+            for (const std::string& part : split_spaces(to_lower(trim(params)))) {
+                if (part == "pre-mix" || part == "post-mix") {
+                    stage_matches = true;
+                } else if (part != "capture") {
+                    result.warnings.push_back({line_no, "unknown stage '" + part + "'"});
+                }
+            }
+            if (!stage_matches) {
+                result.warnings.push_back({line_no, "section not for playback, skipped"});
+            }
             continue;
         }
-        if (command == "Channel") {
-            std::vector<std::string> words;
-            std::istringstream ws(params);
-            std::string w;
-            while (ws >> w) {
-                words.push_back(w);
+        if (!stage_matches) {
+            continue;
+        }
+        if (command == "Device") {
+            // Which device a section is for is decided by Equalizer APO against
+            // the device it runs on; here every section is imported.
+            result.devices.push_back(trim(params));
+            if (to_lower(trim(params)) != "all") {
+                result.warnings.push_back({line_no, "Device section imported whatever device it names"});
             }
+            continue;
+        }
+        if (command == "If" || command == "ElseIf" || command == "Else") {
+            result.warnings.push_back({line_no, "condition not evaluated: every If and Else branch is imported"});
+        }
+        if (command == "Channel") {
+            const std::vector<std::string> words = split_spaces(params);
             std::vector<std::string> ignored;
             no_channel_selected =
                 !mask_from_channel_words(words, channel_names, &current_mask, &ignored);
@@ -409,22 +469,29 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
             continue;
         }
         if (command.rfind("Filter", 0) == 0) {
+            const FilterPatterns& re = filter_patterns();
             const std::string norm = normalise_decimal(params);
-            std::istringstream ps(norm);
-            std::string on, type_token;
-            ps >> on;
-            if (to_upper(on) != "ON") {
-                // "Filter 3: OFF ..." or "Filter 3: None" are both legal ways to
-                // say nothing is here.
+            std::smatch m;
+            if (!std::regex_search(norm, m, re.type)) {
+                // "Filter 3: OFF ..." and "Filter 3: None" are legal ways to say
+                // nothing is here; upstream ignores anything else too, silently.
+                std::istringstream ps(norm);
+                std::string first;
+                ps >> first;
+                if (!first.empty() && first != "OFF" && first != "None") {
+                    result.warnings.push_back({line_no, "filter line does not start with ON and a type, ignored"});
+                }
                 continue;
             }
-            ps >> type_token;
-            if (to_upper(type_token) == "NONE") {
-                continue;
-            }
+            const std::string type_token = m.str(1);
+            // Everything after the type token, which is what upstream's regexes
+            // are applied to.
+            const std::string rest = m.suffix().str();
             TokenInfo info{};
             if (!lookup_token(type_token, &info)) {
-                result.warnings.push_back({line_no, "unknown filter type '" + type_token + "'"});
+                if (type_token != "None") {
+                    result.warnings.push_back({line_no, "unknown filter type '" + type_token + "'"});
+                }
                 continue;
             }
             if (no_channel_selected) {
@@ -433,22 +500,17 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
                 continue;
             }
 
-            // Everything after the type token, which is what upstream's regexes
-            // are applied to.
-            std::string rest;
-            std::getline(ps, rest);
-
             Band band;
             band.id = next_id++;
             band.type = info.type;
             band.channels = current_mask;
             band.enabled = true;
 
-            std::string raw;
-            if (!find_value_after(rest, "Fc", &raw)) {
-                result.warnings.push_back({line_no, "no Fc in filter line"});
+            if (!std::regex_search(rest, m, re.freq)) {
+                result.warnings.push_back({line_no, "no Fc in Hz in filter line"});
                 continue;
             }
+            const std::string raw = strip_nbsp(m.str(1));
             double fc = 0.0;
             if (!parse_double(raw, &fc)) {
                 result.warnings.push_back({line_no, "could not read Fc"});
@@ -456,56 +518,44 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
             }
             band.fc = apply_rew_thousands_quirk(raw, fc);
 
-            if (find_value_after(rest, "Gain", &raw)) {
-                double g = 0.0;
-                if (parse_double(raw, &g) && type_uses_gain(info.type)) {
-                    band.gain_db = g;
+            if (std::regex_search(rest, m, re.gain)) {
+                if (type_uses_gain(info.type)) {
+                    band.gain_db = number_or_zero(m.str(1));
                 }
             } else if (type_uses_gain(info.type)) {
-                result.warnings.push_back({line_no, "no Gain for a filter type that needs one"});
+                result.warnings.push_back({line_no, "no Gain in dB for a filter type that needs one"});
                 continue;
             }
 
             const bool is_shelf =
                 info.type == FilterType::LowShelf || info.type == FilterType::HighShelf;
 
-            bool have_width = false;
-            if (find_value_after(rest, "BW Oct", &raw)) {
-                double bw = 0.0;
-                if (parse_double(raw, &bw) && bw > 0.0 && !is_shelf) {
-                    band.width = bw;
-                    band.width_mode = WidthMode::BandwidthOct;
-                    have_width = true;
-                }
+            // Upstream reads Q, then bandwidth for all but shelves, then a dB slope
+            // written before Fc for shelves only; each one found replaces the last.
+            double width = 0.0;
+            WidthMode mode = WidthMode::Q;
+            if (std::regex_search(rest, m, re.q)) {
+                width = number_or_zero(m.str(1));
+                mode = WidthMode::Q;
             }
-            if (!have_width && find_value_after(rest, "Q", &raw)) {
-                double q = 0.0;
-                if (parse_double(raw, &q) && q > 0.0) {
-                    band.width = q;
-                    band.width_mode = WidthMode::Q;
-                    have_width = true;
-                }
+            if (!is_shelf && std::regex_search(rest, m, re.bw)) {
+                width = number_or_zero(m.str(1));
+                mode = WidthMode::BandwidthOct;
             }
-            if (!have_width && is_shelf) {
-                // A slope appears immediately after the type token, as
-                // "Filter 1: ON LS 6 dB Fc 100 Hz".
-                const std::string lead = trim(rest);
-                double slope = 0.0;
-                std::string num;
-                size_t i = 0;
-                while (i < lead.size() && (std::isdigit(static_cast<unsigned char>(lead[i])) ||
-                                           lead[i] == '.' || lead[i] == '-' || lead[i] == '+')) {
-                    num += lead[i++];
-                }
-                while (i < lead.size() && std::isspace(static_cast<unsigned char>(lead[i]))) {
-                    ++i;
-                }
-                if (!num.empty() && lead.compare(i, 2, "dB") == 0 && parse_double(num, &slope) &&
-                    slope > 0.0) {
-                    band.width = slope;
-                    band.width_mode = WidthMode::SlopeDb;
-                    have_width = true;
-                }
+            if (is_shelf && std::regex_search(rest, m, re.slope)) {
+                width = number_or_zero(m.str(1));
+                mode = WidthMode::SlopeDb;
+            }
+            if (width < 0.0) {
+                // Upstream designs this, unstable; the processor would play it as
+                // nothing. Neither is what the file meant.
+                result.warnings.push_back({line_no, "negative width, filter ignored"});
+                continue;
+            }
+            const bool have_width = width != 0.0;
+            if (have_width) {
+                band.width = width;
+                band.width_mode = mode;
             }
 
             if (!have_width) {
@@ -598,6 +648,14 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
     const auto fc_text = [&](const Band& b) {
         return format_apo_frequency(options.sample_rate > 0.0 ? clamp_fc(b.fc, options.sample_rate) : b.fc);
     };
+    // A bandwidth shelf converts to Q; it is exact at the device's rate, or at
+    // 48 kHz for an export.
+    const double width_rate = options.sample_rate > 0.0 ? options.sample_rate : 48000.0;
+    // LS/HS ask upstream for the corner shift, which the processor applies only
+    // to Q and slope widths; a bandwidth shelf is written as LSC/HSC.
+    const auto token = [&](const Band& b) {
+        return token_for(b.type, b.shelf_corner && b.width_mode != WidthMode::BandwidthOct);
+    };
     const auto channel_name = [&](uint32_t c) {
         return c < channel_names.size() ? channel_names[c] : std::to_string(c + 1);
     };
@@ -613,8 +671,10 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
         out << "Device: " << options.device << "\n";
     }
 
-    if (state.preamp_db != 0.0) {
-        out << "Preamp: " << format_double(state.preamp_db) << " dB\n";
+    // Non-finite values are never written: upstream would read `nan` as a
+    // number. Finite ones are clamped as the processor clamps them.
+    if (std::isfinite(state.preamp_db) && state.preamp_db != 0.0) {
+        out << "Preamp: " << format_double(std::clamp(state.preamp_db, kMinLevelDb, kMaxLevelDb)) << " dB\n";
     }
 
     // Group bands by channel mask so a Channel: line is written once per group
@@ -646,39 +706,43 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             if (b.channels != mask) {
                 continue;
             }
-            if (!b.enabled) {
+            // A band that cannot be written as numbers is left out; one with no
+            // width is off, as it is in the processor.
+            if (!std::isfinite(b.fc) || !std::isfinite(b.gain_db) || !std::isfinite(b.width)) {
+                continue;
+            }
+            if (!b.enabled || b.width <= 0.0) {
                 if (options.write_disabled_as_none) {
-                    out << "Filter " << index++ << ": OFF " << token_for(b.type, b.shelf_corner)
-                        << " Fc " << fc_text(b) << " Hz";
+                    out << "Filter " << index++ << ": OFF " << token(b) << " Fc " << fc_text(b) << " Hz";
                     if (type_uses_gain(b.type)) {
-                        out << " Gain " << format_double(b.gain_db) << " dB";
+                        out << " Gain " << format_double(written_gain(b)) << " dB";
                     }
-                    out << width_text(b) << "\n";
+                    out << width_text(b, width_rate) << "\n";
                 }
                 continue;
             }
 
             const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
-            out << "Filter " << index++ << ": ON " << token_for(b.type, b.shelf_corner) << " ";
+            out << "Filter " << index++ << ": ON " << token(b) << " ";
             if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
-                out << format_double(b.width) << " dB ";
+                out << format_double(written_slope(b)) << " dB ";
             }
             out << "Fc " << fc_text(b) << " Hz";
             if (type_uses_gain(b.type)) {
-                out << " Gain " << format_double(b.gain_db) << " dB";
+                out << " Gain " << format_double(written_gain(b)) << " dB";
             }
-            out << width_text(b) << "\n";
+            out << width_text(b, width_rate) << "\n";
         }
     }
 
     // Channel trims ride on Preamp inside a Channel block, which is how Peace
     // expresses them too.
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
-        if (state.channel_gain_db[c] == 0.0) {
+        if (!std::isfinite(state.channel_gain_db[c]) || state.channel_gain_db[c] == 0.0) {
             continue;
         }
         out << "Channel: " << channel_name(c) << "\n";
-        out << "Preamp: " << format_double(state.channel_gain_db[c]) << " dB\n";
+        out << "Preamp: " << format_double(std::clamp(state.channel_gain_db[c], kMinLevelDb, kMaxLevelDb)) << " dB\n";
     }
 
     // Mute is silence, not a large cut: every channel of the layout is copied

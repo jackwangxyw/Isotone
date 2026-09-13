@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "isotone/apo_config.h"
 #include "isotone/speakers.h"
@@ -110,10 +111,11 @@ void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_f
     fade_step_      = block_seconds / kCrossfadeSeconds;
 
     bands_.assign(max_bands_, BandSlot{});
+    slot_claimed_.assign(max_bands_, 0);
+    band_slot_.assign(max_bands_, 0);
     state_new_.assign(static_cast<size_t>(max_bands_) * channels_, State{});
     state_old_.assign(static_cast<size_t>(max_bands_) * channels_, State{});
 
-    dry_.assign(static_cast<size_t>(control_frames_) * channels_, 0.0f);
     scratch_.assign(static_cast<size_t>(max_frames_) * channels_, 0.0f);
     pointers_.assign(channels_, nullptr);
 
@@ -327,11 +329,47 @@ void Processor::remove_band(uint32_t index) {
     b.coeffs   = BiquadCoeffs::identity();
 }
 
+// Chooses a slot for each of the first `count` bands, in band_slot_. A band
+// keeps the slot that holds (or is queued to hold) its id. A new band takes a
+// free slot, else one still fading out, where it waits for the fade to end,
+// else the slot of a band that is being removed, which then crossfades to it.
+void Processor::match_bands(const EqState& state, uint32_t count) {
+    constexpr uint32_t kNone = ~uint32_t{0};
+    std::fill(slot_claimed_.begin(), slot_claimed_.end(), uint8_t{0});
+    for (uint32_t k = 0; k < count; ++k) {
+        band_slot_[k] = kNone;
+        const uint32_t id = state.bands[k].id;
+        for (uint32_t i = 0; i < max_bands_; ++i) {
+            const BandSlot& b = bands_[i];
+            const bool queued_add = b.pending && !b.pending_remove;
+            if (slot_claimed_[i] || !(b.occupied || queued_add)) continue;
+            if ((queued_add ? b.pending_band.id : b.id) == id) {
+                band_slot_[k] = i;
+                slot_claimed_[i] = 1;
+                break;
+            }
+        }
+    }
+    const auto place = [&](uint32_t k, bool (*usable)(const BandSlot&)) {
+        for (uint32_t i = 0; i < max_bands_ && band_slot_[k] == kNone; ++i) {
+            if (!slot_claimed_[i] && usable(bands_[i])) {
+                band_slot_[k] = i;
+                slot_claimed_[i] = 1;
+            }
+        }
+    };
+    for (uint32_t k = 0; k < count; ++k) place(k, [](const BandSlot& b) { return !b.occupied && !b.pending && b.fade >= 1.0; });
+    for (uint32_t k = 0; k < count; ++k) place(k, [](const BandSlot& b) { return !b.occupied; });
+    for (uint32_t k = 0; k < count; ++k) place(k, [](const BandSlot&) { return true; });
+}
+
 void Processor::set_target(const EqState& state) {
     const uint32_t count = static_cast<uint32_t>(std::min<size_t>(state.bands.size(), max_bands_));
+    match_bands(state, count);
 
-    for (uint32_t i = 0; i < count; ++i) {
-        const Band& in = state.bands[i];
+    for (uint32_t k = 0; k < count; ++k) {
+        const Band& in = state.bands[k];
+        const uint32_t i = band_slot_[k];
         BandSlot&   b  = bands_[i];
         const bool shape_differs = !b.occupied || b.type != in.type || b.width_mode != in.width_mode ||
                                    b.shelf_corner != in.shelf_corner || b.enabled != effective_enabled(in) ||
@@ -347,7 +385,8 @@ void Processor::set_target(const EqState& state) {
         apply_band(i, in);
     }
 
-    for (uint32_t i = count; i < max_bands_; ++i) {
+    for (uint32_t i = 0; i < max_bands_; ++i) {
+        if (slot_claimed_[i]) continue;
         BandSlot& b = bands_[i];
         if (b.occupied && b.fade < 1.0) {
             b.pending        = true;
@@ -460,6 +499,19 @@ void Processor::advance_smoothers(uint32_t frames) {
 
     for (uint32_t i = 0; i < max_bands_; ++i) {
         BandSlot& b = bands_[i];
+        if (b.pending && b.fade >= 1.0) {
+            // The fade this change waited for ended in an earlier block, whose
+            // weight ramp ran to its last sample: start the change's own fade.
+            // Starting it in the block the fade ends in would restart that
+            // block's ramp from zero and step the output.
+            b.pending = false;
+            if (b.pending_remove) {
+                b.pending_remove = false;
+                if (b.occupied) remove_band(i);
+            } else {
+                apply_band(i, b.pending_band);
+            }
+        }
         if (!b.occupied && b.fade >= 1.0) {
             b.fade_prev = 1.0;
             continue;
@@ -472,19 +524,6 @@ void Processor::advance_smoothers(uint32_t frames) {
             b.fade = std::min(1.0, b.fade + fstep);
         }
         recompute_band(b);
-        if (b.fade >= 1.0 && b.pending) {
-            // The fade this change waited for is complete: start its own.
-            b.pending = false;
-            if (b.pending_remove) {
-                b.pending_remove = false;
-                if (b.occupied) remove_band(i);
-            } else {
-                apply_band(i, b.pending_band);
-            }
-            b.fade_prev = b.fade;
-            b.fade = std::min(1.0, b.fade + fstep);
-            recompute_band(b);
-        }
     }
 
     // Routing matrix.
@@ -593,7 +632,8 @@ void Processor::stage_matrix(float* const* planar, uint32_t offset, uint32_t fra
             for (uint32_t i = 0; i < routed_; ++i) {
                 const double m = mat_interp_ ? mat_begin_[o][i] + (mat_cur_[o][i] - mat_begin_[o][i]) * t
                                              : mat_cur_[o][i];
-                acc += m * in[i];
+                // 0 * NaN is NaN: a bad sample must reach only the outputs it feeds.
+                if (m != 0.0) acc += m * in[i];
             }
             planar[o][offset + n] = static_cast<float>(acc);
         }
@@ -679,12 +719,17 @@ void Processor::stage_delay(float* const* planar, uint32_t offset, uint32_t fram
     delay_pos_ = (delay_pos_ + frames) & mask;
 }
 
-void Processor::process_block(float* const* planar, uint32_t offset, uint32_t frames) {
+void Processor::process_block(float* const* planar, uint32_t offset, uint32_t frames, double bypass_begin,
+                              double bypass_end) {
     // Order: routing, bass management, EQ with the per-speaker gains, delay.
     // Speaker EQ therefore acts on what each speaker actually plays, including
     // the bass that bass management sends to the sub.
     stage_matrix(planar, offset, frames);
     stage_bass(planar, offset, frames);
+    // Bypass is a wet/dry crossfade around the EQ stage alone: preamp and bands.
+    // The mix is interpolated across the block, because a mix that steps once
+    // per control block is itself a staircase and audible.
+    const bool bypassing = bypass_begin > 1e-9 || bypass_end > 1e-9;
 
     for (uint32_t c = 0; c < channels_; ++c) {
         // Only the first kMaxChannels channels have a trim; the rest sit at 0 dB.
@@ -698,8 +743,8 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
             // Preamp, crossfade weights and post gain are all ramped across the
             // block, so none of them steps once per control block.
             const double t = static_cast<double>(n + 1) / static_cast<double>(frames);
-            double x = static_cast<double>(chan[n]) *
-                       (preamp_begin_lin_ + (preamp_end_lin_ - preamp_begin_lin_) * t);
+            const double dry = static_cast<double>(chan[n]);
+            double x = dry * (preamp_begin_lin_ + (preamp_end_lin_ - preamp_begin_lin_) * t);
 
             for (uint32_t i = 0; i < max_bands_; ++i) {
                 BandSlot& b = bands_[i];
@@ -727,19 +772,25 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
                 }
             }
 
-            if (!std::isfinite(x)) {
-                // Non-finite input, or a filter that overflowed, would keep its
-                // state NaN until the stream restarted. Start this channel's
-                // filters from rest and output silence for the sample instead.
+            if (bypassing) {
+                const double mix = bypass_begin + (bypass_end - bypass_begin) * t;
+                x = x * (1.0 - mix) + dry * mix;
+            }
+
+            double y = x * (post_begin + (post_end - post_begin) * t);
+            if (!std::isfinite(y) || std::abs(y) > std::numeric_limits<float>::max()) {
+                // Non-finite input, a filter that overflowed, or gains that
+                // multiply past what a float holds would keep filter state NaN
+                // until the stream restarted, or send inf downstream. Start this
+                // channel's filters from rest and output silence for the sample.
                 for (uint32_t i = 0; i < max_bands_; ++i) {
                     const size_t k = static_cast<size_t>(i) * channels_ + c;
                     state_new_[k].clear();
                     state_old_[k].clear();
                 }
-                x = 0.0;
+                y = 0.0;
             }
-
-            chan[n] = static_cast<float>(x * (post_begin + (post_end - post_begin) * t));
+            chan[n] = static_cast<float>(y);
         }
     }
 
@@ -754,35 +805,9 @@ void Processor::process(float* const* planar, uint32_t frames) {
     uint32_t done = 0;
     while (done < frames) {
         const uint32_t n = std::min(control_frames_, frames - done);
-        const bool need_dry = bypass_cur_ > 1e-9 || bypass_target_ > 1e-9;
-
-        if (need_dry) {
-            for (uint32_t c = 0; c < channels_; ++c) {
-                const float* src = planar[c] + done;
-                std::copy(src, src + n, dry_.data() + static_cast<size_t>(c) * control_frames_);
-            }
-        }
-
         const double mix_begin = bypass_cur_;
         advance_smoothers(n);
-        const double mix_end = bypass_cur_;
-
-        process_block(planar, done, n);
-
-        // Bypass is a wet/dry crossfade. The mix is interpolated across the
-        // sub-block rather than held at one value for it, because a mix that
-        // steps once per control block is itself a staircase and audible.
-        if (need_dry && (mix_begin > 1e-9 || mix_end > 1e-9)) {
-            for (uint32_t c = 0; c < channels_; ++c) {
-                const float* src = dry_.data() + static_cast<size_t>(c) * control_frames_;
-                float* dst = planar[c] + done;
-                for (uint32_t i = 0; i < n; ++i) {
-                    const double t = static_cast<double>(i + 1) / static_cast<double>(n);
-                    const double mix = mix_begin + (mix_end - mix_begin) * t;
-                    dst[i] = static_cast<float>(dst[i] * (1.0 - mix) + src[i] * mix);
-                }
-            }
-        }
+        process_block(planar, done, n, mix_begin, bypass_cur_);
         done += n;
     }
 }

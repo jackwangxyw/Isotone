@@ -42,6 +42,7 @@
 
 #include "isotone/audio_ring.h"
 #include "isotone/param_block.h"
+#include "persisted_state.h"
 #include "shared_mapping.h"
 
 namespace {
@@ -246,13 +247,18 @@ constexpr HNSTIME kChildLatency = 12345;
 constexpr CLSID kTestChildClsid = {0x5c1d0e2a, 0x4b7f, 0x4e11, {0x9a, 0x31, 0x6d, 0x2b, 0x8e, 0x40, 0x17, 0xc3}};
 
 struct ChildProbe {
-    int live = 0, created = 0, initialized = 0, format_calls = 0, locks = 0, unlocks = 0, processes = 0;
+    int live = 0, created = 0, initialized = 0, format_calls = 0, locks = 0, unlocks = 0, processes = 0, resets = 0;
     bool fail_initialize = false;
+    bool fail_lock = false;
+    bool skip_output_flags = false;   // leave the output buffer flags as they were
+    bool host_isoapo = false;         // a wrapper whose own child is IsoAPO
+    HRESULT nested_init = S_OK;       // what the IsoAPO it hosts said to Initialize
     int refuse_formats = 0;   // refuse this many format probes first
     std::wstring endpoint;
     CLSID init_clsid{};
 };
 ChildProbe g_child;
+IClassFactory* g_isoapo_factory = nullptr;
 
 class TestChild : public IAudioProcessingObject,
                   public IAudioProcessingObjectRT,
@@ -283,7 +289,10 @@ public:
         return n;
     }
 
-    HRESULT __stdcall Reset() override { return S_OK; }
+    HRESULT __stdcall Reset() override {
+        ++g_child.resets;
+        return S_OK;
+    }
     HRESULT __stdcall GetLatency(HNSTIME* time) override {
         *time = kChildLatency;
         return S_OK;
@@ -293,6 +302,13 @@ public:
         ++g_child.initialized;
         if (g_child.fail_initialize) return E_FAIL;
         if (size < sizeof(APOInitSystemEffects) || data == nullptr) return E_INVALIDARG;
+        // A wrapper that hosts IsoAPO, as its own install record says. Bounded
+        // here, so a missing guard fails the check instead of the stack.
+        if (g_child.host_isoapo && g_child.created <= 3) {
+            Apo nested;
+            if (create_apo(g_isoapo_factory, &nested)) g_child.nested_init = nested.apo->Initialize(size, data);
+            nested.release();
+        }
         const auto* init = reinterpret_cast<APOInitSystemEffects*>(data);
         g_child.init_clsid = init->APOInit.clsid;
         static constexpr PROPERTYKEY kEndpointGuid = {
@@ -334,7 +350,7 @@ public:
         const size_t samples = static_cast<size_t>(in[0]->u32ValidFrameCount) * kChannels;
         for (size_t i = 0; i < samples; ++i) dst[i] = static_cast<float>(src[i] * kChildGain);
         out[0]->u32ValidFrameCount = in[0]->u32ValidFrameCount;
-        out[0]->u32BufferFlags = in[0]->u32BufferFlags;
+        if (!g_child.skip_output_flags) out[0]->u32BufferFlags = in[0]->u32BufferFlags;
     }
     UINT32 __stdcall CalcInputFrames(UINT32 frames) override { return frames; }
     UINT32 __stdcall CalcOutputFrames(UINT32 frames) override { return frames; }
@@ -342,7 +358,7 @@ public:
     HRESULT __stdcall LockForProcess(UINT32, APO_CONNECTION_DESCRIPTOR**, UINT32,
                                      APO_CONNECTION_DESCRIPTOR**) override {
         ++g_child.locks;
-        return S_OK;
+        return g_child.fail_lock ? E_FAIL : S_OK;
     }
     HRESULT __stdcall UnlockForProcess() override {
         ++g_child.unlocks;
@@ -528,6 +544,7 @@ int main(int argc, char** argv) {
     hr = get_class_object(post_mix, __uuidof(IClassFactory), reinterpret_cast<void**>(&factory));
     check_hr(hr, "DllGetClassObject for the post-mix CLSID");
     if (FAILED(hr)) return 2;
+    g_isoapo_factory = factory;
 
     void* ignored = nullptr;
     check(get_class_object(bogus, __uuidof(IClassFactory), &ignored) ==
@@ -744,6 +761,15 @@ int main(int argc, char** argv) {
         std::printf("  %-66s %.3f / %.2e\n", "delayed tail peak in silence / stale audio after resume", tail_peak, stale);
         check(tail_peak > 0.9, "a delayed tail plays out over the silent buffers that follow the sound");
         check(stale < 1e-6, "nothing stale is left in the delay line for the next sound");
+
+        // A stream stopped with no silence after it: Reset must empty the delay
+        // line, or the next start plays the old tail.
+        run_sine(first.rt, buffer, 1000.0, 48000);
+        check_hr(first.apo->Reset(), "Reset");
+        const std::vector<float> after_reset = run_sine(first.rt, buffer, 1000.0, 4800);
+        double leftover = 0.0;
+        for (size_t i = 0; i < 2300 * kChannels && i < after_reset.size(); ++i) leftover = (std::max)(leftover, double(std::abs(after_reset[i])));
+        check(!after_reset.empty() && leftover < 1e-6, "Reset empties the delay line");
         ui_write(shared, peaking_state(1000.0, -6.0, 1.0));
     }
 
@@ -756,6 +782,22 @@ int main(int argc, char** argv) {
     std::printf("  %-66s %+.3f dB (analytic %+.3f)\n", "level at 1 kHz after the UI wrote -6 dB",
                 db_live, peaking_db(1000.0, -6.0, 1.0, 1000.0, kRate));
     check(std::abs(db_live + 6.0) < 0.01, "a block written by the UI is applied while running");
+
+    {
+        // Upstream sizes by the output's max frame count when the input's is 0.
+        Apo zero;
+        create_apo(factory, &zero);
+        zero.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        APO_CONNECTION_DESCRIPTOR no_max = descriptor;
+        no_max.u32MaxFrameCount = 0;
+        APO_CONNECTION_DESCRIPTOR* no_max_in[1] = {&no_max};
+        const HRESULT locked = zero.config->LockForProcess(1, no_max_in, 1, descriptors);
+        const std::vector<float> out = SUCCEEDED(locked) ? run_sine(zero.rt, buffer, 1000.0, 48000) : std::vector<float>{};
+        check(SUCCEEDED(locked) && !out.empty() && std::abs(settled_db(out, 1000.0) + 6.0) < 0.01,
+              "an input with no max frame count is processed at the output's");
+        if (SUCCEEDED(locked)) zero.config->UnlockForProcess();
+        zero.release();
+    }
 
     {
         isotone::EqState poison = peaking_state(1000.0, -6.0, 1.0);
@@ -866,8 +908,9 @@ int main(int argc, char** argv) {
     check_hr(third.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init)),
              "Initialize finds the region the UI kept alive");
     check_hr(third.config->LockForProcess(1, descriptors, 1, descriptors), "LockForProcess");
+    run_sine(third.rt, buffer, 1000.0, size_t{kMaxFrames} * (isotone::kRingStaleClaims + 2));
     check((ring->writer >> 32) == GetCurrentProcessId(),
-          "a ring claim left by a dead engine process is taken over");
+          "a ring claim left by a dead engine process is taken over once its writes have stopped");
     captured = run_sine(third.rt, buffer, 1000.0, 48000);
     check(std::abs(settled_db(captured, 1000.0) + 6.0) < 0.01,
           "the new instance starts on the UI's block, not the file seed");
@@ -1152,8 +1195,254 @@ int main(int argc, char** argv) {
               "Equalizer APO recorded as the child is refused");
         CoRevokeClassObject(eapo_cookie);
 
+        record(clsid_text(kTestChildClsid));
+
+        // A wrapper APO whose own record names IsoAPO: each would create the
+        // other until the stack runs out. The IsoAPO created inside IsoAPO's
+        // child refuses to initialize, so the wrapper runs alone inside IsoAPO.
+        g_child = ChildProbe{};
+        g_child.host_isoapo = true;
+        r = run();
+        check(SUCCEEDED(r.init) && g_child.created == 1 && FAILED(g_child.nested_init) &&
+                  std::abs(r.level - with_child) < 0.01,
+              "an IsoAPO created inside its own child refuses, so the chain ends");
+
+        // A child that fails its lock on a format IsoAPO can process alone is
+        // dropped; on a format only the child can convert, the lock fails and
+        // the child is kept for the next attempt.
+        g_child = ChildProbe{};
+        g_child.fail_lock = true;
+        r = run();
+        check(SUCCEEDED(r.lock) && g_child.live == 0 && std::abs(r.level - alone) < 0.01,
+              "a child that fails LockForProcess on the stream's own format is dropped");
+        g_child = ChildProbe{};
+        {
+            UNCOMPRESSEDAUDIOFORMAT six = format;
+            six.dwSamplesPerFrame = 6;
+            six.dwChannelMask = 0x60F;
+            IAudioMediaType* six_media = nullptr;
+            CreateAudioMediaTypeFromUncompressedAudioFormat(&six, &six_media);
+            std::vector<float> six_buffer(size_t{kMaxFrames} * 6);
+            APO_CONNECTION_DESCRIPTOR six_out = descriptor;
+            six_out.pFormat = six_media;
+            six_out.pBuffer = reinterpret_cast<UINT_PTR>(six_buffer.data());
+            APO_CONNECTION_DESCRIPTOR* six_outs[1] = {&six_out};
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            g_child.fail_lock = true;
+            const HRESULT refused = apo.config->LockForProcess(1, descriptors, 1, six_outs);
+            const bool kept = g_child.live == 1;
+            g_child.fail_lock = false;
+            const HRESULT retried = apo.config->LockForProcess(1, descriptors, 1, six_outs);
+            if (SUCCEEDED(retried)) apo.config->UnlockForProcess();
+            apo.release();
+            if (six_media) six_media->Release();
+            check(FAILED(refused) && kept && SUCCEEDED(retried) && g_child.locks == 2,
+                  "a child that fails LockForProcess on a channel change it negotiated fails the lock and is kept");
+        }
+
+        // A second lock while locked must not touch the child the audio thread
+        // is using, and Reset reaches the child.
+        g_child = ChildProbe{};
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const HRESULT again = apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const std::vector<float> out = run_sine(apo.rt, buffer, 1000.0, 48000);
+            apo.apo->Reset();
+            check(again == APOERR_APO_LOCKED && g_child.locks == 1 && g_child.live == 1 && !out.empty() &&
+                      std::abs(settled_db(out, 1000.0) - with_child) < 0.01,
+                  "LockForProcess while locked is refused before the child is touched");
+            check(g_child.resets == 1, "Reset is forwarded to the child");
+            apo.config->UnlockForProcess();
+            apo.release();
+        }
+
+        // A child that leaves the output flags alone: the flags IsoAPO wrote on
+        // the previous call must not silence this one.
+        g_child = ChildProbe{};
+        g_child.skip_output_flags = true;
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            std::vector<float> out;
+            APO_CONNECTION_PROPERTY in{}, o{};
+            o.u32BufferFlags = BUFFER_VALID;
+            for (UINT32 call = 0; call < 48; ++call) {
+                const bool silent = call == 0;
+                for (UINT32 i = 0; i < kMaxFrames; ++i) {
+                    const double t = static_cast<double>(size_t{call} * kMaxFrames + i);
+                    const float v = silent ? 0.0f : static_cast<float>(std::sin(2.0 * kPi * 1000.0 * t / kRate));
+                    for (UINT32 c = 0; c < kChannels; ++c) buffer[i * kChannels + c] = v;
+                }
+                in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
+                in.u32ValidFrameCount = kMaxFrames;
+                in.u32BufferFlags = silent ? BUFFER_SILENT : BUFFER_VALID;
+                in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+                o.pBuffer = in.pBuffer;
+                o.u32ValidFrameCount = kMaxFrames;
+                o.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;   // flags carry over, as the engine's do
+                APO_CONNECTION_PROPERTY* ins[1] = {&in};
+                APO_CONNECTION_PROPERTY* outs[1] = {&o};
+                apo.rt->APOProcess(1, ins, 1, outs);
+                if (!silent) out.insert(out.end(), buffer, buffer + sample_count);
+            }
+            apo.config->UnlockForProcess();
+            apo.release();
+            check(std::abs(settled_db(out, 1000.0) - with_child) < 0.01,
+                  "a child that does not set output flags is not silenced by the last call's");
+        }
+
+        // A discovery-only instance does no work: no region, no child.
+        g_child = ChildProbe{};
+        {
+            APOInitSystemEffects2 discovery{};
+            discovery.APOInit.cbSize = sizeof(discovery);
+            discovery.APOInit.clsid = post_mix;
+            discovery.pAPOEndpointProperties = &child_properties;
+            discovery.InitializeForDiscoveryOnly = TRUE;
+            Apo apo;
+            create_apo(factory, &apo);
+            const HRESULT initialized = apo.apo->Initialize(sizeof(discovery), reinterpret_cast<BYTE*>(&discovery));
+            isotone::win::SharedMapping region;
+            const DWORD opened = region.open(isotone::win::mapping_name(L"Local\\", child_upper));
+            apo.release();
+            check(SUCCEEDED(initialized) && opened == ERROR_FILE_NOT_FOUND && g_child.created == 0,
+                  "an instance initialized for discovery only creates no region and no child");
+        }
+
         RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\IsoAPO-selftest");
         CoRevokeClassObject(cookie);
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\npersisted state\n");
+    {
+        const std::wstring dir = isotone::win::persisted_state_dir(true);
+        std::vector<std::wstring> written;
+        const auto fresh = [] {
+            GUID g{};
+            CoCreateGuid(&g);
+            wchar_t text[64] = {};
+            StringFromGUID2(g, text, 64);
+            return std::wstring(text);
+        };
+        const auto persist = [&](const std::wstring& guid, const isotone::EqState& s) {
+            isotone::ParamBlock b{};
+            isotone::init_param_block(&b);
+            isotone::to_param_block(s, &b);
+            written.push_back(isotone::win::persisted_state_path(dir, guid));
+            return isotone::win::write_persisted_state(written.back(), b) == ERROR_SUCCESS;
+        };
+        struct Instance {
+            Apo apo;
+            FakeEndpointProperties properties;
+            APOInitSystemEffects init{};
+            HRESULT initialized = E_FAIL;
+        };
+        const auto open_instance = [&](Instance* in) {
+            create_apo(factory, &in->apo);
+            in->init.APOInit.cbSize = sizeof(in->init);
+            in->init.APOInit.clsid = post_mix;
+            in->init.pAPOEndpointProperties = &in->properties;
+            in->initialized = in->apo.apo->Initialize(sizeof(in->init), reinterpret_cast<BYTE*>(&in->init));
+        };
+
+        {
+            const std::wstring guid = fresh();
+            check(persist(guid, isotone::EqState{}), "a flat state is saved for a device");
+            Instance a{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&a);
+            isotone::win::SharedMapping region;
+            const bool opened = region.open(isotone::win::mapping_name(L"Local\\", guid)) == ERROR_SUCCESS;
+            check(SUCCEEDED(a.initialized) && opened && region.params()->band_count == 0,
+                  "a saved flat state is the device's state, not the default");
+            a.apo.release();
+        }
+        {
+            const std::wstring guid = fresh();
+            isotone::EqState muted;
+            muted.mute = true;
+            muted.channel_gain_db[1] = -3.0;
+            muted.speakers.bass_management = true;
+            persist(guid, muted);
+            Instance a{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&a);
+            isotone::win::SharedMapping region;
+            const bool opened = region.open(isotone::win::mapping_name(L"Local\\", guid)) == ERROR_SUCCESS;
+            check(opened && region.params()->mute == 1 && region.params()->channel_gain_db[1] == -3.0f &&
+                      (region.params()->speakers.flags & isotone::kSpeakerFlagBassManagement) != 0 &&
+                      region.params()->band_count == 0,
+                  "mute, trims and the speaker setup start from the saved state");
+            a.apo.release();
+        }
+        {
+            const std::wstring guid = fresh();
+            persist(guid, isotone::EqState{});
+            const HANDLE f = CreateFileW(written.back().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            DWORD n = 0;
+            WriteFile(f, "garbage", 7, &n, nullptr);
+            CloseHandle(f);
+            Instance a{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&a);
+            isotone::win::SharedMapping region;
+            const bool opened = region.open(isotone::win::mapping_name(L"Local\\", guid)) == ERROR_SUCCESS;
+            check(opened && region.params()->band_count == 0, "a saved file that is not a valid block starts flat");
+            a.apo.release();
+        }
+        {
+            // The UI died mid-write: the region's seqlock stays odd. A new
+            // instance locks with the saved state rather than nothing.
+            const std::wstring guid = fresh();
+            persist(guid, peaking_state(1000.0, -6.0, 1.0));
+            Instance a{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&a);
+            isotone::win::SharedMapping region;
+            region.open(isotone::win::mapping_name(L"Local\\", guid));
+            if (region.is_open()) {
+                ui_write(region.params(), peaking_state(1000.0, -3.0, 1.0));
+                region.params()->hdr.seq |= 1u;
+            }
+            Instance b{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&b);
+            const HRESULT locked = b.apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const std::vector<float> out = SUCCEEDED(locked) ? run_sine(b.apo.rt, buffer, 1000.0, 48000) : std::vector<float>{};
+            const double level = out.empty() ? 0.0 : settled_db(out, 1000.0);
+            std::printf("  %-66s %+.3f dB\n", "level locked on a region stuck mid-write (saved -6 dB)", level);
+            check(region.is_open() && SUCCEEDED(locked) && std::abs(level + 6.0) < 0.01,
+                  "a lock with no consistent block plays the saved state");
+            if (SUCCEEDED(locked)) b.apo.config->UnlockForProcess();
+            b.apo.release();
+            a.apo.release();
+        }
+        {
+            // Something else holds the region's name at Initialize, so no region
+            // can be made; once it is gone, LockForProcess makes it.
+            const std::wstring guid = fresh();
+            persist(guid, peaking_state(1000.0, -6.0, 1.0));
+            const std::wstring region_name = isotone::win::mapping_name(L"Local\\", guid);
+            HANDLE squatter = CreateEventW(nullptr, TRUE, FALSE, region_name.c_str());
+            Instance a{Apo{}, FakeEndpointProperties(guid)};
+            open_instance(&a);
+            isotone::win::SharedMapping region;
+            const DWORD before = region.open(region_name);
+            CloseHandle(squatter);
+            const HRESULT locked = a.apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const bool opened = region.open(region_name) == ERROR_SUCCESS;
+            check(squatter != nullptr && before != ERROR_SUCCESS && SUCCEEDED(a.initialized) && SUCCEEDED(locked) &&
+                      opened && region.params()->band_count == 1 && region.params()->bands[0].gain_db == -6.0f &&
+                      region.params()->hdr.host_state == static_cast<uint32_t>(isotone::HostState::Running),
+                  "a region that could not be made at Initialize is made at LockForProcess");
+            if (SUCCEEDED(locked)) a.apo.config->UnlockForProcess();
+            a.apo.release();
+        }
+
+        for (const std::wstring& path : written) DeleteFileW(path.c_str());
     }
 
     _aligned_free(buffer);

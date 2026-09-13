@@ -13,8 +13,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <vector>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 #include "isotone/processor.h"
 #include "isotone/response.h"
@@ -362,9 +367,12 @@ TEST_CASE("a gain ramp during a sine produces no click") {
 
     // And prove the test is not vacuous: the gain really did change.
     const double before = *std::max_element(out.begin(), out.begin() + ramp_start);
-    const double after  = *std::max_element(out.end() - 4096, out.end());
-    CHECK(before == doctest::Approx(1.0).epsilon(0.02));
-    CHECK(after  == doctest::Approx(std::pow(10.0, -12.0 / 20.0)).epsilon(0.05));
+    // The last 21 ms, 130 ms after the ramp ended: the smoother's lag behind a
+    // 120 dB/s ramp (2.4 dB) has decayed to 0.004 dB by then.
+    const double after  = *std::max_element(out.end() - 1024, out.end());
+    // In dB: a peak sample of a 1 kHz tone at 48 kHz is at most 0.02 dB low.
+    CHECK(std::abs(20.0 * std::log10(before)) < 0.05);
+    CHECK(std::abs(20.0 * std::log10(after) + 12.0) < 0.05);
 }
 
 TEST_CASE("a filter type change crossfades instead of clicking") {
@@ -661,42 +669,66 @@ TEST_CASE("processing runs at every supported sample rate") {
     }
 }
 
-TEST_CASE("silence after a decaying impulse does not cost extra time") {
-    // Denormal check from plan stage 2. A filter ringing down produces
-    // ever-smaller numbers; without flush-to-zero those become denormals and the
-    // CPU falls off a cliff. Both runs process the same count of samples, so a
-    // large ratio means denormals are being handled in microcode.
+TEST_CASE("denormal flushing turns subnormal results into zero on the calling thread") {
+    // The old timing test here could not fail: the processor's filter state is
+    // double, and a decaying tail takes minutes to reach DBL_MIN. What matters is
+    // that enable_denormal_flushing sets the flags a host relies on, so test that
+    // directly, and put the thread's flags back so no other test runs with them.
+#if defined(_M_X64) || defined(__x86_64__)
+    const unsigned int saved = _mm_getcsr();
     enable_denormal_flushing();
+    volatile double tiny_double = std::numeric_limits<double>::min();
+    volatile float tiny_float = std::numeric_limits<float>::min();
+    const double halved_double = tiny_double * 0.5;
+    const float halved_float = tiny_float * 0.5f;
+    _mm_setcsr(saved);
+    CHECK(halved_double == 0.0);
+    CHECK(halved_float == 0.0f);
+#endif
+}
 
+TEST_CASE("interleaved processing refuses a buffer longer than it was sized for") {
     EqState s;
-    s.bands.push_back(peaking(100.0, 24.0, 30.0));
+    s.bands.push_back(peaking(1000.0, -12.0, 1.0));
+    Processor p = make(s, 2, 64);
+    std::vector<float> buf(65 * 2);
+    for (size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<float>(i);
+    const std::vector<float> before = buf;
+    p.process_interleaved(buf.data(), 65);
+    CHECK(buf == before);
+}
 
-    auto run_ns = [&](bool impulse) {
+TEST_CASE("measured response matches the analytic curve at 44.1 and 96 kHz") {
+    for (double fs : {44100.0, 96000.0}) {
+        EqState s;
+        s.bands.push_back(peaking(1000.0, -12.0, 1.0));
+        Band hs;
+        hs.type = FilterType::HighShelf;
+        hs.fc = 6000.0;
+        hs.gain_db = 5.0;
+        hs.width = 0.7;
+        s.bands.push_back(hs);
+        s.preamp_db = -2.0;
         Processor p;
-        p.initialize(kFs, 2, 4096);
+        p.initialize(fs, 1, 16384);
         p.set_target(s);
         p.reset();
-        std::vector<float> l(4096, 0.0f), r(4096, 0.0f);
-        if (impulse) {
-            l[0] = r[0] = 1.0f;
-        }
-        float* ptr[2] = {l.data(), r.data()};
-        const auto start = std::chrono::steady_clock::now();
-        for (int i = 0; i < 200; ++i) {
-            p.process(ptr, 4096);
-            std::fill(l.begin(), l.end(), 0.0f);
-            std::fill(r.begin(), r.end(), 0.0f);
-            if (impulse && i == 0) {
-                // only the very first block carried the impulse
+        constexpr size_t kN = 16384;
+        for (uint32_t bin : {37u, 171u, 372u, 1500u}) {
+            const double f = bin * fs / kN;
+            std::vector<float> x(kN);
+            float* ptr[1] = {x.data()};
+            for (int pass = 0; pass < 2; ++pass) {
+                for (size_t i = 0; i < kN; ++i) {
+                    x[i] = static_cast<float>(std::sin(2.0 * kPi * f * static_cast<double>(i + pass * kN) / fs));
+                }
+                p.process(ptr, kN);
             }
+            double expect = 0.0;
+            magnitude_db(s, 0, &f, 1, fs, &expect);
+            CAPTURE(fs);
+            CAPTURE(f);
+            CHECK(std::abs(20.0 * std::log10(amplitude_at_bin(x, bin)) - expect) < 0.01);
         }
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now() - start).count();
-    };
-
-    const auto quiet = run_ns(false);
-    const auto rung  = run_ns(true);
-    CAPTURE(quiet);
-    CAPTURE(rung);
-    CHECK(rung < quiet * 4);
+    }
 }

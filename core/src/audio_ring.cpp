@@ -30,6 +30,9 @@ void AudioRingWriter::attach(AudioRingHeader* ring, uint32_t capacity) {
     next_     = 0;
     token_    = 0;
     owner_    = false;
+    seen_writer_ = 0;
+    seen_index_  = 0;
+    stale_       = 0;
 }
 
 void AudioRingWriter::set_channels(uint32_t channels) {
@@ -48,10 +51,25 @@ bool AudioRingWriter::claim(uint64_t token) {
     }
     std::atomic_ref<uint64_t> writer(ring_->writer);
     uint64_t current = writer.load(std::memory_order_relaxed);
-    const bool available = current == 0 || (current >> 32) != (token >> 32);
-    if (!available || !writer.compare_exchange_strong(current, token)) {
+    if (current != 0) {
+        if ((current >> 32) == (token >> 32)) {
+            return false;   // held by an instance in this process, which releases it
+        }
+        const uint32_t index = std::atomic_ref<const uint32_t>(ring_->write_index).load(std::memory_order_relaxed);
+        if (current != seen_writer_ || index != seen_index_) {
+            seen_writer_ = current;
+            seen_index_  = index;
+            stale_       = 0;
+            return false;
+        }
+        if (++stale_ < kRingStaleClaims) {
+            return false;
+        }
+    }
+    if (!writer.compare_exchange_strong(current, token)) {
         return false;
     }
+    stale_ = 0;
     token_ = token;
     owner_ = true;
     publish_channels();

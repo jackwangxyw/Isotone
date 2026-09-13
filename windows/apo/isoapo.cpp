@@ -7,18 +7,15 @@
 
 #include "isoapo.h"
 
-#include <knownfolders.h>
 #include <mmdeviceapi.h>
-#include <shlobj.h>
 
 #include <cmath>
-#include <fstream>
 #include <new>
-#include <sstream>
 #include <string>
 
 #include "isotone/apo_config.h"
 #include "isotone/param_block.h"
+#include "persisted_state.h"
 
 long IsoApo::instanceCount = 0;
 
@@ -87,18 +84,17 @@ void debug_line(const wchar_t* text, HRESULT hr) {
 
 std::atomic<uint32_t> g_instance_serial{0};
 
-// audiodg runs as LocalService and cannot read user directories, so the only
-// place parameters can live is ProgramData (plan 5.4).
-std::wstring config_path() {
-    wchar_t* base = nullptr;
-    std::wstring path;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &base))) {
-        path = base;
-        CoTaskMemFree(base);
-        path += L"\\IsoAPO\\config.txt";
-    }
-    return path;
-}
+// Nonzero while this thread is inside create_child. An IsoAPO initialized then
+// is being created by its own child, directly or through other APOs, and each
+// would create the other until the stack runs out. A plain int: no dynamic
+// initialisation, so it needs no thread attach notifications.
+thread_local int t_creating_child = 0;
+
+#ifdef ISOAPO_SELFTEST_LOCAL_NAMESPACE
+constexpr bool kSelftest = true;
+#else
+constexpr bool kSelftest = false;
+#endif
 
 }  // namespace
 
@@ -155,6 +151,16 @@ ULONG IsoApo::NonDelegatingRelease() {
     return static_cast<ULONG>(count);
 }
 
+// Called with the stream stopped. Filter and delay state is cleared, so a
+// restart does not play what was in the delay lines when it stopped.
+HRESULT IsoApo::Reset() {
+    if (child_ != nullptr) {
+        child_->Reset();
+    }
+    processor_.reset();
+    return S_OK;
+}
+
 HRESULT IsoApo::GetLatency(HNSTIME* time) {
     if (time == nullptr) {
         return E_POINTER;
@@ -182,10 +188,18 @@ HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
     if (data == nullptr) {
         return E_POINTER;
     }
+    if (t_creating_child > 0) {
+        debug_line(L"created inside its own child APO; refusing so the chain ends", E_FAIL);
+        return E_FAIL;
+    }
     const auto* init = reinterpret_cast<APOInitSystemEffects*>(data);
     if (init->pAPOEndpointProperties == nullptr) {
         return E_POINTER;
     }
+    // An instance made only to read its properties is never locked: it needs no
+    // region and no child.
+    const bool discovery_only = size == sizeof(APOInitSystemEffects2) &&
+                                reinterpret_cast<APOInitSystemEffects2*>(data)->InitializeForDiscoveryOnly;
 
     PROPVARIANT var;
     PropVariantInit(&var);
@@ -200,10 +214,12 @@ HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
 
     reset_child();
     try {
-        const std::wstring guid = var.pwszVal;
+        endpoint_guid_ = var.pwszVal;
         PropVariantClear(&var);
-        open_shared_region(guid);
-        create_child(guid, init->APOInit.clsid, size, data);
+        if (!discovery_only) {
+            open_shared_region();
+            create_child(endpoint_guid_, init->APOInit.clsid, size, data);
+        }
     } catch (const std::bad_alloc&) {
         PropVariantClear(&var);
         return E_OUTOFMEMORY;
@@ -219,11 +235,16 @@ void IsoApo::create_child(const std::wstring& endpoint_guid, const CLSID& own_cl
     if (!recorded_child(endpoint_guid, own_clsid == ISOAPO_PRE_MIX_GUID, &clsid)) {
         return;
     }
-    // Hosting ourselves would recurse until the stack runs out.
+    // Hosting ourselves would recurse until the stack runs out. A cycle through
+    // another APO is caught by t_creating_child instead.
     if (clsid == ISOAPO_POST_MIX_GUID || clsid == ISOAPO_PRE_MIX_GUID || clsid == kEqualizerApoPreMix ||
         clsid == kEqualizerApoPostMix) {
         return;
     }
+    struct Depth {
+        Depth() { ++t_creating_child; }
+        ~Depth() { --t_creating_child; }
+    } depth;
     HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IAudioProcessingObject),
                                   reinterpret_cast<void**>(&child_));
     if (SUCCEEDED(hr)) {
@@ -251,14 +272,18 @@ void IsoApo::reset_child() {
     child_ = nullptr;
 }
 
-void IsoApo::open_shared_region(const std::wstring& endpoint_guid) {
+void IsoApo::open_shared_region() {
     ring_.release();
-    const std::wstring name = isotone::win::mapping_name(kObjectNamespace, endpoint_guid);
+    // Read before the region exists: a region this instance creates stays
+    // unfinished, and other instances wait on it, until it is seeded.
+    state_ = saved_state();
+    const std::wstring name = isotone::win::mapping_name(kObjectNamespace, endpoint_guid_);
     const DWORD error = mapping_.create_or_open(name, &IsoApo::seed_region, this);
     if (error != ERROR_SUCCESS) {
-        // Audio keeps flowing on the file-seeded parameters; failing Initialize
-        // would take the endpoint's effects down with it. The UI sees no region
-        // and reports the engine idle, and this line is visible in DebugView.
+        // Audio keeps flowing on the saved parameters, and LockForProcess tries
+        // again; failing Initialize would take the endpoint's effects down with
+        // it. The UI sees no region and reports the engine idle, and this line
+        // is visible in DebugView.
         wchar_t message[512];
         swprintf_s(message, L"IsoAPO: cannot create or open %ls, error %lu\n", name.c_str(),
                    error);
@@ -274,37 +299,38 @@ void IsoApo::open_shared_region(const std::wstring& endpoint_guid) {
 
 void IsoApo::seed_region(isotone::ParamBlock* block, void* self) {
     auto* apo = static_cast<IsoApo*>(self);
-    apo->load_parameters();
     isotone::param_block_write(block, [&](isotone::ParamBlock* b) { isotone::to_param_block(apo->state_, b); });
 }
 
-void IsoApo::load_parameters() {
-    state_ = isotone::EqState{};
-
-    const std::wstring path = config_path();
-    if (!path.empty()) {
-        std::ifstream in(path.c_str(), std::ios::binary);
-        if (in.good()) {
-            std::ostringstream text;
-            text << in.rdbuf();
-            const isotone::ApoParseResult parsed = isotone::parse_apo_config(text.str());
-            if (!parsed.state.bands.empty() || parsed.state.preamp_db != 0.0) {
-                state_ = parsed.state;
-                return;
-            }
-        }
+isotone::EqState IsoApo::saved_state() const {
+    isotone::EqState state;
+    const std::wstring dir = isotone::win::persisted_state_dir(kSelftest);
+    isotone::ParamBlock block{};
+    switch (dir.empty() ? isotone::win::PersistedRead::Invalid
+                        : isotone::win::read_persisted_state(isotone::win::persisted_state_path(dir, endpoint_guid_),
+                                                             &block)) {
+        case isotone::win::PersistedRead::Loaded:
+            isotone::from_param_block(block, &state);
+            return state;
+        case isotone::win::PersistedRead::Invalid:
+            debug_line(L"saved state unreadable or not valid for this build; starting flat", E_FAIL);
+            return state;
+        case isotone::win::PersistedRead::Absent:
+            break;
     }
-
-    // No config file: the stage 1 default, a -12 dB dip at 1 kHz, which is what
-    // the acceptance measurement looks for.
-    isotone::Band band;
-    band.id = 1;
-    band.type = isotone::FilterType::Peaking;
-    band.fc = 1000.0;
-    band.gain_db = -12.0;
-    band.width = 1.0;
-    band.width_mode = isotone::WidthMode::Q;
-    state_.bands.push_back(band);
+    // Never saved: flat. The self-test build starts with a -12 dB dip at 1 kHz
+    // instead, which its measurements look for.
+    if (kSelftest) {
+        isotone::Band band;
+        band.id = 1;
+        band.type = isotone::FilterType::Peaking;
+        band.fc = 1000.0;
+        band.gain_db = -12.0;
+        band.width = 1.0;
+        band.width_mode = isotone::WidthMode::Q;
+        state.bands.push_back(band);
+    }
+    return state;
 }
 
 HRESULT IsoApo::IsInputFormatSupported(IAudioMediaType* output, IAudioMediaType* requested,
@@ -352,6 +378,10 @@ HRESULT IsoApo::IsInputFormatSupported(IAudioMediaType* output, IAudioMediaType*
 
 HRESULT IsoApo::LockForProcess(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs,
                                UINT32 outputCount, APO_CONNECTION_DESCRIPTOR** outputs) {
+    // First, before the child is touched: the audio thread may be using it.
+    if (locked_) {
+        return APOERR_APO_LOCKED;
+    }
     if (inputs == nullptr || outputs == nullptr || inputCount == 0 || outputCount == 0) {
         return E_INVALIDARG;
     }
@@ -379,9 +409,23 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
         return hr;
     }
 
+    // Upstream sizes by the output's count when the input gives none.
+    const UINT32 max_frames = inputs[0]->u32MaxFrameCount != 0 ? inputs[0]->u32MaxFrameCount
+                                                               : outputs[0]->u32MaxFrameCount;
+    if (max_frames == 0) {
+        return E_INVALIDARG;
+    }
+
     bool child_locked = false;
     if (child_cfg_ != nullptr) {
         hr = child_cfg_->LockForProcess(inputCount, inputs, outputCount, outputs);
+        if (FAILED(hr) && format.dwSamplesPerFrame != out_format.dwSamplesPerFrame) {
+            // The child accepted a channel change IsoAPO cannot make alone, so
+            // there is nothing to run without it. The child is kept: a later
+            // lock may succeed.
+            debug_line(L"child APO failed LockForProcess on a format only it can convert", hr);
+            return hr;
+        }
         if (FAILED(hr)) {
             debug_line(L"child APO failed LockForProcess; running without it", hr);
             reset_child();
@@ -429,22 +473,27 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
     // count, which is also what the processor assumes for 0.
     const uint32_t speaker_mask =
         format.dwChannelMask != 0 ? format.dwChannelMask : isotone::default_speaker_mask(channels_);
+    // A region Initialize could not make or open is tried again here.
     if (!mapping_.is_open()) {
-        load_parameters();
+        open_shared_region();
+    }
+    if (!mapping_.is_open()) {
+        state_ = saved_state();
     } else if (isotone::param_block_read(mapping_.params(), &block_, 1000)) {
         isotone::from_param_block(block_, &state_);
         applied_seq_ = block_.hdr.seq;
     } else {
-        // No consistent read yet; keep the current state and make the first
-        // process call try again.
+        // No consistent read: a writer is mid-write, or died mid-write and left
+        // the lock taken. Keep the current state, which is the last block this
+        // instance applied or the saved state open_shared_region read, and make
+        // the first process call try the region again.
         applied_seq_ = ~isotone::param_block_seq(mapping_.params());
     }
     // from_param_block reuses this capacity, so applying a block on the audio
     // thread never allocates.
     state_.bands.reserve(isotone::kParamMaxBands);
 
-    processor_.initialize(format.fFramesPerSecond, channels_, inputs[0]->u32MaxFrameCount,
-                          isotone::kParamMaxBands, speaker_mask);
+    processor_.initialize(format.fFramesPerSecond, channels_, max_frames, isotone::kParamMaxBands, speaker_mask);
     processor_.set_target(state_);
     processor_.reset();
 
@@ -514,6 +563,9 @@ void IsoApo::APOProcess(UINT32 inputCount, APO_CONNECTION_PROPERTY** inputs,
     // continuous, and writes the output buffer IsoAPO then processes.
     bool silent = flags == BUFFER_SILENT;
     if (child_rt_ != nullptr) {
+        // The flags read back below are the child's only if it sets them; a
+        // child that does not must not inherit what this call wrote last time.
+        outputs[0]->u32BufferFlags = static_cast<APO_BUFFER_FLAGS>(flags);
         child_rt_->APOProcess(inputCount, inputs, outputCount, outputs);
         if (outputs[0]->u32BufferFlags == BUFFER_SILENT) {
             memset(out, 0, static_cast<size_t>(frames) * channels_ * sizeof(float));

@@ -65,13 +65,16 @@ TEST_CASE("preamp and channel trim shift the whole curve") {
     CHECK(mag_at(s, 0, 1000.0) == doctest::Approx(0.0).epsilon(1e-9));
 }
 
-TEST_CASE("bypass flattens the curve and ignores everything else") {
+TEST_CASE("bypass removes the bands and preamp from the curve, not trims or mute") {
     EqState s;
     s.bands.push_back(peaking(1000.0, 12.0, 1.0));
     s.preamp_db = -20.0;
-    s.mute = true;
+    s.channel_gain_db[1] = -3.0;
     s.bypass = true;
     CHECK(mag_at(s, 0, 1000.0) == doctest::Approx(0.0));
+    CHECK(mag_at(s, 1, 1000.0) == doctest::Approx(-3.0));
+    s.mute = true;
+    CHECK(std::isinf(mag_at(s, 0, 1000.0)));
 }
 
 TEST_CASE("mute drives the curve to negative infinity") {
@@ -171,6 +174,9 @@ TEST_CASE("composite_peak_db is zero for a flat or bypassed state") {
     s.bands.push_back(peaking(1000.0, 12.0, 1.0));
     s.bypass = true;
     CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) == doctest::Approx(0.0));
+    // Bypass keeps the trims, so their headroom is still needed.
+    s.channel_gain_db[0] = 4.0;
+    CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) == doctest::Approx(4.0));
 }
 
 TEST_CASE("phase of a cascade is the sum of the parts") {

@@ -335,10 +335,12 @@ TEST_CASE("a steep shelf slope stays a stable filter at high gain") {
     const BiquadCoeffs c = design(b, kFs);
     const BiquadCoeffs id = BiquadCoeffs::identity();
     CHECK_FALSE((c.b0 == id.b0 && c.b1 == id.b1 && c.b2 == id.b2 && c.a1 == id.a1 && c.a2 == id.a2));
-    // Poles inside the unit circle: |a2| < 1 and |a1| < 1 + a2.
-    CHECK(std::abs(c.a2) < 1.0);
+    // Poles inside the unit circle: |a2| < 1 and |a1| < 1 + a2. The clamp holds
+    // them a margin inside, not merely off the circle: a floor near zero instead
+    // of the value for Q 10 still prints a2 as 1.000000 and passes |a2| < 1.
+    CHECK(std::abs(c.a2) < 0.9999);
     CHECK(std::abs(c.a1) < 1.0 + c.a2);
-    CHECK(20.0 * std::log10(std::abs(response(c, 1.0, kFs))) == doctest::Approx(30.0).epsilon(0.02));
+    CHECK(std::abs(20.0 * std::log10(std::abs(response(c, 1.0, kFs))) - 30.0) < 0.05);
 }
 
 TEST_CASE("the ring reader uses the capacity it was given, not the header's") {
@@ -374,7 +376,9 @@ TEST_CASE("a writer that lost its claim to another process stops writing") {
     a.set_channels(2);
     b.set_channels(2);
     REQUIRE(a.claim((uint64_t{100} << 32) | 1));
-    REQUIRE(b.claim((uint64_t{200} << 32) | 1));   // a different process takes it over
+    // A different process takes it over once a has stopped writing.
+    for (uint32_t i = 0; i < kRingStaleClaims; ++i) b.claim((uint64_t{200} << 32) | 1);
+    REQUIRE(b.claim((uint64_t{200} << 32) | 1));
     std::vector<float> frames(20, 1.0f);
     b.write(frames.data(), 2, 10);
     a.write(frames.data(), 2, 7);
@@ -475,6 +479,96 @@ TEST_CASE("width forms the importer does not accept are exported as the Q that d
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("a bandwidth shelf with the corner flag exports as the filter the processor designs") {
+    // The processor ignores the corner shift for a bandwidth width, as upstream
+    // does, so the exported line must not ask for it: LS with a Q would shift.
+    // With a device rate, the bandwidth is converted to Q at that rate.
+    for (double fs : {44100.0, 48000.0, 96000.0}) {
+        EqState s;
+        Band shelf;
+        shelf.type = FilterType::LowShelf;
+        shelf.fc = 1000.0;
+        shelf.gain_db = 12.0;
+        shelf.width = 1.0;
+        shelf.width_mode = WidthMode::BandwidthOct;
+        shelf.shelf_corner = true;
+        s.bands.push_back(shelf);
+        ApoFormatOptions device;
+        device.sample_rate = fs;
+        const ApoParseResult r = parse_apo_config(format_apo_config(s, device));
+        REQUIRE(r.state.bands.size() == 1);
+        const std::vector<double> grid = log_grid(20.0, 20000.0, 128);
+        std::vector<double> a(grid.size()), b(grid.size());
+        magnitude_db(s, 0, grid.data(), grid.size(), fs, a.data());
+        magnitude_db(r.state, 0, grid.data(), grid.size(), fs, b.data());
+        double worst = 0.0;
+        for (size_t i = 0; i < grid.size(); ++i) worst = std::max(worst, std::abs(a[i] - b[i]));
+        CAPTURE(fs);
+        CHECK(worst < 0.001);
+    }
+}
+
+TEST_CASE("the export never writes a filter Equalizer APO would design unstable or NaN") {
+    // Upstream takes the square root of a negative number for a dB slope past
+    // what the processor holds, writes a band with no width as a real filter,
+    // and reads `nan` as a number. The processor turns each of these into a
+    // stable filter, identity, or the previous value; the text must not play
+    // something else (review 2026-09-13).
+    SUBCASE("a dB slope too steep for its gain is written at the steepest stable slope") {
+        EqState s;
+        Band hs;
+        hs.type = FilterType::HighShelf;
+        hs.fc = 3000.0;
+        hs.gain_db = 24.0;
+        hs.width = 24.0;
+        hs.width_mode = WidthMode::SlopeDb;
+        s.bands.push_back(hs);
+        const ApoParseResult r = parse_apo_config(format_apo_config(s));
+        REQUIRE(r.state.bands.size() == 1);
+        const double slope = r.state.bands[0].width;
+        const double A = std::pow(10.0, 24.0 / 40.0);
+        const double inner = (A + 1.0 / A) * (12.0 / slope - 1.0) + 2.0;
+        CHECK(inner >= 0.01 - 1e-9);
+        CHECK(slope < 24.0);
+        // And it is the filter the processor designs for the original slope.
+        const std::vector<double> grid = log_grid(20.0, 20000.0, 64);
+        std::vector<double> a(grid.size()), b(grid.size());
+        magnitude_db(s, 0, grid.data(), grid.size(), kFs, a.data());
+        magnitude_db(r.state, 0, grid.data(), grid.size(), kFs, b.data());
+        for (size_t i = 0; i < grid.size(); ++i) CHECK(std::abs(a[i] - b[i]) < 0.001);
+    }
+    SUBCASE("a band with no width is written off") {
+        EqState s;
+        Band lp;
+        lp.type = FilterType::LowPass;
+        lp.fc = 2000.0;
+        lp.width = 0.0;
+        s.bands.push_back(lp);
+        Band pk = peaking(1000.0, 6.0, -1.0);
+        s.bands.push_back(pk);
+        const std::string text = format_apo_config(s);
+        CAPTURE(text);
+        CHECK(text.find(": ON ") == std::string::npos);
+    }
+    SUBCASE("non-finite values are not written, and levels are clamped as the processor clamps them") {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        EqState s;
+        s.preamp_db = nan;
+        s.channel_gain_db[1] = 500.0;
+        s.bands.push_back(peaking(nan, 3.0, 1.0));
+        s.bands.push_back(peaking(1000.0, 1e9, 1.0));
+        const std::string text = format_apo_config(s);
+        CAPTURE(text);
+        CHECK(text.find("nan") == std::string::npos);
+        CHECK(text.find("inf") == std::string::npos);
+        const ApoParseResult r = parse_apo_config(text);
+        CHECK(r.state.preamp_db == 0.0);
+        CHECK(r.state.channel_gain_db[1] == doctest::Approx(kMaxLevelDb));
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].gain_db == doctest::Approx(kMaxBandGainDb));
     }
 }
 

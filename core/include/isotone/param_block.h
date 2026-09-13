@@ -13,8 +13,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 #include "isotone/audio_ring.h"
 #include "isotone/types.h"
@@ -154,7 +156,9 @@ inline uint32_t param_block_seq(const ParamBlock* block) {
 // ---------------------------------------------------------------------------
 // Conversion
 
-void to_param_block(const EqState& state, ParamBlock* out);
+// False if `state` has more than kParamMaxBands bands: the rest are not
+// written, and the engine does not play them. The UI must not create them.
+bool to_param_block(const EqState& state, ParamBlock* out);
 void from_param_block(const ParamBlock& block, EqState* out);
 
 // Initialises a freshly mapped block: magic, version, size, everything else
@@ -166,23 +170,61 @@ bool param_block_valid(const ParamBlock& block);
 // ---------------------------------------------------------------------------
 // Seqlock
 
-// Writer side. Bumps seq to odd, runs `write`, bumps to even.
+// How long a writer waits for a lock another writer holds before treating that
+// writer as dead. Writing a block takes microseconds.
+inline constexpr std::chrono::milliseconds kParamWriterTimeout{200};
+
+// Writer side. Takes seq from even to odd, runs `write`, and takes it back to
+// even. Not real-time safe: it can wait for another writer.
+//
+// The lock is a compare-and-swap, so two writers (the UI and isotone-shm, or two
+// users' UIs) cannot both hold it; storing an odd value let both in, and the
+// first to finish marked the other's half-written block consistent. A value
+// that stays odd for kParamWriterTimeout was left by a writer that died
+// mid-write, and the next writer steps past it to a new odd value, which the
+// dead writer's own unlock no longer matches. A writer that merely stalled that
+// long inside `write` and then resumes can still mix its fields into the next
+// write; nothing on the writer side can prevent that without a real mutex.
+//
 // std::atomic_ref rather than a cast to std::atomic*: the block has to stay a
 // plain copyable POD for the mapped layout, and atomic_ref is exactly the tool
 // for applying atomic operations to an object that is not declared atomic.
 template <typename F>
 void param_block_write(ParamBlock* block, F&& write) {
-    // `| 1` rather than `+ 1`: a writer process killed mid-write leaves seq odd,
-    // and adding to an odd value would invert the lock for every later write.
     std::atomic_ref<uint32_t> seq(block->hdr.seq);
-    const uint32_t odd = seq.load(std::memory_order_relaxed) | 1u;
-    seq.store(odd, std::memory_order_relaxed);
+    uint32_t mine = 0;
+    uint32_t stuck = 0;
+    std::chrono::steady_clock::time_point stuck_since{};
+    for (;;) {
+        uint32_t cur = seq.load(std::memory_order_relaxed);
+        if ((cur & 1u) == 0u) {
+            if (seq.compare_exchange_weak(cur, cur + 1u, std::memory_order_relaxed)) {
+                mine = cur + 1u;
+                break;
+            }
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (stuck_since == std::chrono::steady_clock::time_point{} || cur != stuck) {
+            stuck = cur;
+            stuck_since = now;
+        } else if (now - stuck_since >= kParamWriterTimeout) {
+            if (seq.compare_exchange_strong(cur, cur + 2u, std::memory_order_relaxed)) {
+                mine = cur + 2u;
+                break;
+            }
+            continue;
+        }
+        std::this_thread::yield();
+    }
     std::atomic_thread_fence(std::memory_order_release);
 
     write(block);
 
     std::atomic_thread_fence(std::memory_order_release);
-    seq.store(odd + 1, std::memory_order_relaxed);
+    // Fails only if another writer took the lock over after timing out on this one.
+    uint32_t expected = mine;
+    seq.compare_exchange_strong(expected, mine + 1u, std::memory_order_relaxed);
 }
 
 // Reader side. Copies into `out` and returns true only if the copy was taken

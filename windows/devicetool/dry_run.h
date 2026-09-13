@@ -33,6 +33,12 @@ public:
                    std::wstring* result) override;
     bool keyEmpty(const std::wstring& key, bool* result) override;
 
+    // The type of a value this dry run has set, or *present false for one it
+    // deleted (or whose key it deleted). False when it has not touched the
+    // value, so the registry holds the answer.
+    bool valueType(const std::wstring& key, const std::wstring& valuename, unsigned long* type,
+                   bool* present) const;
+
     const std::vector<RegistryOperation>& operations() const { return operations_; }
 
 private:
@@ -47,9 +53,13 @@ private:
     std::vector<RegistryOperation> operations_;
     std::set<std::wstring> created_;
     std::set<std::wstring> deleted_;
+    // Keys this dry run deleted and then created again: empty, whatever the
+    // registry still holds under them.
+    std::set<std::wstring> recreated_;
+    bool emptied(const std::wstring& normalized) const;
     // normalized key + L'|' + lower-case value name -> data; absent from the
     // map means "ask the registry", a present entry with `removed` means gone.
-    struct Value { std::wstring data; bool removed = false; };
+    struct Value { std::wstring data; bool removed = false; unsigned long type = 0; };
     std::map<std::wstring, Value> values_;
 };
 
@@ -70,19 +80,27 @@ private:
 // While alive, reports RegistryHelper's real writes to `log`.
 class ScopedLog {
 public:
-    explicit ScopedLog(RegistryLog* log) { RegistryHelper::log = log; }
-    ~ScopedLog() { RegistryHelper::log = nullptr; }
+    explicit ScopedLog(RegistryLog* log) : saved_(RegistryHelper::log) { RegistryHelper::log = log; }
+    ~ScopedLog() { RegistryHelper::log = saved_; }
     ScopedLog(const ScopedLog&) = delete;
     ScopedLog& operator=(const ScopedLog&) = delete;
+
+private:
+    RegistryLog* saved_;
 };
 
-// While alive, routes RegistryHelper through `registry`.
+// While alive, routes RegistryHelper through `registry`. Scopes nest: the
+// previous hook comes back when this one ends, so an inner dry run cannot
+// switch an outer one off and let later writes reach the registry.
 class ScopedDryRun {
 public:
-    explicit ScopedDryRun(RegistryDryRun* registry) { RegistryHelper::dryRun = registry; }
-    ~ScopedDryRun() { RegistryHelper::dryRun = nullptr; }
+    explicit ScopedDryRun(RegistryDryRun* registry) : saved_(RegistryHelper::dryRun) { RegistryHelper::dryRun = registry; }
+    ~ScopedDryRun() { RegistryHelper::dryRun = saved_; }
     ScopedDryRun(const ScopedDryRun&) = delete;
     ScopedDryRun& operator=(const ScopedDryRun&) = delete;
+
+private:
+    RegistryDryRun* saved_;
 };
 
 }  // namespace isotone::devicetool

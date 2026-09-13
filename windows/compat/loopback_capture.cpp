@@ -97,6 +97,7 @@ std::wstring device_id_for(const std::string& endpoint) {
 
 HRESULT LoopbackCapture::start(const std::string& endpoint) {
     stop();
+    discontinuities_ = 0;
     const size_t bytes = sizeof(AudioRingHeader) + size_t{kRingCapacityFrames} * kMaxChannels * sizeof(float);
     region_ = _aligned_malloc(bytes, alignof(AudioRingHeader));
     if (region_ == nullptr) return E_OUTOFMEMORY;
@@ -199,6 +200,7 @@ void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
                 UINT32 frames = 0;
                 DWORD flags = 0;
                 if (FAILED(hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) discontinuities_.fetch_add(1);
                 if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                     writer.write(nullptr, channels_, frames);
                 } else {

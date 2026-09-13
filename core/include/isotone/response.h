@@ -15,7 +15,8 @@
 namespace isotone {
 
 // Magnitude in dB of every band active on `channel`, plus preamp and that
-// channel's trim. Writes `n` values into `out`.
+// channel's trim. Under bypass, the bands and preamp are left out and the trim
+// and mute kept, as the processor does. Writes `n` values into `out`.
 void magnitude_db(const EqState& state, uint32_t channel, const double* freqs, size_t n,
                   double sample_rate, double* out);
 

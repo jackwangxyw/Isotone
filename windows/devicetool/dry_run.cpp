@@ -55,6 +55,7 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
     }
 
     if (operation == L"create key") {
+        if (deleted(k)) recreated_.insert(k);
         deleted_.erase(k);
         created_.insert(k);
     } else if (operation == L"delete key") {
@@ -64,7 +65,12 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
             it = it->first.rfind(k + L'|', 0) == 0 ? values_.erase(it) : std::next(it);
         }
     } else if (operation.rfind(L"set ", 0) == 0) {
-        values_[value_id(key, valuename)] = Value{data, false};
+        const std::wstring kind = operation.substr(4);
+        const unsigned long type = kind == L"REG_DWORD"     ? REG_DWORD
+                                   : kind == L"REG_MULTI_SZ" ? REG_MULTI_SZ
+                                   : kind == L"REG_BINARY"   ? REG_BINARY
+                                                             : REG_SZ;
+        values_[value_id(key, valuename)] = Value{data, false, type};
     } else if (operation == L"delete value") {
         values_[value_id(key, valuename)] = Value{L"", true};
     }
@@ -74,6 +80,17 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
 bool DryRunRegistry::deleted(const std::wstring& normalized) const {
     for (const std::wstring& d : deleted_) {
         if (normalized == d || normalized.rfind(d + L'\\', 0) == 0) return true;
+    }
+    // Under a key deleted and recreated, only what was created since exists.
+    for (const std::wstring& r : recreated_) {
+        if (normalized.rfind(r + L'\\', 0) == 0 && !created_.count(normalized)) return true;
+    }
+    return false;
+}
+
+bool DryRunRegistry::emptied(const std::wstring& normalized) const {
+    for (const std::wstring& r : recreated_) {
+        if (normalized == r || normalized.rfind(r + L'\\', 0) == 0) return true;
     }
     return false;
 }
@@ -154,8 +171,8 @@ bool DryRunRegistry::valueExists(const std::wstring& key, const std::wstring& va
     const auto it = values_.find(value_id(key, valuename));
     if (it != values_.end()) { *result = !it->second.removed; return true; }
     // A key that only exists in this dry run has no other values, and asking
-    // the registry about it would throw.
-    if (created_.count(k) && !really_exists(key)) { *result = false; return true; }
+    // the registry about it would throw; nor does one it deleted and recreated.
+    if ((created_.count(k) && !really_exists(key)) || emptied(k)) { *result = false; return true; }
     return false;
 }
 
@@ -166,13 +183,27 @@ bool DryRunRegistry::readValue(const std::wstring& key, const std::wstring& valu
     return false;
 }
 
+bool DryRunRegistry::valueType(const std::wstring& key, const std::wstring& valuename, unsigned long* type,
+                               bool* present) const {
+    const std::wstring k = normalize(key);
+    if (deleted(k)) { *present = false; return true; }
+    const auto it = values_.find(value_id(key, valuename));
+    if (it != values_.end()) {
+        *present = !it->second.removed;
+        *type = it->second.type;
+        return true;
+    }
+    if ((created_.count(k) && !really_exists(key)) || emptied(k)) { *present = false; return true; }
+    return false;
+}
+
 bool DryRunRegistry::keyEmpty(const std::wstring& key, bool* result) {
     const std::wstring k = normalize(key);
     if (deleted_.empty() && created_.empty() && values_.empty()) return false;
 
     // Real subkeys and values, adjusted for what this dry run did.
     size_t subkeys = 0, values = 0;
-    if (really_exists(key)) {
+    if (really_exists(key) && !emptied(k)) {
         HookPaused paused;
         for (const std::wstring& child : RegistryHelper::enumSubKeys(key)) {
             if (!deleted(normalize(key + L"\\" + child))) ++subkeys;

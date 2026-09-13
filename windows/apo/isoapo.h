@@ -5,11 +5,11 @@
 // audiodg.exe.
 //
 // Parameters arrive through the per-endpoint shared region (plan 5.3): the APO
-// creates or opens it in Initialize, reads the ParamBlock under its seqlock on
-// every process call, writes post-EQ audio to the ring, and bumps the
-// heartbeat. When this instance creates the region it seeds it from a file
-// under ProgramData, the only place audiodg can read since it runs as
-// LocalService.
+// creates or opens it in Initialize (or, if that failed, in LockForProcess),
+// reads the ParamBlock under its seqlock on every process call, writes post-EQ
+// audio to the ring, and bumps the heartbeat. When this instance creates the
+// region it seeds it from the endpoint's saved state (persisted_state.h), read
+// before the region exists so other instances never wait on the file.
 //
 // The APO an install replaced keeps running inside IsoAPO as its child, as in
 // upstream: install records its CLSID, Initialize creates it, format
@@ -66,6 +66,7 @@ public:
     ULONG __stdcall Release() override;
 
     // IAudioProcessingObject
+    HRESULT __stdcall Reset() override;
     HRESULT __stdcall GetLatency(HNSTIME* time) override;
     HRESULT __stdcall Initialize(UINT32 size, BYTE* data) override;
     HRESULT __stdcall IsInputFormatSupported(IAudioMediaType* output,
@@ -93,8 +94,9 @@ public:
     static const CRegAPOProperties<1> regPreMixProperties;
 
 private:
-    void load_parameters();
-    void open_shared_region(const std::wstring& endpoint_guid);
+    // The endpoint's saved state, or its default when none was saved.
+    isotone::EqState saved_state() const;
+    void open_shared_region();
     static void seed_region(isotone::ParamBlock* block, void* self);
     HRESULT lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT32 outputCount,
                  APO_CONNECTION_DESCRIPTOR** outputs);
@@ -110,6 +112,7 @@ private:
     uint32_t           input_channels_ = 0;
     bool               locked_         = false;
 
+    std::wstring                endpoint_guid_;
     isotone::win::SharedMapping mapping_;
     isotone::AudioRingWriter    ring_;
     uint64_t                    ring_token_  = 0;    // process id << 32 | instance serial
