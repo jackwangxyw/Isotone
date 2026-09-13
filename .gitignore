@@ -3,6 +3,7 @@
 # rather than /docs/.)
 /docs/*
 !/docs/decisions.md
+!/docs/ui-spec.md
 
 # Snapshot of the owner's live Equalizer APO state. Personal settings, not tracked.
 /sim/reference/
@@ -79,6 +80,7 @@ Thumbs.db
 ~$*
 .DS_Store
 .idea/
+.vscode/
 *.swp
 
 # Claude Code session data, including agent worktrees

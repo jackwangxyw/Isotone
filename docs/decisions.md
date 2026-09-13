@@ -710,6 +710,309 @@ matrix that implements swap, upmix and the bass-management sum in one stage,
 Linkwitz-Riley 24 dB/oct crossover filters, named groups over the existing
 channel masks, and a param-block layout change to carry all of it.
 
+## 2026-09-12: UI framework is Qt 6 Quick
+
+Owner's decision, replacing plan section 2 item 4 (Electron). The UI is QML with
+C++ in one process, linking `isotone_core` and `isotone_transport` directly, so
+the plan's `/bridge` N-API addon and its IPC are dropped, and the EQ-by-ear tone
+becomes native audio. The build brief is `docs/ui-spec.md`. No UI code yet; Qt
+is not installed on this machine.
+
+## 2026-09-12: Multichannel speaker features in the engine
+
+`SpeakerSetup` in `EqState` carries per-speaker delay, lip sync, polarity,
+speaker mute, swap left/right, swap front/rear, stereo upmix (off, all,
+no centre) and bass management (crossover, small-speaker mask, LFE low-pass).
+Speaker groups need no engine work: a band already targets a channel mask. Solo
+is UI over speaker mute. The per-speaker test tone is not built; it belongs with
+the EQ-by-ear tone generator (stage 5).
+
+- **Stage order:** routing matrix (upmix, then the swaps) → bass management →
+  preamp, bands, trim and post gain → delay. Polarity and speaker mute are a
+  signed per-channel gain folded into the post gain, so they are smoothed like
+  every other gain.
+- **Speaker positions** come from the stream's speaker mask (channel n is the
+  n-th set bit). IsoAPO passes `dwChannelMask`, or upstream's default mask for
+  the channel count when it is 0. Missing speakers make their features no-ops;
+  bass management needs an LFE channel.
+- **Routing** is one 8×8 matrix built by `routing_matrix` in
+  `core/speakers.cpp`. Upmix sends each front to the side and back of its own
+  side at -3 dB; "all" also sends half of each front to the centre. The swaps
+  permute outputs after upmix. The matrix is smoothed per control block and
+  interpolated per sample, so a swap while playing crossfades; identity takes a
+  fast path.
+- **Bass management:** Linkwitz-Riley 24 dB/oct (two Butterworth biquads) at the
+  crossover. A small speaker keeps the high-pass; the sum of the low-passes goes
+  to the LFE, whose own content gets an LR4 low-pass at the LFE frequency. LR4
+  low and high sum flat, which the test checks. Turning it on or off crossfades,
+  and filter state is cleared while it is off.
+- **Delay:** a ring buffer per channel sized for 1 s at the stream rate,
+  preallocated in `initialize`. Delay is whole samples,
+  `floor(ms * rate / 1000 + 0.5)`, the rounding Equalizer APO's `DelayFilter`
+  uses, so both backends agree. Speaker delay plus lip sync is capped at 1 s.
+  A change crossfades from the old tap to the new one over 10 ms.
+- **Param block v4:** `ParamSpeakers` (80 bytes) sits between the channel gains
+  and the bands, and the header grew to 48 bytes to carry `speaker_mask`, which
+  the host publishes with the format. `isotone-shm write` resolves channel names
+  with it instead of assuming the default mask.
+- The field is `small_speakers`, not `small`: `rpcndr.h` defines `small` as a
+  macro.
+- **Tests** (`core/tests/test_speakers.cpp`, 15 cases): positions, delay and lip
+  sync on an impulse, delay change without a click, polarity, mute, all swaps and
+  a swap while playing, both upmixes, crossover levels against the analytic LR4
+  response and a flat sum, LFE low-pass, a layout without LFE, bass management on
+  then off without a click, hostile values, the param block round trip, and the
+  speaker text format. Each click and step test was checked by breaking the code
+  it guards. Two did not fail at first: the polarity switch landed on a zero
+  crossing, and enabling bass management from rest is click-free by nature. Both
+  were moved to where the bug shows.
+- **Measured offline in the APO:** the self test writes a delay of 1.3 ms and an
+  inverted channel through the region and finds both in the output to 1e-4, and
+  its 7.1.4 stream publishes its speaker mask. `check_shm_transport.py` does the
+  same from another process: 0.25 ms on channel 1 reads -90.00° at 1 kHz,
+  inverting it +90.00°, muting it -200 dB with channel 0 unchanged.
+- **Cost:** 8 channels, 12 bands, one thread, test-signal generation included:
+  76× real time with speaker features off, 66× with delay, upmix, swap, polarity
+  and bass management all on.
+
+## 2026-09-12: Compat backend merged
+
+`windows/compat` (built in an agent worktree) is reviewed and merged, and builds
+with MSVC from the root `CMakeLists.txt`. `isotone-compat` locates Equalizer
+APO, attaches or detaches one `Include: Isotone.txt` block at the end of
+`config.txt` (backing it up first), writes per-device blocks to `Isotone.txt`
+atomically with coalescing for live edits, reads them back, and captures WASAPI
+loopback for measurement.
+
+- **The guard.** Tools reach the live config directory only through
+  `--real-install`. The first version compared path text and let
+  `C:\PROGRA~1\EqualizerAPO\config` through onto the owner's file during a test
+  run (restored, hash-checked against `sim/reference`). It now compares volume
+  serial and file ID, so short names, junctions, case and slashes are all caught;
+  the test exercises each.
+- **Mono** is gone from the backend as from the core.
+- **Speaker features in upstream's commands.** Each device block writes, in the
+  processor's stage order: a routing section of `Copy:` rows from the same
+  `routing_matrix`; bass management as a virtual channel `ISOTONEBASS` collecting
+  the small speakers' bass, LR4 `LPQ`/`HPQ` pairs (`Filter: ON LPQ Fc f Hz Q
+  0.707106781187` twice), and `Copy: LFE=1*LFE+1*ISOTONEBASS`; then the curve; then
+  an output section with `Copy:` for polarity and mute and `Delay: x ms` per group
+  of channels with the same delay. The `SpeakerSetup` itself is a `# Isotone:
+  speakers` comment so the file reads back exactly.
+- **Upstream semantics, from source** at `53d885f7`: `CopyFilter` reads every
+  input before writing, channels it does not assign keep their samples, an unknown
+  target name becomes a virtual channel zeroed each block and never output, a lone
+  token is a factor only if it is "0" or contains '.', and `DelayFilter` rounds
+  `ms * rate / 1000 + 0.5`.
+- **Equivalence test.** `compat_tests` includes a small interpreter of those
+  commands with upstream's semantics. It runs the text Isotone writes for a 5.1
+  device with bands, a trim and every speaker feature on, and compares with
+  `Processor` on the same input: worst difference below 1e-4, with the signal
+  shown to have changed by more than 0.2 so a no-op cannot pass. Four deliberate
+  emission bugs (one crossover biquad instead of two, no LFE bass sum, polarity
+  dropped, lip sync ignored) each failed it.
+- `format_speaker_setup` and `parse_speaker_setup` live in core, so
+  `isotone-compat apply --speakers` and `isotone-shm write --speakers` take the
+  same text.
+- `isotone-measure measure` now also reports each channel's phase relative to
+  channel 0, which is how delay and polarity will be checked on CABLE Output.
+  Not yet run against a live endpoint.
+- **Not verified live:** nothing in this entry has run against the installed
+  Equalizer APO. The interpreter is a model of upstream, read from its source.
+
+## 2026-09-12: devicetool install and speaker features measured in audiodg
+
+The owner, elevated, removed the `install.ps1` install from CABLE Input,
+restarted the audio service, staged and registered the current `IsoAPO.dll`,
+ran `isotone-devicetool install {798436d2-...} --replace-equalizerapo`, and
+restarted again. `status` afterwards: IsoAPO in MFX with an install record
+holding the original slots, Equalizer APO's pre-mix class still in SFX, staged
+DLL hash-identical to the build. That install printed `"operations":[]`
+because only the dry-run sink filled the list; the writes happened. Fixed
+below.
+
+With a silent stream held open, `isotone-shm status` read version 4, 48 kHz,
+2 channels, speaker mask `0x3`, heartbeat advancing. A flat config was then
+written with four speaker settings, each measured with `isotone-measure` from
+CABLE Input to CABLE Output. Channel 1's phase relative to channel 0, minus the
+baseline:
+
+| `--speakers` | 250 Hz | 1 kHz | expected (12 samples) |
+|---|---|---|---|
+| (default) | 0.00° | 0.00° | baseline |
+| `delay_ms=0,0.25` | -22.500° | -90.000° | -22.5°, -90° |
+| `delay_ms=0,0.25 inverted=0x2` | +157.500° | +90.000° | +157.5°, +90° |
+| `muted=0x2` | channel 1 digital silence, channel 0 +0.000 dB | same | |
+
+Channel 1's level moved 0.000 dB under delay and inversion. This was the first
+use of `isotone-measure`'s phase output. Upmix, swaps and bass management were
+not measured live: both cable endpoints are 2-channel.
+
+## 2026-09-12: devicetool lists what a real run wrote
+
+A real `install`, `uninstall` or `repair` now lists the registry writes it made.
+`RegistryHelper` (vendored, marked `Isotone modification`) reports each write to
+an installed `RegistryLog` after the write returns without throwing, through a
+guard declared at the top of each of the ten write functions. A failed run
+prints the writes that succeeded before the failure, so the output is what
+changed. Checked with a scratch program against a throwaway HKCU key: create,
+set, a denied HKLM write, delete value, listed as exactly the three that
+succeeded, and nothing after the log's scope ended; the key was removed. Dry-run
+output is unchanged (13 operations for the CABLE In 16ch install, roundtrip
+restores). Not yet seen on a real elevated install.
+
+## 2026-09-12: Compat backend measured against Equalizer APO
+
+Ran against the owner's Equalizer APO 1.4.2.0 with Peace closed. `config.txt`
+matched the `sim/reference` snapshot before; `isotone-compat attach
+--real-install` appended the Include block; each state was written with `apply
+--real-install`; `detach --real-install` removed it and the file matched the
+snapshot again. The run detached in a `finally`, so a failure could not leave the
+block behind.
+
+`Isotone.txt` was scoped to CABLE Output's capture endpoint, where Equalizer APO
+processes (stage 1a), so IsoAPO on CABLE Input played no part: a silent stream
+held its region open with a flat config written through `isotone-shm`. Measured
+CABLE Input to CABLE Output at 250 Hz, 1 kHz and 4 kHz, relative to a baseline
+taken before attaching, with `PK 1000 Hz -6 dB Q 1` in every state:
+
+| State | Result |
+|---|---|
+| band + `delay_ms=0,0.25` | -0.423 / -6.000 / -0.405 dB on both channels, matching the RBJ response to 0.001 dB; ch1 phase -22.50°, -90.00°, 0.00° (12 samples) |
+| + `inverted=0x2` | ch1 phase +157.50°, +90.00°, -180.00° |
+| band + `muted=0x2` | ch0 has the band, ch1 digital silence |
+| `--bypass` with the same settings | +0.000 dB and +0.00° at every frequency |
+| after detach | +0.000 dB and +0.00° at every frequency |
+
+At 4 kHz, 12 samples is a whole cycle, so that frequency checks inversion and
+not delay. This is the first time the speaker commands (`Copy:`, `Delay:`)
+have run in the real Equalizer APO rather than the model of it. Routing and
+bass management commands (`Copy:` sums, the virtual channel, `LPQ`/`HPQ`) remain
+checked only against the model, since both cable endpoints are 2-channel.
+
+Left in the config directory for the owner to delete, since the harness will not
+let a session delete there: `Isotone.txt` (no longer included) and
+`config.txt.isotone-backup`.
+
+## 2026-09-12: Routing and bass management measured at 7.1, both backends
+
+VB-Cable 3.3.1.7 needed nothing new: CABLE Input, CABLE In 16ch and CABLE Output
+all accept 2 to 16 channels (int16 and int24, not float) in exclusive mode,
+checked with `IAudioClient::IsFormatSupported`. The owner set CABLE Input and
+CABLE Output to 8 channels, 24-bit, 48 kHz, mask `0x63F`, with a scratch tool
+over `IPolicyConfig::SetDeviceFormat` (the call behind the Sound control panel's
+default format), after its `GetDeviceFormat` read matched the registry's
+`PKEY_AudioEngine_DeviceFormat` byte for byte. The Claude Code permission
+classifier would not let the session make that change. Both were 2 channels,
+24-bit, mask `0x3` before.
+
+`isotone-measure measure` gained `--channel-gains`, a level per render channel,
+so a swap is visible. Each channel played the tone at 1, 0.5, 0.8, 0.6, 0.9,
+0.3, 0.7, 0.4; the capture read each at its own level to 0.01 dB, so the cable
+carries 8 channels 1:1. Measured at 40, 80, 160 Hz and 1 kHz. Expected values
+came from the core `Processor` run on the same input (scratch `expect.exe`):
+each channel's output divided by its input, which a baseline-relative
+measurement reads because `peace.txt` is `Channel: all` on both cable ends.
+Compared per channel on magnitude (0.02 dB) and on phase relative to channel 0
+(0.2°); channels expected below -40 dB only had to measure below -35 dB.
+
+| Case | IsoAPO (audiodg, CABLE Input) | Equalizer APO (Isotone.txt, CABLE Output) |
+|---|---|---|
+| swap left/right | 0.0002 dB, 0.001° | 0.0002 dB, 0.001° |
+| swap front/rear | 0.0001 dB, 0.002° | 0.0001 dB, 0.002° |
+| upmix all | 0.0001 dB, 0.002° | 0.0002 dB, 0.001° |
+| upmix no centre | 0.0002 dB, 0.002° | 0.0001 dB, 0.001° |
+| bass management, all small, 80/120 Hz | 0.0017 dB, 0.008° | 0.0001 dB, 0.000° |
+| bass management, backs small, 100/150 Hz | 0.0013 dB, 0.015° | 0.0000 dB, 0.000° |
+| all of it, plus a 1 ms centre delay and an inverted back left | 0.0004 dB, 0.006° | 0.0001 dB, 0.002° |
+
+Worst error over all channels and frequencies. Equalizer APO bypass of the last
+case measured as the baseline. Negative control on the saved data: every
+measurement was compared with every case's expectation, and each passed only
+against its own. `config.txt` matched the snapshot before attaching and after
+detaching.
+
+With this every speaker feature has been measured live in both backends. The
+virtual `ISOTONEBASS` channel, `LPQ`/`HPQ` pairs and `Copy:` sums behave in the
+real Equalizer APO as the model of it said.
+
+## 2026-09-12: Balance, spectrum, test tone, replacing Equalizer APO
+
+Owner's decisions (details in `docs/ui-spec.md`):
+
+- **Balance** turns down the opposite side only, linearly (gain 1 − |b|), muting
+  it at ±1.0; the favoured side never changes.
+- **Pre spectrum is dropped.** Deriving it as post / |H| was already noisy under
+  deep cuts and is wrong once speaker routing, bass management or delay mix
+  channels. The top bar's spectrum control is On / Off; the design screens were
+  regenerated with it.
+- **Per-speaker test tone:** pink noise, one speaker at a time, −30 dBFS RMS, the
+  level home-theatre test discs use against a 75 dB C target (AVIA-style discs
+  use −20 dBFS against 85 dB C). Played by the UI through the engine.
+- **Installing IsoAPO where Equalizer APO is** removes Equalizer APO from that
+  endpoint, when the user chooses it (Devices and the stage 6 setup wizard).
+
+`isotone-devicetool install --replace-equalizerapo` now does that: after
+upstream's install it deletes Equalizer APO's classes from the effect slots the
+install did not write. Upstream's install records every slot's original value
+before writing, and its uninstall writes each back, so uninstall restores
+Equalizer APO. Dry run on CABLE In 16ch (Equalizer APO in SFX and MFX): IsoAPO
+into MFX, SFX deleted. `roundtrip --replace-equalizerapo` (install with the
+removal, simulated driver update, repair, uninstall) restores both classes and
+fails if Equalizer APO is left after install. Without the flag nothing else
+changes. `repair` does not remove Equalizer APO again. Not yet run for real:
+CABLE Input's install predates this and still has Equalizer APO's pre-mix class
+in SFX.
+
+Still unhandled: Equalizer APO's own record under
+`HKLM\SOFTWARE\EqualizerAPO\Child APOs\{guid}` stays. If the user later runs
+Equalizer APO's Device Selector or uninstaller, it would write its recorded
+originals back over IsoAPO. Not tested.
+
+**`status` reports `,19` and `,20`.** The Windows SDK names them
+`PKEY_CompositeFX_Offload_StreamEffectClsid` and `_ModeEffectClsid`, the effect
+lists for hardware-offloaded streams. On this machine both Realtek endpoints
+(unplugged) hold Realtek's own classes there (`RltkAPOU64.dll`), next to
+Realtek classes in the composite lists `,13`–`,15`, while Equalizer APO sits in
+`,5` and `,7`. Whether audiodg runs the single-CLSID slots at all when composite
+lists are present is not known; it matters for both backends on Realtek
+hardware and needs a plugged-in Realtek endpoint to measure.
+
+**What Equalizer APO does with the APO it replaces** (read in upstream
+`EqualizerAPO/EqualizerAPO.cpp` at the vendored commit): install records the
+replaced class as `PreMixChild`/`PostMixChild`. At `Initialize` the APO
+`CoCreateInstance`s that class and passes it the same initialization data;
+format negotiation is delegated to it (`IsInputFormatSupported`), and
+`LockForProcess`/`UnlockForProcess` are forwarded. In `APOProcess` the child
+runs first, writing the output buffer, and Equalizer APO's filters then process
+that buffer in place, with the channel count taken from the child's output
+format. If the child fails at any step it is released and Equalizer APO runs
+alone. The user can turn the child off per device ("use original APO").
+IsoAPO does none of this yet: devicetool records the child, IsoAPO ignores it.
+
+## 2026-09-13: Child APO, removing Equalizer APO, bass management, band order
+
+Owner's decisions:
+
+- **IsoAPO hosts the APO it replaces, as Equalizer APO does** (previous entry).
+- **Choosing IsoAPO uninstalls Equalizer APO**, so the two never conflict. Taken
+  to mean the whole Equalizer APO install, not only its slots on one endpoint:
+  that also removes its `Child APOs` records, which would otherwise let Equalizer
+  APO's Device Selector write itself back over IsoAPO. Where Equalizer APO was
+  wrapping a vendor APO, IsoAPO has to take that vendor class over as its own
+  child, or the vendor processing is lost.
+- **Realtek composite and offload lists are out of scope.**
+- **Bass management follows AV receivers:** no slope control, Linkwitz-Riley
+  24 dB/oct as the engine already does, crossover 40–250 Hz (default 80),
+  LFE low-pass 80–250 Hz (default 120), 10 Hz steps. Denon's range and defaults
+  per its support pages and owner forums; the fixed 24 dB/oct is the common
+  receiver behaviour, not checked against a manual.
+- **Band order:** the "Order" label and icon are gone; the Manual / By frequency
+  control stands alone.
+- **Test tone:** pink noise, as recorded above.
+
+Screens regenerated for band order and the bass management card.
+
 ---
 
 # Where things stand (end of 2026-09-12)
@@ -722,8 +1025,9 @@ channel masks, and a param-block layout change to carry all of it.
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (113 cases now) |
-| 3. Hosts on shared memory | Windows APO transport measured; devicetool and the compat backend not started; Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact |
+| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (127 cases now) |
+| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; `compat_tests` 19 cases |
+| 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -744,51 +1048,62 @@ failed two of them, both environmental:
 
 ```
 core/                  the DSP core: types, biquad design, response evaluation,
-                       processor (TDF-II + smoothing + crossfades), APO config
+                       processor (TDF-II + smoothing + crossfades, speaker
+                       routing, bass management, delay), APO config
                        parser/formatter, param block schema
                        and the audio ring
-core/tests/            8 test files; reference data from scipy at 4 sample rates
+core/tests/            9 test files; reference data from scipy at 4 sample rates
 tools/gen_reference.py independent scipy implementation that generates it
 tools/check_shm_transport.py  cross-process transport check, runs in CI
 windows/transport/     the named shared mapping, used by the APO and the tools
 windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test, install.ps1
 windows/measure/       isotone-measure: endpoint list, stepped-sine measurement
 windows/shmtool/       isotone-shm: status / write / capture on a live region
+windows/devicetool/    isotone-devicetool, with upstream's registration code vendored
+windows/compat/        isotone-compat: the Equalizer APO backend (Isotone.txt)
 docs/decisions.md      this file
+docs/ui-spec.md        the stage 4 build brief
 ```
+
+Local only (gitignored): `docs/design/screens/*.png` (the approved screens),
+`docs/design/generator/` (regenerates them), and `.vscode/settings.json`, which
+points IntelliSense at `build/compile_commands.json`.
 
 ## Not started, in dependency order
 
-**Stage 3** remaining. The shared region, audio ring and heartbeat are done and
-measured in audiodg.
+**Stage 3** remaining:
 
-4. **`devicetool`.** The CLI wrapping upstream's `DeviceAPOInfo` and
-   `RegistryHelper` for list/status/install/uninstall/repair/test with JSON
-   output. This replaces `install.ps1`, which is a spike. It must report every
-   effect slot an APO occupies and warn on duplicates (see the 2x finding).
-5. **Compat backend as a real `EqBackend`**: atomic writes via `MoveFileExW`,
-   rate limiting to about 30 writes/second, `Device:`/`Channel:` emission,
-   WASAPI loopback as the spectrum source.
+1. **Linux daemon**, deferred with 1c.
 
-**Stage 4 onward** is the UI, still framework-undecided. Nothing in stages 0-3
-depends on that choice.
+**Stage 4** is the UI in Qt 6 Quick, designed and not coded. Start with
+`docs/ui-spec.md`, "Start here". It does not wait on stage 3's remaining items:
+the core, transport and devicetool it needs exist, and the multichannel controls
+can be built UI-first.
+
+**Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec.
+**Stage 6** (packaging) is not started.
 
 ## State of the owner's machine
 
-**IsoAPO is installed on CABLE Input only**, in MFX (`,6`), since the stage 3
-measurement. SFX (`,5`) still holds Equalizer APO's pre-mix class, and every
-other endpoint is untouched. While installed, the owner's `peace.txt` no longer
-applies on CABLE Input's render side (its capture side, CABLE Output, still has
-Equalizer APO). A stream opened on CABLE Input with no region already held gets
-the default seed, a -12 dB band at 1 kHz. Nothing the owner listens to routes
-through the cable.
+**IsoAPO is installed on CABLE Input only**, by devicetool, in MFX (`,6`),
+replacing Equalizer APO's post-mix class. SFX (`,5`) still holds Equalizer
+APO's pre-mix class; whether that applies `peace.txt` on the render side has not
+been measured. CABLE Output, the capture side, still has Equalizer APO. Every
+other endpoint is untouched. A stream opened on CABLE Input with no region
+already held gets the default seed, a -12 dB band at 1 kHz. Nothing the owner
+listens to routes through the cable. The staged DLL is the 2026-09-12 build with
+param block v4.
 
-The staged `C:\Program Files\Isotone\IsoAPO.dll` predates the channel-name
-change; reinstalling picks up the current build.
+**CABLE Input and CABLE Output are 7.1** (8 channels, 24-bit, 48 kHz, `0x63F`),
+set for the multichannel measurement; they were 2 channels, 24-bit, `0x3`.
+CABLE In 16ch is unchanged at 2 channels. To go back, Sound control panel:
+CABLE Input > Configure > Stereo, and CABLE Output > Properties > Advanced >
+2 channel, 24 bit, 48000 Hz.
 
 To remove it, elevated:
-`.\windows\apo\install.ps1 -Endpoint '{798436d2-8c71-4834-9248-00ccbaaca00a}' -Uninstall`
-then `Restart-Service Audiosrv -Force`. The pristine endpoint values are in
+`.\build\windows\devicetool\isotone-devicetool.exe uninstall '{798436d2-8c71-4834-9248-00ccbaaca00a}'`
+then `Restart-Service Audiosrv -Force`. Its dry run restores `,5` and `,6` to
+Equalizer APO's pre-mix and post-mix classes, the same values as the older
 `windows/apo/IsoAPO-backup-Render-798436d2-....reg`.
 
 ## Standing rules
