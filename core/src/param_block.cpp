@@ -18,6 +18,28 @@ void init_param_block(ParamBlock* block) {
     block->hdr.host_state = static_cast<uint32_t>(HostState::NotLoaded);
 }
 
+void init_shared_region(void* base) {
+    if (base == nullptr) {
+        return;
+    }
+    ParamBlock* block = region_params(base);
+    init_param_block(block);
+    block->hdr.magic = 0;
+    audio_ring_init(region_ring(base), kRingCapacityFrames);
+    block->hdr.magic = kParamMagic;
+}
+
+bool shared_region_valid(const void* base, size_t bytes) {
+    if (base == nullptr || bytes < kSharedRegionBytes) {
+        return false;
+    }
+    const ParamBlock* block = static_cast<const ParamBlock*>(base);
+    const AudioRingHeader* ring =
+        reinterpret_cast<const AudioRingHeader*>(static_cast<const char*>(base) + sizeof(ParamBlock));
+    return block->hdr.magic == kParamMagic && block->hdr.version == kParamVersion &&
+           block->hdr.size == sizeof(ParamBlock) && ring->capacity == kRingCapacityFrames;
+}
+
 bool param_block_valid(const ParamBlock& block) {
     return block.hdr.magic == kParamMagic && block.hdr.version == kParamVersion &&
            block.hdr.size == sizeof(ParamBlock) && block.band_count <= kParamMaxBands;

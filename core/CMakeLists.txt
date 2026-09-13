@@ -1,5 +1,6 @@
 add_library(isotone_core STATIC
     src/apo_config.cpp
+    src/audio_ring.cpp
     src/biquad.cpp
     src/param_block.cpp
     src/processor.cpp

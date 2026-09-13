@@ -153,6 +153,16 @@ TEST_CASE("composite_peak_db accounts for summed bands and channel trims") {
           doctest::Approx(11.0).epsilon(1e-6));
 }
 
+TEST_CASE("composite_peak_db looks at every channel of a wide layout") {
+    // Auto preamp has to protect channel 9 of a 7.1.4 layout as much as channel
+    // 0, even though only the first kMaxChannels channels can carry a trim.
+    EqState s;
+    s.bands.push_back(peaking(1000.0, 6.0, 1.0, ChannelMask{1} << 9));
+    const std::vector<double> grid = log_grid(10.0, 22800.0, 512);
+    CHECK(composite_peak_db(s, 12, grid.data(), grid.size(), kFs) ==
+          doctest::Approx(6.0).epsilon(1e-6));
+}
+
 TEST_CASE("composite_peak_db is zero for a flat or bypassed state") {
     const std::vector<double> grid = log_grid(10.0, 22800.0, 128);
     EqState s;

@@ -224,6 +224,126 @@ TEST_CASE("a comma decimal mark is normalised") {
     CHECK(r.state.bands[0].width == doctest::Approx(1.4));
 }
 
+namespace {
+
+// Windows speaker masks (ksmedia.h).
+constexpr uint32_t kSpeaker51Surround = 0x60F;    // FL FR FC LFE SL SR
+constexpr uint32_t kSpeaker51Back     = 0x3F;     // FL FR FC LFE BL BR
+constexpr uint32_t kSpeaker714        = 0x2D63F;  // 7.1 surround + TFL TFR TBL TBR
+
+std::string joined(const std::vector<std::string>& v) {
+    std::string s;
+    for (const std::string& x : v) s += (s.empty() ? "" : " ") + x;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("channel names follow the device's speaker layout, as upstream ChannelHelper does") {
+    CHECK(joined(apo_channel_names({2, default_speaker_mask(2)})) == "L R");
+    CHECK(joined(apo_channel_names({6, kSpeaker51Surround})) == "L R C LFE SL SR");
+    CHECK(joined(apo_channel_names({6, kSpeaker51Back})) == "L R C LFE RL RR");
+    CHECK(joined(apo_channel_names({8, default_speaker_mask(8)})) == "L R C LFE RL RR SL SR");
+    // Positions upstream has no name for, and channels past the mask, are numbered.
+    CHECK(joined(apo_channel_names({12, kSpeaker714})) == "L R C LFE RL RR SL SR 9 10 11 12");
+    CHECK(joined(apo_channel_names({4, 0})) == "1 2 3 4");
+
+    // getDefaultChannelMask: only these counts have a default.
+    CHECK(default_speaker_mask(1) == 0x4);
+    CHECK(default_speaker_mask(2) == 0x3);
+    CHECK(default_speaker_mask(4) == 0x33);
+    CHECK(default_speaker_mask(6) == kSpeaker51Surround);
+    CHECK(default_speaker_mask(8) == 0x63F);
+    CHECK(default_speaker_mask(3) == 0);
+}
+
+TEST_CASE("SL on 5.1 is the fifth channel, whichever 5.1 the device is") {
+    const char* text = "Channel: SL\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n";
+    // 5.1 surround has SL itself; 5.1 back has RL there, and upstream accepts
+    // SL for it because the position is unambiguous.
+    for (uint32_t mask : {kSpeaker51Surround, kSpeaker51Back}) {
+        CAPTURE(mask);
+        const ApoParseResult r = parse_apo_config(text, {6, mask});
+        CHECK(r.warnings.empty());
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].channels == (ChannelMask{1} << 4));
+    }
+    // On 7.1 it is the seventh.
+    const ApoParseResult r71 = parse_apo_config(text);
+    REQUIRE(r71.state.bands.size() == 1);
+    CHECK(r71.state.bands[0].channels == (ChannelMask{1} << 6));
+
+    // SUB is the old name for LFE.
+    const ApoParseResult sub =
+        parse_apo_config("Channel: SUB\nFilter 1: ON PK Fc 60 Hz Gain -6 dB Q 1\n", {6, kSpeaker51Back});
+    REQUIRE(sub.state.bands.size() == 1);
+    CHECK(sub.state.bands[0].channels == (ChannelMask{1} << 3));
+
+    // The exporter names channel 5 by the same layout.
+    EqState fifth;
+    fifth.bands.push_back(r71.state.bands[0]);
+    fifth.bands[0].channels = ChannelMask{1} << 4;
+    ApoFormatOptions opt;
+    opt.layout = {6, kSpeaker51Surround};
+    CHECK(format_apo_config(fifth, opt).find("Channel: SL\n") != std::string::npos);
+    opt.layout = {6, kSpeaker51Back};
+    CHECK(format_apo_config(fifth, opt).find("Channel: RL\n") != std::string::npos);
+}
+
+TEST_CASE("numbered channels are valid up to the layout's channel count") {
+    // A 7.1.4 config addresses its height channels by number.
+    const ChannelLayout layout{12, kSpeaker714};
+    const char* text =
+        "Channel: 11\n"
+        "Filter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n"
+        "Channel: L 12\n"
+        "Filter 2: ON PK Fc 2000 Hz Gain -3 dB Q 1\n"
+        "Channel: 13\n"
+        "Filter 3: ON PK Fc 3000 Hz Gain 2 dB Q 1\n";
+    const ApoParseResult r = parse_apo_config(text, layout);
+    REQUIRE(r.state.bands.size() == 2);
+    CHECK(r.state.bands[0].channels == (ChannelMask{1} << 10));
+    CHECK(r.state.bands[1].channels == ((ChannelMask{1} << 0) | (ChannelMask{1} << 11)));
+    CHECK(r.warnings.size() == 2);   // channel 13 does not exist, so filter 3 is dropped
+
+    ApoFormatOptions opt;
+    opt.layout = layout;
+    const ApoParseResult again = parse_apo_config(format_apo_config(r.state, opt), layout);
+    CHECK(again.warnings.empty());
+    REQUIRE(again.state.bands.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        CAPTURE(i);
+        CHECK(again.state.bands[i].channels == r.state.bands[i].channels);
+    }
+}
+
+TEST_CASE("a Channel line that selects nothing scopes the filters after it to nothing") {
+    // Upstream's ChannelFilter starts from an empty selection and adds what it
+    // recognises, so an unknown or out-of-range channel leaves the following
+    // filters acting on no channel. Treating that as "all channels" would put
+    // the filter on every speaker instead.
+    const char* text =
+        "Channel: 33\n"
+        "Filter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n"
+        "Channel: BOGUS\n"
+        "Filter 2: ON PK Fc 2000 Hz Gain -6 dB Q 1\n"
+        "Channel: all\n"
+        "Filter 3: ON PK Fc 4000 Hz Gain 2 dB Q 1\n";
+    const ApoParseResult r = parse_apo_config(text);
+    REQUIRE(r.state.bands.size() == 1);
+    CHECK(r.state.bands[0].channels == kAllChannels);
+    CHECK(r.state.bands[0].fc == doctest::Approx(4000.0));
+    CHECK(r.warnings.size() >= 4);   // two unknown channels, two dropped filters
+
+    SUBCASE("but one recognised channel is enough") {
+        const ApoParseResult partial =
+            parse_apo_config("Channel: R BOGUS\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n");
+        REQUIRE(partial.state.bands.size() == 1);
+        CHECK(partial.state.bands[0].channels == (ChannelMask{1} << 1));
+        CHECK(partial.warnings.size() == 1);
+    }
+}
+
 TEST_CASE("Channel lines scope the bands that follow") {
     const char* text =
         "Channel: L\n"
@@ -385,5 +505,49 @@ TEST_CASE("every filter type survives a round trip through the text format") {
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-9));
+    }
+}
+
+TEST_CASE("channel trims survive a round trip alongside the preamp") {
+    EqState s;
+    s.preamp_db = -6.0;
+    s.channel_gain_db[1] = -3.0;
+    s.channel_gain_db[5] = 1.5;
+    const ApoParseResult r = parse_apo_config(format_apo_config(s));
+    CHECK(r.warnings.empty());
+    CHECK(r.state.preamp_db == doctest::Approx(-6.0));
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        CAPTURE(c);
+        CHECK(r.state.channel_gain_db[c] == doctest::Approx(s.channel_gain_db[c]));
+    }
+}
+
+TEST_CASE("Preamp lines add up, and inside a Channel scope they are trims") {
+    // Upstream makes each Preamp line its own gain stage on the channels
+    // selected at that point (PreampFilterFactory: "Adjusting preamp by").
+    const char* text =
+        "Preamp: -2 dB\n"
+        "Preamp: -1 dB\n"
+        "Channel: L\n"
+        "Preamp: -3 dB\n"
+        "Channel: L R\n"
+        "Preamp: 1 dB\n"
+        "Channel: all\n"
+        "Preamp: -0.5 dB\n";
+    const ApoParseResult r = parse_apo_config(text);
+    CHECK(r.warnings.empty());
+    CHECK(r.state.preamp_db == doctest::Approx(-3.5));
+    CHECK(r.state.channel_gain_db[0] == doctest::Approx(-2.0));
+    CHECK(r.state.channel_gain_db[1] == doctest::Approx(1.0));
+    CHECK(r.state.channel_gain_db[2] == doctest::Approx(0.0));
+
+    SUBCASE("a trim for a channel with no trim slot, or for no channel, is reported") {
+        const ApoParseResult wide = parse_apo_config(
+            "Channel: 11\nPreamp: -3 dB\nChannel: BOGUS\nPreamp: -3 dB\n", {12, kSpeaker714});
+        CHECK(wide.state.preamp_db == doctest::Approx(0.0));
+        for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            CHECK(wide.state.channel_gain_db[c] == doctest::Approx(0.0));
+        }
+        CHECK(wide.warnings.size() == 3);   // channel 11 trim, BOGUS, trim on nothing
     }
 }

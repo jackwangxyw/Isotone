@@ -91,7 +91,6 @@ double composite_peak_db(const EqState& state, uint32_t channels, const double* 
         return 0.0;
     }
     double peak = -std::numeric_limits<double>::infinity();
-    const uint32_t channel_count = std::min(channels, kMaxChannels);
 
     auto consider = [&](uint32_t ch, double freq) {
         const double mag = std::abs(composite_at(state, ch, freq, sample_rate));
@@ -104,7 +103,7 @@ double composite_peak_db(const EqState& state, uint32_t channels, const double* 
         }
     };
 
-    for (uint32_t ch = 0; ch < channel_count; ++ch) {
+    for (uint32_t ch = 0; ch < channels; ++ch) {
         for (size_t i = 0; i < n; ++i) {
             consider(ch, freqs[i]);
         }

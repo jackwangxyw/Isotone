@@ -46,6 +46,20 @@ jobs:
           ./isotone-apo-selftest.exe
           exit $LASTEXITCODE
 
+      # The same APO build served in real time from one process and driven from
+      # another with isotone-shm, the way the UI will reach it: heartbeat,
+      # parameter writes, and audio measured back out of the ring.
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+
+      - name: Shared-memory transport, cross process
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --quiet numpy
+          python tools/check_shm_transport.py build
+
   reference-data:
     name: reference data is reproducible
     runs-on: ubuntu-latest

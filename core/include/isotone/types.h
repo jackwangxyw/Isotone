@@ -34,10 +34,16 @@ enum class WidthMode : uint8_t {
     SlopeDb,        // shelves only; S = slope/12, alpha = sin(w0)/2 * sqrt((A+1/A)(1/S-1)+2)
 };
 
-// Bitmask over output channels. 0 means "all channels".
+// Bitmask over output channels. 0 means "all channels". A mask can name
+// channels 0 to kMaskChannels - 1; channels past that are reached only by
+// all-channel bands.
 using ChannelMask = uint32_t;
 inline constexpr ChannelMask kAllChannels = 0;
+inline constexpr uint32_t kMaskChannels = 32;
 
+// Channels that can carry a trim in EqState and the param block, and that the
+// audio ring stores. Not a limit on how many channels are processed: the
+// processor filters every channel of the stream.
 inline constexpr uint32_t kMaxChannels = 8;
 
 struct Band {
@@ -68,7 +74,10 @@ struct EqState {
 
 // True if `band` contributes to output channel `channel`.
 inline bool band_affects_channel(const Band& band, uint32_t channel) {
-    return band.channels == kAllChannels || (band.channels & (ChannelMask{1} << channel)) != 0;
+    // The bounds check matters: shifting a 32-bit value by 32 or more is
+    // undefined, and on x86 it wraps, so channel 33 would match bit 1.
+    return band.channels == kAllChannels ||
+           (channel < kMaskChannels && (band.channels & (ChannelMask{1} << channel)) != 0);
 }
 
 }  // namespace isotone

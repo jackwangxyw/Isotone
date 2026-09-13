@@ -22,11 +22,26 @@
 
 namespace isotone {
 
-// Channel names as Equalizer APO spells them, indexed by channel number in the
-// usual Windows order. `SUB` is accepted on input as an old alias for LFE, and
-// SL/SR fall back to RL/RR when a device has no side channels.
-const char* apo_channel_name(uint32_t channel);
-bool apo_channel_index(const std::string& name, uint32_t* out);
+// A device's channel layout: how many channels, and which Windows speaker
+// position each carries (the WAVEFORMATEXTENSIBLE dwChannelMask, in bit order).
+// Equalizer APO resolves channel names through it (helpers/ChannelHelper.cpp),
+// so `SL` is channel 5 on 5.1 but channel 7 on 7.1. Pass the layout of the
+// device a config is for. The default is 7.1 surround.
+struct ChannelLayout {
+    uint32_t channels     = 8;
+    uint32_t speaker_mask = 0x63F;   // KSAUDIO_SPEAKER_7POINT1_SURROUND
+};
+
+// Upstream's mask for a stream that reports none (getDefaultChannelMask):
+// mono, stereo, quad, 5.1 surround and 7.1 surround; 0 for any other count.
+uint32_t default_speaker_mask(uint32_t channels);
+
+// Upstream's name for each channel of a layout (getChannelNames): L R C LFE RL
+// RR RC SL SR for those positions, and the 1-based channel number for any
+// other position or for channels the mask does not cover. On input, `SUB` is an
+// alias for LFE, and SL/SR and RL/RR stand in for each other when the layout
+// has only one pair.
+std::vector<std::string> apo_channel_names(const ChannelLayout& layout);
 
 struct ApoParseMessage {
     size_t      line = 0;      // 1-based
@@ -52,13 +67,16 @@ struct ApoParseResult {
 
 // Parses an Equalizer APO configuration. Never throws and never fails outright:
 // unparseable lines become warnings, exactly as upstream logs and skips them.
-ApoParseResult parse_apo_config(const std::string& text);
+ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& layout = {});
 
 struct ApoFormatOptions {
     // Emitted as a `Device:` line before anything else. A full endpoint GUID in
     // braces is the narrowest possible match and cannot collide with another
     // device. Empty means no Device line at all.
     std::string device;
+
+    // Channel names in Channel: lines are written for this layout.
+    ChannelLayout layout;
 
     // Written above the filters. Each line is prefixed with '# '.
     std::string header_comment;

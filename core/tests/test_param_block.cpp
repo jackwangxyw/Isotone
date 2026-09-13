@@ -7,12 +7,16 @@
 
 #include "doctest.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <thread>
 #include <vector>
 
 #include "isotone/param_block.h"
+#include "isotone/processor.h"
 #include "isotone/response.h"
 
 using namespace isotone;
@@ -180,6 +184,64 @@ TEST_CASE("a corrupt type or width mode is clamped rather than trusted") {
     CHECK(static_cast<uint32_t>(out.bands[0].width_mode) <= 2);
 }
 
+TEST_CASE("a block of non-finite values cannot poison the host, and a sane block recovers it") {
+    // The mapping is writable by any authenticated user, so the host has to
+    // survive whatever lands in it. Non-finite parameters are the dangerous
+    // kind: a smoother whose target is NaN becomes NaN and never comes back.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    ParamBlock block{};
+    init_param_block(&block);
+    block.preamp_db = nan;
+    block.channel_gain_db[0] = inf;
+    block.channel_gain_db[1] = -inf;
+    block.band_count = 3;
+    block.bands[0] = {1, 0, 0, 0, nan, inf, nan, kBandFlagEnabled};
+    block.bands[1] = {2, 0, 0, 0, inf, -inf, -1.0f, kBandFlagEnabled};
+    block.bands[2] = {3, 6, 0, 0, -inf, nan, inf, kBandFlagEnabled};
+
+    EqState hostile;
+    from_param_block(block, &hostile);
+
+    constexpr double kRate = 48000.0;
+    constexpr uint32_t kBlock = 480;
+    Processor p;
+    p.initialize(kRate, 2, kBlock);
+    p.set_target(hostile);
+
+    std::vector<float> buf(kBlock * 2);
+    uint64_t n = 0;
+    const auto run = [&](uint32_t blocks, std::vector<float>* tail) {
+        bool finite = true;
+        for (uint32_t k = 0; k < blocks; ++k) {
+            for (uint32_t i = 0; i < kBlock; ++i, ++n) {
+                const float v = static_cast<float>(0.5 * std::sin(2.0 * 3.141592653589793 * 1000.0 *
+                                                                   static_cast<double>(n) / kRate));
+                buf[size_t{i} * 2] = v;
+                buf[size_t{i} * 2 + 1] = v;
+            }
+            p.process_interleaved(buf.data(), kBlock);
+            for (float s : buf) finite &= std::isfinite(s);
+            if (tail != nullptr && k + 1 == blocks) *tail = buf;
+        }
+        return finite;
+    };
+
+    CHECK(run(50, nullptr));
+
+    EqState sane;
+    sane.bands.push_back(peaking(1000.0, -6.0, 1.0));
+    p.set_target(sane);
+    std::vector<float> tail;
+    CHECK(run(100, &tail));
+
+    // 1 kHz through a -6 dB bell at 1 kHz, on a 0.5 amplitude sine.
+    double peak = 0.0;
+    for (size_t i = 0; i < tail.size(); i += 2) peak = std::max(peak, std::abs(double{tail[i]}));
+    CHECK(20.0 * std::log10(peak / 0.5) == doctest::Approx(-6.0).epsilon(0.01));
+}
+
 namespace {
 
 struct SeqlockRun {
@@ -288,6 +350,27 @@ TEST_CASE("a write in progress is reported as a failed read, not a bad one") {
 
     shared.hdr.seq = 2;
     CHECK(param_block_read(&shared, &out));
+}
+
+TEST_CASE("a writer that died mid-write does not invert the lock for the next one") {
+    // The UI is a separate process and can be killed between the two stores.
+    // The next writer must still leave seq odd while writing and even after,
+    // or every completed write would be rejected and every torn one accepted.
+    ParamBlock shared{};
+    init_param_block(&shared);
+    shared.hdr.seq = 7;   // left odd by a crashed writer
+
+    uint32_t during = 0;
+    param_block_write(&shared, [&](ParamBlock* b) {
+        during = b->hdr.seq;
+        b->preamp_db = -3.0f;
+    });
+    CHECK((during & 1u) == 1u);
+    CHECK((shared.hdr.seq & 1u) == 0u);
+
+    ParamBlock out{};
+    REQUIRE(param_block_read(&shared, &out));
+    CHECK(out.preamp_db == -3.0f);
 }
 
 TEST_CASE("the header fields the host owns are left alone by the writer") {

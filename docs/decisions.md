@@ -448,6 +448,175 @@ default: it is per-endpoint rather than per-stream, so one instance sees the
 mixed output. This also means `devicetool status` must report every slot an APO
 occupies, and warn when the same CLSID appears in more than one.
 
+## 2026-09-12: Stage 3, shared region, audio ring and heartbeat (offline)
+
+Built and verified offline; not yet run inside audiodg.
+
+- **One mapping per endpoint**, `Global\IsoAPO.{guid}`, holding
+  `[ParamBlock][AudioRingHeader][32768 * 8 float32]`, about 1 MB.
+  `kParamVersion` is now 2 and covers the whole region.
+- **The GUID in the name is lower-cased.** Measured: kernel object names are
+  case-sensitive (a `Local\` mapping created as `...ABC` does not open as
+  `...abc`), and the two sides see different cases: `PKEY_AudioEndpoint_GUID`,
+  which the APO reads, is upper case, while `IMMDevice::GetId` is lower case
+  (checked on all six active endpoints here).
+- **Endpoint identity** comes from `APOInitSystemEffects::pAPOEndpointProperties`
+  via `PKEY_AudioEndpoint_GUID`, as upstream `EqualizerAPO::Initialize` does.
+  `Initialize` now refuses a payload that is not `APOInitSystemEffects` or
+  `APOInitSystemEffects2`, as upstream does.
+- **DACL** is `D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GRGW;;;AU)`. Read back from a live
+  mapping as `(A;;CCDCLCRC;;;AU)`: query, map-read and map-write only.
+- **Hosts open before creating.** `CreateFileMappingW` on an existing object
+  requests full access, which the DACL gives only to SYSTEM and LocalService.
+  The first version created-or-opened in one call and every second instance
+  failed with `ERROR_ACCESS_DENIED`; the self test caught it.
+- **Self test uses `Local\`.** Creating a `Global\` object needs
+  `SeCreateGlobalPrivilege`, and `whoami /priv` confirms an unelevated shell
+  lacks it. CMake builds the same sources twice: `IsoAPO.dll` (Global) and
+  `IsoAPO-selftest.dll` (Local). That constant is the only difference, and the
+  self-test DLL must never be installed.
+- **Ring protocol.** Capacity is a power of two, so frame counters wrap at 2^32
+  with no special case. The writer publishes `pending_index` before writing and
+  `write_index` after; the reader drops any copied frame more than `capacity`
+  behind `pending_index`. With that check disabled, the threaded test received
+  741,954 torn chunks; with it enabled, zero out of 1.05 million.
+  A layout change (channel count, new owner) runs under an `epoch` seqlock.
+- **Ring writer election** (plan 5.3): the token is `pid << 32 | instance`.
+  First to claim writes; the rest stay quiet. A claim whose process id differs
+  from the claimant's is treated as left by a dead audiodg and taken over,
+  because the UI keeps the region alive across an engine restart.
+- **The host never trusts layout fields in shared memory.** Any authenticated
+  user can write the mapping, so the ring writer uses private copies of capacity
+  and channel count; a test scribbles on the shared ones and checks a guard band.
+- **Two bugs fixed at the trust boundary, each with a test that failed first:**
+  - `Processor::set_target` passed NaN and infinity to the smoothers, and a NaN
+    smoother never recovers, so one bad write silenced the device until the
+    stream restarted. Non-finite targets now keep the previous target.
+  - `param_block_write` used `seq + 1`/`seq + 2`. A UI killed mid-write leaves
+    seq odd, after which every write inverts the lock: finished writes rejected,
+    torn ones accepted. Now `seq | 1` and `(seq | 1) + 1`.
+- **Heartbeat** increments once per `APOProcess`; `host_state` becomes Running at
+  `LockForProcess` and is not reset at unlock, because other instances may still
+  be running. The heartbeat is the liveness signal.
+- **Cold start is unchanged from stage 1b.** A newly created region is seeded
+  from `%ProgramData%\IsoAPO\config.txt` or the default -12 dB band; an existing
+  region is never re-seeded. If the region cannot be created, audio keeps
+  flowing on that seed and the failure goes to `OutputDebugString`.
+
+## 2026-09-12: Every channel of the stream is processed; channel addressing fixed
+
+`kMaxChannels = 8` was doing two jobs: how many channels can carry a trim (a
+wire-format limit, plan 4.7) and how many channels the processor runs. The APO
+handed a 12-channel buffer to a processor clamped to 8, which then walked the
+interleaved buffer with a stride of 8. Measured in the APO self test on a 7.1.4
+stream before the fix: channel 2 at -2.924 dB and channel 11 at -0.745 dB where
+-3.000 was expected, and channel 10's own band never applied.
+
+- **The processor now runs the stream's channel count.** `kMaxChannels` stays 8
+  and means trims and ring storage only; channels past it have a 0 dB trim.
+- **`kMaskChannels = 32`.** A `ChannelMask` names channels 0 to 31; channels past
+  that get all-channel bands only. The mask tests in `band_affects_channel` and
+  the processor were shifting a `uint32_t` by the channel number, which is
+  undefined from 32 up and wraps on x86. Measured: `magnitude_db` for channel 33
+  returned channel 1's -12 dB band.
+- **`composite_peak_db` covers every channel**, not the first 8, so auto preamp
+  protects height channels.
+- **Importer, matched to upstream `ChannelFilter`/`ChannelHelper`:**
+  - Numbered channels are accepted up to 32; they were capped at 8.
+  - A `Channel:` line that selects nothing now scopes the following filters to
+    nothing, with a warning. It used to mean all channels, which put a filter
+    for a nonexistent or misspelt channel on every speaker. Upstream starts from
+    an empty selection.
+  - The exporter writes mask bits past the eight named channels as numbers, so
+    they survive a round trip.
+- **`Preamp:` lines are gain stages on the current selection**, per upstream's
+  `PreampFilterFactory` ("Adjusting preamp by"). They now add, and inside a
+  `Channel:` scope they become trims. Before, the last line overwrote the global
+  preamp, so the exporter's own `Channel: R` / `Preamp: -3 dB` trim came back as
+  a -3 dB global preamp and no trim.
+
+Channel names were still a fixed table at this point; resolved in the next
+entry.
+
+## 2026-09-12: isotone-shm, a cross-process check, and two install.ps1 fixes
+
+- **`windows/shmtool` builds `isotone-shm`**, the UI side of a region from the
+  command line: `status` (header, heartbeat sampled 200 ms apart, ring),
+  `write <config.txt | ->` with optional `--bypass`, and `capture <seconds>
+  <out.wav>` from the ring. JSON on stdout; exit 1 when the region cannot be
+  used, 2 on bad arguments. `--local` targets the self-test DLL's namespace.
+  This is the "tiny CLI" of the stage 3 acceptance test.
+- **`isotone-apo-selftest --serve <guid> <seconds>`** hosts the self-test DLL in
+  real time (1 kHz sine, 10 ms blocks) and prints the level at 1 kHz once a
+  second.
+- **`tools/check_shm_transport.py`** runs the two against each other in separate
+  processes, which is the only way to meet the mapping's DACL as the UI will.
+  Local result: a written -6 dB band measured -6.000 dB in audio captured back
+  from the ring, bypass measured 0.000 dB, malformed and empty input produce
+  valid JSON, and the region disappears when the last holder exits. Added to the
+  Windows CI job; not yet run on GitHub.
+- **`install.ps1` now installs into MFX (`,6`) only**, as the stage 1b entry
+  concluded. The script still had SFX and MFX, which would have repeated the
+  applied-twice result.
+- **`install.ps1 -DryRun` works on a clean machine.** It skipped `regsvr32` and
+  then required the CLSID to be registered, which only held while a previous
+  install was still in place. After the owner's uninstall it threw. The dry run
+  now reports the missing registration; a real run still fails on it.
+
+## 2026-09-12: Channel names resolve through the device's speaker layout
+
+Owner's direction: use the standard, do not invent one. The standard is
+Windows' speaker mask as Equalizer APO applies it. Read from upstream
+`helpers/ChannelHelper.cpp` and `FilterEngine::initialize`:
+
+- A layout is a channel count plus the stream's `dwChannelMask`. Walking bits
+  0 to 30, each present position is named if upstream has a name for it (L R C
+  LFE RL RR RC SL SR), otherwise numbered by its channel index; channels past
+  the mask are numbered.
+- A mask of 0 falls back to `getDefaultChannelMask`: mono, stereo, quad, 5.1
+  surround, 7.1 surround.
+- Lookup: a word starting with a digit is a 1-based number that must be within
+  the channel count; otherwise a name, with SL/RL, SR/RR and SUB/LFE standing
+  in for each other.
+
+`parse_apo_config` and `format_apo_config` now take a `ChannelLayout`,
+defaulting to 7.1 surround, which is exactly the fixed table they used before.
+So `SL` is channel 5 on either 5.1 layout and channel 7 on 7.1, and numbered
+channels are valid up to the device's count rather than a fixed 32.
+`isotone-shm write` parses against the published channel count with upstream's
+default mask; the header does not carry the speaker mask. The UI will have the
+real mask from the device's mix format.
+
+## 2026-09-12: Stage 3 measured in audiodg
+
+IsoAPO installed by the owner into MFX (`,6`) only on CABLE Input, with the
+build from before the channel-name entry above. That entry changed only the
+config importer, which the running engine uses solely for a seed file that does
+not exist, so the transport under test is the same code.
+
+- **The region exists and is reachable.** `isotone-shm status`, unelevated,
+  opened `Global\IsoAPO.{798436d2-...}` created by audiodg: 48 kHz, 2 channels,
+  running, heartbeat advancing, ring claimed by audiodg's process id. This
+  settles the two inferred points: audiodg can create `Global\` objects, and it
+  passes an `Initialize` payload IsoAPO accepts. The ring token's instance
+  serial was 3, then 6 after a stream restart, so audiodg constructs several
+  instances; exactly one wrote the ring.
+- **The acceptance measurement.** Render to CABLE Input, capture from CABLE
+  Output, 14 frequencies from 31.5 Hz to 16 kHz. A bypass block was written
+  through the region and measured as a baseline; then a block of preamp -3 dB,
+  LSC 105 Hz +6.4 dB Q 0.7, PK 1 kHz -12 dB Q 1 and HSC 8 kHz -4 dB Q 0.7. The
+  difference matched `tools/gen_reference.py`'s independent scipy design of that
+  curve to **0.0001 dB rms and 0.0001 dB maximum**, on both channels.
+- **The ring is exact.** A steady 1 kHz tone captured from the ring measured
+  -6.203 dB in bypass, -21.202 dB with the curve, -6.203 dB in bypass again:
+  -14.999 dB applied, against -14.999 dB designed. The ring does not read -15
+  absolute because the signal already arrives at MFX 6.203 dB below the played
+  amplitude. That loss is before IsoAPO and was not attributed; endpoint volume
+  and Equalizer APO's pre-mix class still in SFX are the candidates.
+- The region lasts only while a stream is open, so the measurement held a
+  silent stream open. With nothing playing the UI will see "engine idle", as
+  plan 5.3 expects.
+
 ---
 
 # Where things stand (end of 2026-09-12)
@@ -460,7 +629,8 @@ occupies, and warn when the same CLSID appears in more than one.
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 |
+| 2. Core | complete | 89 cases / 1,973,709 assertions green on MSVC 19.51 and GCC 16.1.0 (113 cases now) |
+| 3. Hosts on shared memory | Windows APO transport measured; devicetool and the compat backend not started; Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -483,28 +653,22 @@ failed two of them, both environmental:
 core/                  the DSP core: types, biquad design, response evaluation,
                        processor (TDF-II + smoothing + crossfades), APO config
                        parser/formatter, param block schema
-core/tests/            7 test files; reference data from scipy at 4 sample rates
+                       and the audio ring
+core/tests/            8 test files; reference data from scipy at 4 sample rates
 tools/gen_reference.py independent scipy implementation that generates it
-windows/apo/           IsoAPO.dll, its offline self test, install.ps1
+tools/check_shm_transport.py  cross-process transport check, runs in CI
+windows/transport/     the named shared mapping, used by the APO and the tools
+windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test, install.ps1
 windows/measure/       isotone-measure: endpoint list, stepped-sine measurement
+windows/shmtool/       isotone-shm: status / write / capture on a live region
 docs/decisions.md      this file
 ```
 
 ## Not started, in dependency order
 
-**Stage 3** is next and needs no new decisions:
+**Stage 3** remaining. The shared region, audio ring and heartbeat are done and
+measured in audiodg.
 
-1. **Shared memory transport.** `param_block.h` defines the layout and the
-   seqlock, both tested. What is missing is the mapping itself:
-   `Global\IsoAPO.<endpoint-guid>` created by the APO with a DACL granting
-   Authenticated Users read/write and LocalService/SYSTEM full control
-   (plan 5.3), opened read/write by the UI side. The APO currently reads a
-   config file at `LockForProcess` instead.
-2. **Audio ring.** `AudioRingHeader` is declared and unimplemented. Single
-   writer (host), single reader (UI), write index published after the samples,
-   about 250 ms of frames.
-3. **Heartbeat and host state** in the param block header, so the UI can tell a
-   live engine from an idle one.
 4. **`devicetool`.** The CLI wrapping upstream's `DeviceAPOInfo` and
    `RegistryHelper` for list/status/install/uninstall/repair/test with JSON
    output. This replaces `install.ps1`, which is a spike. It must report every
@@ -518,25 +682,21 @@ depends on that choice.
 
 ## State of the owner's machine
 
-**Clean.** IsoAPO was uninstalled by the owner after the stage 1b measurement.
-Verified afterwards:
+**IsoAPO is installed on CABLE Input only**, in MFX (`,6`), since the stage 3
+measurement. SFX (`,5`) still holds Equalizer APO's pre-mix class, and every
+other endpoint is untouched. While installed, the owner's `peace.txt` no longer
+applies on CABLE Input's render side (its capture side, CABLE Output, still has
+Equalizer APO). A stream opened on CABLE Input with no region already held gets
+the default seed, a -12 dB band at 1 kHz. Nothing the owner listens to routes
+through the cable.
 
-- The VB-Cable "CABLE Input" endpoint is back on Equalizer APO, and the
-  processing-mode declarations are REG_MULTI_SZ as they should be.
-- Both IsoAPO CLSIDs are gone from `AudioEngine\AudioProcessingObjects` and from
-  `HKLM\SOFTWARE\Classes\CLSID`.
-- Re-measuring the endpoint gives -26.384 dB at 1 kHz, identical to the original
-  baseline taken before any work started.
-- `config.txt` and `peace.txt` are byte-identical to the pre-work snapshot.
+The staged `C:\Program Files\Isotone\IsoAPO.dll` predates the channel-name
+change; reinstalling picks up the current build.
 
-One inert leftover: `C:\Program Files\Isotone\IsoAPO.dll` is still on disk.
-It is unregistered and nothing references it; audiodg still had it mapped when
-the uninstall ran. Stage 3 will overwrite it on the next install anyway.
-
-To reinstall for stage 3:
-`install.ps1 -Endpoint '{798436d2-8c71-4834-9248-00ccbaaca00a}' -Dll <path> -DryRun`
-first, then without `-DryRun`, then `Restart-Service Audiosrv -Force`. The
-pristine endpoint values are in `windows/apo/IsoAPO-backup-Render-798436d2-....reg`.
+To remove it, elevated:
+`.\windows\apo\install.ps1 -Endpoint '{798436d2-8c71-4834-9248-00ccbaaca00a}' -Uninstall`
+then `Restart-Service Audiosrv -Force`. The pristine endpoint values are in
+`windows/apo/IsoAPO-backup-Render-798436d2-....reg`.
 
 ## Standing rules
 

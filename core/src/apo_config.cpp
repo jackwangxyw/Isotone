@@ -17,7 +17,16 @@ namespace {
 // shelf: "found out by experimentation with RoomEQWizard" (BiQuadFilterFactory).
 constexpr double kDefaultShelfS = 0.9;
 
-const char* const kChannelNames[] = {"L", "R", "C", "LFE", "RL", "RR", "SL", "SR"};
+// Speaker positions upstream has names for (ChannelHelper's constructor), with
+// their ksmedia.h SPEAKER_* bits.
+struct NamedPosition {
+    uint32_t    bit;
+    const char* name;
+};
+constexpr NamedPosition kNamedPositions[] = {
+    {0x1, "L"}, {0x2, "R"}, {0x4, "C"}, {0x8, "LFE"}, {0x10, "RL"},
+    {0x20, "RR"}, {0x100, "RC"}, {0x200, "SL"}, {0x400, "SR"},
+};
 
 std::string trim(const std::string& s) {
     const auto begin = s.find_first_not_of(" \t\r\n");
@@ -142,32 +151,53 @@ bool find_value_after(const std::string& text, const std::string& key, std::stri
     return false;
 }
 
-ChannelMask mask_from_channel_words(const std::vector<std::string>& words, bool* all) {
-    *all = false;
-    ChannelMask mask = 0;
+// Returns false when the words select no channel. Upstream's ChannelFilter
+// starts from an empty selection and adds what it recognises, so the filters
+// after such a line act on nothing. Words it cannot use go to `ignored`.
+// Upstream's getChannelIndex: a word starting with a digit is a 1-based number
+// that must exist in the layout; anything else is looked up by name, with the
+// SL/RL, SR/RR and SUB/LFE substitutions. Returns -1 if the word names nothing.
+long channel_index(const std::string& upper, const std::vector<std::string>& names) {
+    if (!upper.empty() && std::isdigit(static_cast<unsigned char>(upper[0]))) {
+        const long n = std::strtol(upper.c_str(), nullptr, 10) - 1;
+        return n >= 0 && n < static_cast<long>(names.size()) ? n : -1;
+    }
+    auto find = [&](const char* name) -> long {
+        const auto it = std::find(names.begin(), names.end(), name);
+        return it == names.end() ? -1 : static_cast<long>(it - names.begin());
+    };
+    long index = find(upper.c_str());
+    if (index < 0) {
+        if (upper == "SL") index = find("RL");
+        else if (upper == "SR") index = find("RR");
+        else if (upper == "RL") index = find("SL");
+        else if (upper == "RR") index = find("SR");
+        else if (upper == "SUB") index = find("LFE");
+    }
+    return index;
+}
+
+bool mask_from_channel_words(const std::vector<std::string>& words,
+                             const std::vector<std::string>& names, ChannelMask* mask,
+                             std::vector<std::string>* ignored) {
+    ChannelMask selected = 0;
     for (const std::string& w : words) {
         const std::string upper = to_upper(w);
         if (upper == "ALL") {
-            *all = true;
-            return kAllChannels;
+            *mask = kAllChannels;
+            return true;
         }
-        uint32_t index = 0;
-        if (apo_channel_index(upper, &index)) {
-            mask |= ChannelMask{1} << index;
+        const long index = channel_index(upper, names);
+        // A channel past kMaskChannels exists on the device but cannot be named
+        // by a mask, so it is reported rather than silently dropped.
+        if (index >= 0 && index < static_cast<long>(kMaskChannels)) {
+            selected |= ChannelMask{1} << static_cast<uint32_t>(index);
             continue;
         }
-        // A bare number is a 1-based channel index.
-        char* end = nullptr;
-        const long n = std::strtol(upper.c_str(), &end, 10);
-        if (end != upper.c_str() && *end == '\0' && n >= 1 && n <= static_cast<long>(kMaxChannels)) {
-            mask |= ChannelMask{1} << static_cast<uint32_t>(n - 1);
-        }
+        ignored->push_back(w);
     }
-    if (mask == 0) {
-        *all = true;
-        return kAllChannels;
-    }
-    return mask;
+    *mask = selected;
+    return selected != 0;
 }
 
 // 12 significant digits. The default %g gives 6, which silently rounds a
@@ -199,26 +229,36 @@ bool type_uses_gain(FilterType t) {
 
 }  // namespace
 
-const char* apo_channel_name(uint32_t channel) {
-    if (channel < sizeof(kChannelNames) / sizeof(kChannelNames[0])) {
-        return kChannelNames[channel];
+uint32_t default_speaker_mask(uint32_t channels) {
+    switch (channels) {
+        case 1: return 0x4;     // KSAUDIO_SPEAKER_MONO
+        case 2: return 0x3;     // KSAUDIO_SPEAKER_STEREO
+        case 4: return 0x33;    // KSAUDIO_SPEAKER_QUAD
+        case 6: return 0x60F;   // KSAUDIO_SPEAKER_5POINT1_SURROUND
+        case 8: return 0x63F;   // KSAUDIO_SPEAKER_7POINT1_SURROUND
+        default: return 0;
     }
-    return "";
 }
 
-bool apo_channel_index(const std::string& name, uint32_t* out) {
-    const std::string upper = to_upper(name);
-    for (uint32_t i = 0; i < sizeof(kChannelNames) / sizeof(kChannelNames[0]); ++i) {
-        if (upper == kChannelNames[i]) {
-            *out = i;
-            return true;
+std::vector<std::string> apo_channel_names(const ChannelLayout& layout) {
+    std::vector<std::string> names;
+    // Upstream walks bits 0 to 30, naming each position present in the mask in
+    // order, then numbers whatever channels the mask did not cover.
+    for (uint32_t i = 0; i < 31; ++i) {
+        const uint32_t bit = uint32_t{1} << i;
+        if ((layout.speaker_mask & bit) == 0) {
+            continue;
         }
+        const char* name = nullptr;
+        for (const NamedPosition& p : kNamedPositions) {
+            if (p.bit == bit) name = p.name;
+        }
+        names.push_back(name != nullptr ? name : std::to_string(names.size() + 1));
     }
-    if (upper == "SUB") {   // old name for LFE
-        *out = 3;
-        return true;
+    while (names.size() < layout.channels) {
+        names.push_back(std::to_string(names.size() + 1));
     }
-    return false;
+    return names;
 }
 
 std::string apo_device_pattern_for_guid(const std::string& guid) {
@@ -235,10 +275,12 @@ std::string apo_device_pattern_for_guid(const std::string& guid) {
     return g;
 }
 
-ApoParseResult parse_apo_config(const std::string& text) {
+ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& layout) {
     ApoParseResult result;
 
+    const std::vector<std::string> channel_names = apo_channel_names(layout);
     ChannelMask current_mask = kAllChannels;
+    bool no_channel_selected = false;
     uint32_t next_id = 1;
     size_t line_no = 0;
 
@@ -276,18 +318,41 @@ ApoParseResult parse_apo_config(const std::string& text) {
             while (ws >> w) {
                 words.push_back(w);
             }
-            bool all = false;
-            current_mask = mask_from_channel_words(words, &all);
+            std::vector<std::string> ignored;
+            no_channel_selected =
+                !mask_from_channel_words(words, channel_names, &current_mask, &ignored);
+            for (const std::string& word : ignored) {
+                result.warnings.push_back({line_no, "unknown channel '" + word + "', ignored"});
+            }
             continue;
         }
         if (command == "Preamp") {
             // "Preamp: -6.1 dB": upstream scans a leading double and ignores the
-            // unit text after it.
+            // unit text after it. Each line is its own gain stage on the channels
+            // selected at that point, so lines add, and under a Channel scope
+            // the gain is a per-channel trim.
             double v = 0.0;
-            if (parse_double(trim(normalise_decimal(params)), &v)) {
-                result.state.preamp_db = v;
-            } else {
+            if (!parse_double(trim(normalise_decimal(params)), &v)) {
                 result.warnings.push_back({line_no, "could not read preamp value"});
+            } else if (no_channel_selected) {
+                result.warnings.push_back(
+                    {line_no, "preamp ignored: the Channel line before it selects no channel"});
+            } else if (current_mask == kAllChannels) {
+                result.state.preamp_db += v;
+            } else {
+                for (uint32_t c = 0; c < kMaskChannels; ++c) {
+                    if ((current_mask & (ChannelMask{1} << c)) == 0) {
+                        continue;
+                    }
+                    if (c < kMaxChannels) {
+                        result.state.channel_gain_db[c] += v;
+                    } else {
+                        result.warnings.push_back(
+                            {line_no, "preamp for channel " + std::to_string(c + 1) +
+                                          " ignored: only the first " +
+                                          std::to_string(kMaxChannels) + " channels have a trim"});
+                    }
+                }
             }
             continue;
         }
@@ -308,6 +373,11 @@ ApoParseResult parse_apo_config(const std::string& text) {
             TokenInfo info{};
             if (!lookup_token(type_token, &info)) {
                 result.warnings.push_back({line_no, "unknown filter type '" + type_token + "'"});
+                continue;
+            }
+            if (no_channel_selected) {
+                result.warnings.push_back(
+                    {line_no, "filter ignored: the Channel line before it selects no channel"});
                 continue;
             }
 
@@ -438,6 +508,13 @@ ApoParseResult parse_apo_config(const std::string& text) {
 std::string format_apo_config(const EqState& state, const ApoFormatOptions& options) {
     std::ostringstream out;
 
+    // A channel the layout does not have is still written, by number, so the
+    // band is not lost; Equalizer APO reports it as out of range on that device.
+    const std::vector<std::string> channel_names = apo_channel_names(options.layout);
+    const auto channel_name = [&](uint32_t c) {
+        return c < channel_names.size() ? channel_names[c] : std::to_string(c + 1);
+    };
+
     if (!options.header_comment.empty()) {
         std::istringstream hs(options.header_comment);
         std::string h;
@@ -470,9 +547,9 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             }
         } else {
             out << "Channel:";
-            for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            for (uint32_t c = 0; c < kMaskChannels; ++c) {
                 if ((mask & (ChannelMask{1} << c)) != 0) {
-                    out << " " << apo_channel_name(c);
+                    out << " " << channel_name(c);
                 }
             }
             out << "\n";
@@ -530,7 +607,7 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             if (db == 0.0) {
                 continue;
             }
-            out << "Channel: " << apo_channel_name(c) << "\n";
+            out << "Channel: " << channel_name(c) << "\n";
             out << "Preamp: " << format_double(db) << " dB\n";
         }
     }

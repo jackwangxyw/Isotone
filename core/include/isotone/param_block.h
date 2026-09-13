@@ -16,12 +16,15 @@
 #include <cstdint>
 #include <cstring>
 
+#include "isotone/audio_ring.h"
 #include "isotone/types.h"
 
 namespace isotone {
 
 inline constexpr uint32_t kParamMagic   = 0x544F5349u;  // 'ISOT' little-endian
-inline constexpr uint32_t kParamVersion = 1u;
+// Covers the whole shared region below, not only ParamBlock. 2: audio ring
+// header gained pending_index, epoch and writer.
+inline constexpr uint32_t kParamVersion = 2u;
 inline constexpr uint32_t kParamMaxBands = 64u;
 
 enum class HostState : uint32_t {
@@ -74,14 +77,53 @@ static_assert(sizeof(ParamBlock) % 16 == 0, "ParamBlock should stay 16-byte alig
 static_assert(std::atomic_ref<uint32_t>::is_always_lock_free,
               "the seqlock needs lock-free 32-bit atomics on this target");
 
-// Header of the post-EQ audio ring. `samples` follows immediately in the mapped
-// region; capacity is in frames and the buffer holds capacity * channels floats.
-struct AudioRingHeader {
-    uint32_t write_index;   // frames, monotonically increasing, host writes last
-    uint32_t capacity;      // frames
-    uint32_t channels;
-    uint32_t reserved;
-};
+// ---------------------------------------------------------------------------
+// The shared region: one per device, parameters down and audio up.
+//
+//   [ParamBlock][AudioRingHeader][kRingCapacityFrames * kMaxChannels floats]
+//
+// 32768 frames is 680 ms at 48 kHz and 85 ms at 384 kHz. The UI drains about 60
+// times a second, so even the highest rate leaves five times the headroom.
+
+inline constexpr uint32_t kRingCapacityFrames = 32768u;
+inline constexpr size_t kSharedRegionBytes =
+    sizeof(ParamBlock) + sizeof(AudioRingHeader) +
+    size_t{kRingCapacityFrames} * kMaxChannels * sizeof(float);
+static_assert(sizeof(ParamBlock) % alignof(AudioRingHeader) == 0,
+              "the ring header must start on its own alignment");
+
+inline ParamBlock* region_params(void* base) { return static_cast<ParamBlock*>(base); }
+inline AudioRingHeader* region_ring(void* base) {
+    return reinterpret_cast<AudioRingHeader*>(static_cast<char*>(base) + sizeof(ParamBlock));
+}
+
+// Initialises a freshly created region. The magic is written last, so a second
+// opener that sees a valid header sees a finished one.
+void init_shared_region(void* base);
+
+// True if `bytes` of mapped memory at `base` hold a region this build
+// understands.
+bool shared_region_valid(const void* base, size_t bytes);
+
+// Host side. The header fields after `seq` belong to the host; the UI only
+// reads them. Several APO instances can share one region, so updates are atomic.
+inline void host_publish_format(ParamBlock* block, uint32_t sample_rate, uint32_t channels,
+                                HostState state) {
+    std::atomic_ref<uint32_t>(block->hdr.sample_rate).store(sample_rate, std::memory_order_relaxed);
+    std::atomic_ref<uint32_t>(block->hdr.channels).store(channels, std::memory_order_relaxed);
+    std::atomic_ref<uint32_t>(block->hdr.host_state)
+        .store(static_cast<uint32_t>(state), std::memory_order_relaxed);
+}
+
+// Once per process call. The UI treats a heartbeat that stops moving as an idle
+// engine, whatever host_state says.
+inline void host_heartbeat(ParamBlock* block) {
+    std::atomic_ref<uint32_t>(block->hdr.host_heartbeat).fetch_add(1, std::memory_order_relaxed);
+}
+
+inline uint32_t param_block_seq(const ParamBlock* block) {
+    return std::atomic_ref<const uint32_t>(block->hdr.seq).load(std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Conversion
@@ -104,15 +146,17 @@ bool param_block_valid(const ParamBlock& block);
 // for applying atomic operations to an object that is not declared atomic.
 template <typename F>
 void param_block_write(ParamBlock* block, F&& write) {
+    // `| 1` rather than `+ 1`: a writer process killed mid-write leaves seq odd,
+    // and adding to an odd value would invert the lock for every later write.
     std::atomic_ref<uint32_t> seq(block->hdr.seq);
-    const uint32_t start = seq.load(std::memory_order_relaxed);
-    seq.store(start + 1, std::memory_order_relaxed);
+    const uint32_t odd = seq.load(std::memory_order_relaxed) | 1u;
+    seq.store(odd, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
 
     write(block);
 
     std::atomic_thread_fence(std::memory_order_release);
-    seq.store(start + 2, std::memory_order_relaxed);
+    seq.store(odd + 1, std::memory_order_relaxed);
 }
 
 // Reader side. Copies into `out` and returns true only if the copy was taken

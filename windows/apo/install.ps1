@@ -65,9 +65,13 @@ $ErrorActionPreference = 'Stop'
 # already a REG_SZ CLSID.
 $FxKey = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
 
-# Which slot takes which of our two CLSIDs, mirroring how Equalizer APO installs.
+# MFX only. The stage 1b install put IsoAPO in SFX (,5) and MFX (,6) the way
+# Equalizer APO installs, and measured as applying the EQ twice: unlike
+# Equalizer APO's pre-mix and post-mix classes, both of ours filter. MFX is one
+# instance per endpoint that sees the mixed output. Whatever is already in SFX
+# is left alone; on the VB-Cable endpoint that is Equalizer APO's pre-mix class,
+# which passes audio through unless a config asks for its pre-mix stage.
 $SlotPlan = [ordered]@{
-    5 = @{ Label = 'StreamEffectClsid (SFX)'; Clsid = '{F1DFFD14-9A30-45C5-BAB2-C820C7EC718F}' }
     6 = @{ Label = 'ModeEffectClsid (MFX)';   Clsid = '{BAF30F18-9FA2-4E55-97D9-007CEA179824}' }
 }
 
@@ -344,6 +348,12 @@ foreach ($entry in $SlotPlan.GetEnumerator()) {
     $clsid = $entry.Value.Clsid
 
     if (-not (Test-Path (Join-Path $ApoRegRoot $clsid))) {
+        # A dry run skipped regsvr32, so on a machine without a previous install
+        # the CLSID cannot be registered yet. Report it; a real run still fails.
+        if ($DryRun) {
+            Write-Host "  $clsid is not registered yet; a real run registers it above."
+            continue
+        }
         throw "$clsid is not registered under $ApoRegRoot (regsvr32 exit $regsvrExit)."
     }
 

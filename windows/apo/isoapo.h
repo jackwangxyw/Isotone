@@ -4,12 +4,12 @@
 // IsoAPO: the Windows audio processing object that runs the Isotone core inside
 // audiodg.exe.
 //
-// This is the stage 1 spike shape (plan section 5, stage 1). It implements the
-// COM shell and runs the real core, but it does not yet do the things stage 3
-// adds: shared-memory parameters, the audio ring, the heartbeat, or wrapping a
-// device's existing APO as a child. Parameters come from a file under
-// ProgramData, which is the only place audiodg can read from since it runs as
-// LocalService with no access to user directories.
+// Parameters arrive through the per-endpoint shared region (plan 5.3): the APO
+// creates or opens it in Initialize, reads the ParamBlock under its seqlock on
+// every process call, writes post-EQ audio to the ring, and bumps the
+// heartbeat. When this instance creates the region it seeds it from a file
+// under ProgramData, the only place audiodg can read since it runs as
+// LocalService. Not done yet: wrapping a device's existing APO as a child.
 //
 // Structure follows upstream Equalizer APO's EqualizerAPO.cpp, which is the
 // known-good shape for this interface, with its FilterEngine replaced by
@@ -23,9 +23,13 @@
 #include <baseaudioprocessingobject.h>
 
 #include <atomic>
+#include <string>
 
+#include "isotone/audio_ring.h"
+#include "isotone/param_block.h"
 #include "isotone/processor.h"
 #include "isotone/types.h"
+#include "shared_mapping.h"
 
 // Fresh CLSIDs. Deliberately unrelated to Equalizer APO's, so IsoAPO can be
 // installed on a machine that also has a real Equalizer APO without the two
@@ -84,6 +88,7 @@ public:
 
 private:
     void load_parameters();
+    void open_shared_region(const std::wstring& endpoint_guid);
 
     long      refCount_ = 1;
     IUnknown* outer_    = nullptr;
@@ -93,4 +98,10 @@ private:
     uint32_t           channels_       = 0;
     bool               locked_         = false;
     bool               denormals_set_  = false;
+
+    isotone::win::SharedMapping mapping_;
+    isotone::AudioRingWriter    ring_;
+    uint64_t                    ring_token_  = 0;    // process id << 32 | instance serial
+    uint32_t                    applied_seq_ = 0;    // seq of the block last applied
+    isotone::ParamBlock         block_{};            // private copy taken under the seqlock
 };

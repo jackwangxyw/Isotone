@@ -31,8 +31,10 @@ add_subdirectory(core)
 # A MinGW build of the core is still useful as a stand-in for the Linux CI job,
 # so gate on the compiler rather than on the platform.
 if(WIN32 AND MSVC)
+    add_subdirectory(windows/transport)
     add_subdirectory(windows/apo)
     add_subdirectory(windows/measure)
+    add_subdirectory(windows/shmtool)
 endif()
 
 if(ISOTONE_BUILD_TESTS)

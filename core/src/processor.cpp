@@ -72,7 +72,7 @@ void enable_denormal_flushing() {
 void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_frames,
                            uint32_t max_bands) {
     sample_rate_ = sample_rate > 0.0 ? sample_rate : 48000.0;
-    channels_    = std::min(channels, kMaxChannels);
+    channels_    = channels;
     max_frames_  = max_frames;
     max_bands_   = max_bands;
     band_count_  = 0;
@@ -140,8 +140,15 @@ void Processor::set_target(const EqState& state) {
         const Band& in = state.bands[i];
         BandSlot&   b  = bands_[i];
 
-        const double fc    = std::max(clamp_fc(in.fc, sample_rate_), kMinFc);
-        const double width = std::max(in.width, kMinWidth);
+        // A non-finite value keeps the previous target. Fed to a smoother it
+        // would make the current value NaN, and a NaN smoother never recovers,
+        // so one bad write to shared memory would silence the device until the
+        // stream restarted.
+        const double fc     = std::max(clamp_fc(in.fc, sample_rate_), kMinFc);
+        const double width  = std::max(in.width, kMinWidth);
+        const double log_fc = std::isfinite(fc) ? std::log(fc) : b.log_fc_target;
+        const double log_w  = std::isfinite(width) ? std::log(width) : b.log_w_target;
+        const double gain   = std::isfinite(in.gain_db) ? in.gain_db : b.gain_target;
 
         // A change of shape that cannot be interpolated: the filter is a
         // different filter afterwards, so its output is crossfaded instead.
@@ -155,9 +162,9 @@ void Processor::set_target(const EqState& state) {
         if (!b.occupied) {
             // A band appearing where there was none: start it at its target so
             // it does not sweep in from a default, and fade it up from silence.
-            b.log_fc_cur = std::log(fc);
-            b.gain_cur   = in.gain_db;
-            b.log_w_cur  = std::log(width);
+            b.log_fc_cur = log_fc;
+            b.gain_cur   = gain;
+            b.log_w_cur  = log_w;
         }
 
         if (discontinuous || !b.occupied) {
@@ -177,9 +184,9 @@ void Processor::set_target(const EqState& state) {
         b.id           = in.id;
         b.occupied     = true;
 
-        b.log_fc_target = std::log(fc);
-        b.gain_target   = in.gain_db;
-        b.log_w_target  = std::log(width);
+        b.log_fc_target = log_fc;
+        b.gain_target   = gain;
+        b.log_w_target  = log_w;
 
         if (discontinuous || b.fade < 1.0) {
             // Recompute immediately so the crossfade targets the new shape from
@@ -201,9 +208,13 @@ void Processor::set_target(const EqState& state) {
 
     band_count_ = count;
 
-    preamp_target_ = state.preamp_db;
+    if (std::isfinite(state.preamp_db)) {
+        preamp_target_ = state.preamp_db;
+    }
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
-        trim_target_[c] = state.channel_gain_db[c];
+        if (std::isfinite(state.channel_gain_db[c])) {
+            trim_target_[c] = state.channel_gain_db[c];
+        }
     }
     mute_target_   = state.mute ? 0.0 : 1.0;
     mono_target_   = state.mono ? 1.0 : 0.0;
@@ -232,7 +243,7 @@ void Processor::reset() {
 
 void Processor::advance_smoothers(uint32_t) {
     approach(preamp_cur_, preamp_target_, smoothing_coef_);
-    for (uint32_t c = 0; c < channels_; ++c) {
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
         approach(trim_cur_[c], trim_target_[c], smoothing_coef_);
     }
     approach(mute_cur_, mute_target_, smoothing_coef_);
@@ -257,7 +268,7 @@ void Processor::advance_smoothers(uint32_t) {
 
 bool Processor::is_settling() const {
     if (!near_enough(preamp_cur_, preamp_target_, 1e-4)) return true;
-    for (uint32_t c = 0; c < channels_; ++c) {
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
         if (!near_enough(trim_cur_[c], trim_target_[c], 1e-4)) return true;
     }
     if (!near_enough(mute_cur_, mute_target_, 1e-5)) return true;
@@ -294,7 +305,9 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
     }
 
     for (uint32_t c = 0; c < channels_; ++c) {
-        const double post = db_to_linear(trim_cur_[c]) * mute_cur_;
+        // Only the first kMaxChannels channels have a trim; the rest sit at 0 dB.
+        const double trim = c < kMaxChannels ? db_to_linear(trim_cur_[c]) : 1.0;
+        const double post = trim * mute_cur_;
         float* chan = planar[c] + offset;
 
         for (uint32_t n = 0; n < frames; ++n) {
@@ -306,7 +319,7 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
                     continue;
                 }
                 if (b.channels != kAllChannels &&
-                    (b.channels & (ChannelMask{1} << c)) == 0) {
+                    (c >= kMaskChannels || (b.channels & (ChannelMask{1} << c)) == 0)) {
                     continue;
                 }
                 const size_t k = static_cast<size_t>(i) * channels_ + c;

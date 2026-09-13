@@ -233,6 +233,91 @@ TEST_CASE("channel masks route bands to the right channel in the audio path") {
     CHECK(right == doctest::Approx(0.0).epsilon(1e-4));
 }
 
+namespace {
+
+// Runs an interleaved stream of `channels` sines, channel c at amplitude
+// (c + 1) / (channels + 4), and returns each channel's level in dB relative to
+// its own input amplitude. Distinct amplitudes make a channel read from the
+// wrong slot show up as a gain error.
+std::vector<double> interleaved_gains_db(const EqState& s, uint32_t channels, uint32_t bin,
+                                         size_t n) {
+    Processor p;
+    p.initialize(kFs, channels, static_cast<uint32_t>(n));
+    p.set_target(s);
+    p.reset();
+
+    const auto amp = [&](uint32_t c) { return (c + 1.0) / (channels + 4.0); };
+    std::vector<float> buf(n * channels);
+    auto fill = [&](size_t offset) {
+        for (size_t i = 0; i < n; ++i) {
+            const double v = std::sin(2.0 * kPi * bin * static_cast<double>(i + offset) /
+                                      static_cast<double>(n));
+            for (uint32_t c = 0; c < channels; ++c) {
+                buf[i * channels + c] = static_cast<float>(amp(c) * v);
+            }
+        }
+    };
+    fill(0);
+    p.process_interleaved(buf.data(), static_cast<uint32_t>(n));   // settle
+    fill(n);
+    p.process_interleaved(buf.data(), static_cast<uint32_t>(n));
+
+    std::vector<double> gains(channels);
+    std::vector<float> one(n);
+    for (uint32_t c = 0; c < channels; ++c) {
+        for (size_t i = 0; i < n; ++i) one[i] = buf[i * channels + c];
+        gains[c] = 20.0 * std::log10(amplitude_at_bin(one, bin) / amp(c));
+    }
+    return gains;
+}
+
+}  // namespace
+
+TEST_CASE("an interleaved stream wider than the trim table is processed channel by channel") {
+    // 7.1.4 is twelve channels. The processor must walk the buffer with the
+    // stream's real stride and filter every channel, not just the ones that can
+    // carry a trim in the param block.
+    constexpr size_t kN = 8192;
+    const uint32_t bin = 171;
+    const double hz = bin_to_hz(bin, kN);
+
+    EqState s;
+    s.bands.push_back(peaking(hz, -12.0, 4.0, ChannelMask{1} << 10));
+    s.bands.push_back(peaking(hz, -3.0, 4.0));   // every channel
+    s.channel_gain_db[3] = -6.0;
+
+    const std::vector<double> gains = interleaved_gains_db(s, 12, bin, kN);
+    for (uint32_t c = 0; c < 12; ++c) {
+        double expected = 0.0;
+        magnitude_db(s, c, &hz, 1, kFs, &expected);
+        CAPTURE(c);
+        CHECK(gains[c] == doctest::Approx(expected).epsilon(0.0).scale(1.0).epsilon(1e-3));
+    }
+    CHECK(gains[10] == doctest::Approx(-15.0).epsilon(1e-3));
+    CHECK(gains[3] == doctest::Approx(-9.0).epsilon(1e-3));
+    CHECK(gains[11] == doctest::Approx(-3.0).epsilon(1e-3));
+}
+
+TEST_CASE("channels past the mask width are reached only by all-channel bands") {
+    // A ChannelMask names channels 0 to 31. On x86 a 32-bit shift by 33 wraps
+    // to a shift by 1, so a careless mask test would put channel 1's band on
+    // channel 33 as well.
+    constexpr size_t kN = 8192;
+    const uint32_t bin = 171;
+    const double hz = bin_to_hz(bin, kN);
+
+    EqState s;
+    s.bands.push_back(peaking(hz, -12.0, 4.0, ChannelMask{1} << 1));
+
+    const std::vector<double> gains = interleaved_gains_db(s, 34, bin, kN);
+    CHECK(gains[1] == doctest::Approx(-12.0).epsilon(1e-3));
+    CHECK(gains[33] == doctest::Approx(0.0).epsilon(1e-3));
+
+    double curve = 1.0;
+    magnitude_db(s, 33, &hz, 1, kFs, &curve);
+    CHECK(curve == doctest::Approx(0.0).epsilon(1e-9));
+}
+
 TEST_CASE("a gain ramp during a sine produces no click") {
     // The hard requirement from plan 4.4. A sine plays while gain sweeps from
     // 0 to -12 dB over 100 ms. The output is checked sample by sample: a click
