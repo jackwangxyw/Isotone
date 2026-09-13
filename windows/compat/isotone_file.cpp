@@ -248,6 +248,7 @@ std::string format_device_block(const DeviceConfig& given) {
     curve.speakers = SpeakerSetup{};
     ApoFormatOptions options;
     options.layout = device.layout;
+    options.sample_rate = device.sample_rate;
     body << format_apo_config(curve, options);
 
     const std::string output = output_lines(sp, device.layout, names);

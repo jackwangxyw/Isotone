@@ -64,7 +64,10 @@ Settings pages share one header with tabs: General, Appearance, Shortcuts, About
   reimplemented in QML.
 - Parameters go out through `param_block_write` on the shared region; spectrum
   audio comes in through `audio_ring_read`. Compat-backend devices use
-  `windows/compat` (Isotone.txt) and WASAPI loopback.
+  `windows/compat` (Isotone.txt) and WASAPI loopback. Each device's block is
+  written with its current sample rate (`DeviceConfig::sample_rate`) and
+  rewritten when the device format changes, so out-of-range frequencies are
+  clamped as the processor clamps them.
 - The EQ-by-ear tone is native audio (WASAPI render, as `windows/measure` does),
   not Web Audio.
 - Device operations shell out to `isotone-devicetool` elevated.

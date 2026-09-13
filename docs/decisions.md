@@ -1209,6 +1209,84 @@ layout's count, which match upstream `ChannelHelper::getChannelNames`.
 Not yet run live: the rebuilt IsoAPO DLL is not staged, so the audio path
 changes (silent buffers, child hosting) have only run in the self-test.
 
+## 2026-09-13: The reviewed build measured live, reinstalled, two more fixes
+
+The owner staged the reviewed IsoAPO DLL (`d02eddc`) and allowed the Equalizer
+APO backend runs to change the live `config.txt` as long as each is reverted.
+Every run detached in a `finally` and checked `config.txt` against the snapshot
+before and after; it matched each time.
+
+**Before reinstalling** (IsoAPO in MFX, Equalizer APO's pre-mix class still in
+SFX):
+
+| Check | Result |
+|---|---|
+| 7.1 routing and bass management, 7 cases, IsoAPO | worst 0.0017 dB, 0.015° |
+| same 7 cases through Isotone.txt, plus bypass | worst 0.0002 dB, 0.002° |
+| negative control, both backends | every capture matched only its own case |
+| curve through the region, 14 frequencies × 8 channels vs scipy | 0.0001 dB rms |
+| delay, polarity, speaker mute, both backends | exact; one Equalizer APO 0.17° miss did not repeat in 6 runs at 2 and 8 channels |
+| 300 ms lip-sync tail through silent buffers | full tone length, then exact zeros |
+| band moved L to R during a tone | worst step 0.05 % of peak |
+| `80.1250` written for 80.125 Hz | -12.000 dB at 80.125 Hz in Equalizer APO |
+| devicetool `test` on both cables; `roundtrip` on every present output | pass |
+| simulated handoffs, Microsoft WM and Realtek classes, 4 outputs × hosted/unhosted/unregistered | 24 of 24; every vendor APO placed once, or nowhere when unhosted |
+
+**Reinstall.** The owner ran, elevated, `isotone-devicetool uninstall` then
+`install --replace-equalizerapo` on CABLE Input. Uninstall wrote Equalizer APO's
+classes back to `,5` and `,6` and deleted IsoAPO's record; install put IsoAPO in
+`,6`, removed Equalizer APO from `,5`, wrote the record and a `.reg` backup, and
+passed its registration checks. `status` now reports `native` (it was
+`conflict`). The owner also deleted the leftover `Isotone.txt` and
+`config.txt.isotone-backup`.
+
+**The 6.2 dB input offset is explained.** Since stage 3 the tone reached IsoAPO
+6.2 dB low. With Equalizer APO's pre-mix class gone from SFX, the ring reads
+-14.999 dB for a -15 dB design: that class was running `peace.txt` (-5 dB preamp,
+a 100 Hz high-pass, shelves) on the render side ahead of IsoAPO. It answers the
+open question in "State of the owner's machine".
+
+**After reinstalling**, two IsoAPO bass management cases failed at 40 Hz with the
+same loss on all 8 channels and exact phase: the Windows engine's limiter. With
+the high-pass gone, the summed LFE reached 1.21 and 1.89 of full scale; the
+losses were 1.78 and 5.63 dB against 1.68 and 5.52 dB of overshoot, the same
+0.1 dB margin each time. At 8 dB lower level all cases pass (worst 0.0010 dB).
+Three times afterwards "everything" lost 0.30 or 0.65 dB uniformly at one
+frequency, with IsoAPO's output under full scale; it did not recur in 22 further
+runs, in any run that also recorded the ring, and never in the Equalizer APO
+backend. Where the ring was recorded, IsoAPO's output matched the processor to
+0.000 dB. Unexplained.
+
+**Fixes:**
+- **Mute and speaker mute end on exact zero.** They approached zero exponentially
+  and reached it only when samples underflowed, about 1.5 s in audiodg (the ring
+  read 1e-38 to 4e-30). They now snap within 1e-6 of their target, as the
+  routing and bass gains already did. New test in `test_speakers.cpp`; it fails
+  without the snap (24000 nonzero samples in the second half-second).
+- **The Equalizer APO backend writes the frequency the processor designs.**
+  Upstream does not clamp: a band above Nyquist makes its biquad unstable and
+  Equalizer APO outputs silence (measured: -170 dB at every frequency for a band
+  read as 80125 Hz), where IsoAPO designs it at 0.95 of Nyquist.
+  `ApoFormatOptions::sample_rate` and `DeviceConfig::sample_rate` clamp with
+  `clamp_fc`; 0 leaves the value as entered, which exports keep. `isotone-compat
+  apply --rate HZ`. Live: with `--rate 48000` the file says `Fc 22800 Hz` and the
+  capture matches that filter to 0.001 dB at 1, 10, 16 and 20 kHz. Tests in
+  `test_hardening.cpp` and `test_compat.cpp`; both fail with the clamp removed.
+  A shelf's corner frequency, which the processor clamps a second time, is not
+  clamped in the text; that differs only for shelves within an octave of Nyquist.
+
+**Open, for the owner:**
+- **Bass management headroom.** Summing every small speaker into the sub can
+  exceed full scale on ordinary material; on IsoAPO the engine limiter then
+  turns every channel down together. Auto preamp does not account for it.
+- **Equalizer APO's own install record.** `--replace-equalizerapo` leaves
+  `HKLM\SOFTWARE\EqualizerAPO\Child APOs\{guid}`, and devicetool's uninstall uses
+  it. The 2026-09-13 decision to uninstall Equalizer APO as a whole is not
+  implemented; until it is, Equalizer APO's own uninstaller could write its
+  records over IsoAPO.
+
+Not yet live: mute's snap (the staged DLL predates it).
+
 ---
 
 # Where things stand (end of 2026-09-13)
@@ -1281,14 +1359,14 @@ can be built UI-first.
 
 ## State of the owner's machine
 
-**IsoAPO is installed on CABLE Input only**, by devicetool, in MFX (`,6`),
-replacing Equalizer APO's post-mix class. SFX (`,5`) still holds Equalizer
-APO's pre-mix class; whether that applies `peace.txt` on the render side has not
-been measured. CABLE Output, the capture side, still has Equalizer APO. Every
+**IsoAPO is installed on CABLE Input only**, by devicetool with
+`--replace-equalizerapo`, in MFX (`,6`). SFX (`,5`) is empty: Equalizer APO no
+longer runs on CABLE Input (its pre-mix class there had been applying
+`peace.txt`). CABLE Output, the capture side, still has Equalizer APO. Every
 other endpoint is untouched. A stream opened on CABLE Input with no region
 already held gets the default seed, a -12 dB band at 1 kHz. Nothing the owner
-listens to routes through the cable. The staged DLL is the 2026-09-12 build with
-param block v4.
+listens to routes through the cable. The staged DLL is the `d02eddc` build
+(param block v4), without the mute snap.
 
 **CABLE Input and CABLE Output are 7.1** (8 channels, 24-bit, 48 kHz, `0x63F`),
 set for the multichannel measurement; they were 2 channels, 24-bit, `0x3`.

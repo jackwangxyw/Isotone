@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <sstream>
 
+#include "isotone/biquad.h"
+
 namespace isotone {
 namespace {
 
@@ -593,6 +595,9 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
     // A channel the layout does not have is still written, by number, so the
     // band is not lost; Equalizer APO reports it as out of range on that device.
     const std::vector<std::string> channel_names = apo_channel_names(options.layout);
+    const auto fc_text = [&](const Band& b) {
+        return format_apo_frequency(options.sample_rate > 0.0 ? clamp_fc(b.fc, options.sample_rate) : b.fc);
+    };
     const auto channel_name = [&](uint32_t c) {
         return c < channel_names.size() ? channel_names[c] : std::to_string(c + 1);
     };
@@ -644,7 +649,7 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             if (!b.enabled) {
                 if (options.write_disabled_as_none) {
                     out << "Filter " << index++ << ": OFF " << token_for(b.type, b.shelf_corner)
-                        << " Fc " << format_apo_frequency(b.fc) << " Hz";
+                        << " Fc " << fc_text(b) << " Hz";
                     if (type_uses_gain(b.type)) {
                         out << " Gain " << format_double(b.gain_db) << " dB";
                     }
@@ -658,7 +663,7 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
                 out << format_double(b.width) << " dB ";
             }
-            out << "Fc " << format_apo_frequency(b.fc) << " Hz";
+            out << "Fc " << fc_text(b) << " Hz";
             if (type_uses_gain(b.type)) {
                 out << " Gain " << format_double(b.gain_db) << " dB";
             }

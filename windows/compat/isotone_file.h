@@ -64,6 +64,7 @@ namespace isotone::compat {
 struct DeviceConfig {
     std::string   endpoint_guid;   // with or without braces
     ChannelLayout layout;          // the device's mix format: channel count and speaker mask
+    double        sample_rate = 0; // the device's rate; 0 writes frequencies unclamped
     EqState       state;
 };
 

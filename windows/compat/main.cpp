@@ -7,7 +7,7 @@
 //   isotone-compat inspect  [root]
 //   isotone-compat attach   [root]
 //   isotone-compat detach   [root]
-//   isotone-compat apply    [root] --device <guid> [--channels N --mask 0xMASK]
+//   isotone-compat apply    [root] --device <guid> [--channels N --mask 0xMASK] [--rate HZ]
 //                           [--bypass] [--mute] [--speakers "key=value ..."] <config.txt | ->
 //   isotone-compat show     [root] [--channels N --mask 0xMASK]
 //   isotone-compat loopback --render <guid> --seconds <s> <out.wav>
@@ -58,7 +58,7 @@ int usage() {
                  "  isotone-compat attach   [--root DIR | --real-install]\n"
                  "  isotone-compat detach   [--root DIR | --real-install]\n"
                  "  isotone-compat apply    [--root DIR | --real-install] --device GUID\n"
-                 "                          [--channels N --mask 0xMASK] [--bypass] [--mute] [--speakers SETTINGS]\n"
+                 "                          [--channels N --mask 0xMASK] [--rate HZ] [--bypass] [--mute] [--speakers SETTINGS]\n"
                  "                          <config.txt | ->\n"
                  "  isotone-compat show     [--root DIR | --real-install] [--channels N --mask 0xMASK]\n"
                  "  isotone-compat loopback --render GUID --seconds S <out.wav>\n");
@@ -115,6 +115,7 @@ struct Args {
     std::string root, device, mask, render, speakers;
     uint32_t channels = 0;
     double seconds = 0.0;
+    double rate = 0.0;
     bool real_install = false, bypass = false, mute = false, bad = false;
 };
 
@@ -136,6 +137,7 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--mask") a.mask = value();
         else if (s == "--render") a.render = value();
         else if (s == "--seconds") a.seconds = std::strtod(value().c_str(), nullptr);
+        else if (s == "--rate") a.rate = std::strtod(value().c_str(), nullptr);
         else if (s == "--bypass") a.bypass = true;
         else if (s == "--mute") a.mute = true;
         else if (s == "--speakers") a.speakers = value();
@@ -373,6 +375,7 @@ int main(int argc, char** argv) {
         const size_t open = a.device.rfind('{');
         device.endpoint_guid = open == std::string::npos ? a.device : a.device.substr(open);
         device.layout = layout_from(a);
+        device.sample_rate = a.rate;
         ApoParseResult parsed = parse_apo_config(text, device.layout);
         device.state = parsed.state;
         device.state.bypass = a.bypass;

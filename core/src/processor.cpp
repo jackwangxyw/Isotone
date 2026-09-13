@@ -459,7 +459,10 @@ void Processor::advance_smoothers(uint32_t frames) {
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         approach(trim_cur_[c], trim_target_[c], coef);
     }
+    // Mute ends exactly on its target, as the routing and bass gains do, so a
+    // muted output is digital silence rather than a decaying fraction.
     approach(mute_cur_, mute_target_, coef);
+    if (near_enough(mute_cur_, mute_target_, 1e-6)) mute_cur_ = mute_target_;
 
     bypass_cur_ += std::clamp(bypass_target_ - bypass_cur_, -fstep, fstep);
 
@@ -541,6 +544,7 @@ void Processor::advance_smoothers(uint32_t frames) {
     // Polarity and speaker mute.
     for (uint32_t c = 0; c < channels_; ++c) {
         approach(chan_cur_[c], chan_target_[c], coef);
+        if (near_enough(chan_cur_[c], chan_target_[c], 1e-6)) chan_cur_[c] = chan_target_[c];
     }
 
     // A delay change starts when the previous one has finished fading.

@@ -399,6 +399,25 @@ TEST_CASE("frequencies are written so Equalizer APO's Room EQ Wizard rule cannot
     CHECK(parse_apo_config("Filter 1: ON PK Fc 1.000 Hz Gain 1 dB Q 1\n").state.bands[0].fc == doctest::Approx(1000.0));
 }
 
+TEST_CASE("for a device's sample rate, frequencies are written as the processor designs them") {
+    // Upstream does not clamp: a band above Nyquist makes its biquad unstable
+    // and Equalizer APO outputs silence, where the processor designs it at
+    // 0.95 of Nyquist.
+    EqState s;
+    s.bands.push_back(peaking(80125.0, -12.0, 2.0));
+    s.bands.push_back(peaking(3.0, 3.0, 1.0));
+    s.bands.push_back(peaking(1000.0, 3.0, 1.0));
+    ApoFormatOptions device;
+    device.sample_rate = 48000.0;
+    const ApoParseResult r = parse_apo_config(format_apo_config(s, device));
+    REQUIRE(r.state.bands.size() == 3);
+    CHECK(r.state.bands[0].fc == doctest::Approx(clamp_fc(80125.0, 48000.0)));
+    CHECK(r.state.bands[1].fc == doctest::Approx(kMinFc));
+    CHECK(r.state.bands[2].fc == doctest::Approx(1000.0));
+    // An export is for no particular device and keeps what was entered.
+    CHECK(parse_apo_config(format_apo_config(s)).state.bands[0].fc == doctest::Approx(80125.0));
+}
+
 TEST_CASE("numbers are read and written with a period whatever the C locale") {
     const char* previous = std::setlocale(LC_NUMERIC, nullptr);
     const std::string saved = previous ? previous : "C";

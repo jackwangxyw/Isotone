@@ -81,6 +81,12 @@ struct ApoFormatOptions {
     // Written above the filters. Each line is prefixed with '# '.
     std::string header_comment;
 
+    // The rate of the device the text is for, or 0 for an export. With a rate,
+    // each frequency is written as the processor designs it (clamp_fc):
+    // upstream does not clamp, and a band above Nyquist makes its biquad
+    // unstable, which Equalizer APO plays as silence.
+    double sample_rate = 0.0;
+
     // Equalizer APO numbers filters from 1 and Peace leaves gaps; we always
     // write a dense sequence.
     bool write_disabled_as_none = true;

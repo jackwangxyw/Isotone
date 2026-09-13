@@ -694,6 +694,17 @@ TEST_CASE("the text Isotone writes does what the processor does") {
     CHECK(parsed[0].state.bands.size() == 3);
 }
 
+TEST_CASE("a band beyond the device's Nyquist is written at the frequency the processor designs") {
+    DeviceConfig d = stereo_device();
+    d.sample_rate = 44100.0;
+    d.state.bands.clear();
+    d.state.bands.push_back(band(FilterType::Peaking, 30000, -6, 1, WidthMode::Q));
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
+    REQUIRE(parsed.size() == 1);
+    REQUIRE(parsed[0].state.bands.size() == 1);
+    CHECK(parsed[0].state.bands[0].fc == doctest::Approx(clamp_fc(30000, 44100.0)));
+}
+
 TEST_CASE("updating one device keeps every other byte of the file") {
     DeviceConfig a = stereo_device();
     DeviceConfig b = height_device();

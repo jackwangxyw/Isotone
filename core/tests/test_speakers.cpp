@@ -181,6 +181,31 @@ TEST_CASE("a muted speaker goes silent and the others do not") {
     CHECK(out[0][1000] == doctest::Approx(0.5f));
 }
 
+TEST_CASE("muting while audio plays fades to exact zeros, speaker mute and mute alike") {
+    // The fade is exponential; without an end it only reaches zero when the
+    // sample underflows, which took about 1.5 s in audiodg.
+    auto sine = [](uint32_t, size_t i) { return 0.5 * std::sin(2.0 * kPi * 1000.0 * static_cast<double>(i) / kFs); };
+    for (const bool whole : {false, true}) {
+        CAPTURE(whole);
+        EqState s;
+        Processor p = make(2, 0x3, s);
+        run(p, 4800, sine);
+        if (whole) {
+            s.mute = true;
+        } else {
+            s.speakers.muted = ChannelMask{1} << 1;
+        }
+        p.set_target(s);
+        const auto out = run(p, 48000, sine, 256, 4800);
+        // Exact silence well within a second, and the fade itself does not click.
+        size_t nonzero = 0;
+        for (size_t i = 24000; i < out[1].size(); ++i) nonzero += out[1][i] != 0.0f;
+        CHECK(nonzero == 0);
+        CHECK(worst_step(out[1]) < 2.0 * std::sin(kPi * 1000.0 / kFs) * 0.5 * 1.10);
+        if (!whole) CHECK(std::abs(out[0][40000]) > 0.1);
+    }
+}
+
 TEST_CASE("swaps move whole speakers: left with right, front with rear") {
     // A different constant on every channel identifies where each one lands.
     auto ident = [](uint32_t c, size_t) { return 0.1 * (c + 1); };
