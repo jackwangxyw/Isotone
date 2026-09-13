@@ -72,6 +72,14 @@ double clamp_fc(double fc, double sample_rate) {
     return std::clamp(fc, kMinFc, std::max(kMinFc, max_fc));
 }
 
+BiquadCoeffs butterworth2(FilterType type, double fc, double sample_rate) {
+    Band b;
+    b.type  = type;
+    b.fc    = fc;
+    b.width = std::sqrt(0.5);
+    return design(b, sample_rate);
+}
+
 BiquadCoeffs design(const Band& band, double sample_rate) {
     if (!band.enabled || !(sample_rate > 0.0) || !finite(sample_rate)) {
         return BiquadCoeffs::identity();

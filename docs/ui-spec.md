@@ -143,7 +143,8 @@ small labels 11–12.
 
 **Top bar** (76 px): preset name + chevron, which opens the presets popover
 (switch, rename, duplicate, delete, new, save, import, export). Under the name
-only the output name, and only when the sidebar is collapsed. Right side: Preamp value + Auto; L / R /
+only the output name, and only when the sidebar is collapsed. Right side: Preamp value + Auto (Auto sets
+preamp to −`composite_peak_db` with the device's speaker mask, so it covers routing and bass management); L / R /
 L+R (stereo) or "Showing: All speakers" group picker (surround); Spectrum On /
 Off; EQ toggle. The spectrum is the processed output; there is no pre-EQ view.
 

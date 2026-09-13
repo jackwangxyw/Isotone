@@ -136,7 +136,7 @@ TEST_CASE("composite_peak_db finds a narrow peak between grid points") {
     EqState s;
     s.bands.push_back(peaking(3333.0, 9.0, 30.0));
     const std::vector<double> grid = log_grid(10.0, kFs * 0.5 * 0.95, 256);
-    const double peak = composite_peak_db(s, 2, grid.data(), grid.size(), kFs);
+    const double peak = composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs);
     CHECK(peak == doctest::Approx(9.0).epsilon(1e-6));
 }
 
@@ -145,11 +145,11 @@ TEST_CASE("composite_peak_db accounts for summed bands and channel trims") {
     s.bands.push_back(peaking(1000.0, 4.0, 1.0));
     s.bands.push_back(peaking(1000.0, 4.0, 1.0));
     const std::vector<double> grid = log_grid(10.0, 22800.0, 512);
-    CHECK(composite_peak_db(s, 2, grid.data(), grid.size(), kFs) ==
+    CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) ==
           doctest::Approx(8.0).epsilon(1e-6));
 
     s.channel_gain_db[1] = 3.0;
-    CHECK(composite_peak_db(s, 2, grid.data(), grid.size(), kFs) ==
+    CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) ==
           doctest::Approx(11.0).epsilon(1e-6));
 }
 
@@ -159,18 +159,18 @@ TEST_CASE("composite_peak_db looks at every channel of a wide layout") {
     EqState s;
     s.bands.push_back(peaking(1000.0, 6.0, 1.0, ChannelMask{1} << 9));
     const std::vector<double> grid = log_grid(10.0, 22800.0, 512);
-    CHECK(composite_peak_db(s, 12, grid.data(), grid.size(), kFs) ==
+    CHECK(composite_peak_db(s, 12, 0x2D63F, grid.data(), grid.size(), kFs) ==
           doctest::Approx(6.0).epsilon(1e-6));
 }
 
 TEST_CASE("composite_peak_db is zero for a flat or bypassed state") {
     const std::vector<double> grid = log_grid(10.0, 22800.0, 128);
     EqState s;
-    CHECK(composite_peak_db(s, 2, grid.data(), grid.size(), kFs) == doctest::Approx(0.0));
+    CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) == doctest::Approx(0.0));
 
     s.bands.push_back(peaking(1000.0, 12.0, 1.0));
     s.bypass = true;
-    CHECK(composite_peak_db(s, 2, grid.data(), grid.size(), kFs) == doctest::Approx(0.0));
+    CHECK(composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs) == doctest::Approx(0.0));
 }
 
 TEST_CASE("phase of a cascade is the sum of the parts") {
@@ -242,6 +242,6 @@ TEST_CASE("a realistic AutoEq-shaped preset evaluates sanely") {
     }
     // Preamp of -6.1 dB against a composite peak: the result should not clip far
     // above 0 dB anywhere.
-    const double peak = composite_peak_db(s, 2, grid.data(), grid.size(), kFs);
+    const double peak = composite_peak_db(s, 2, 0x3, grid.data(), grid.size(), kFs);
     CHECK(peak + s.preamp_db < 1.0);
 }

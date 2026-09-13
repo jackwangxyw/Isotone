@@ -29,11 +29,15 @@ void phase_deg(const EqState& state, uint32_t channel, const double* freqs, size
 void band_magnitude_db(const Band& band, const double* freqs, size_t n, double sample_rate,
                        double* out);
 
-// Peak of the composite magnitude over all channels, evaluated on `freqs` plus
-// every band centre frequency (narrow high-Q peaks fall between grid points).
-// This is the quantity auto-preamp negates (plan 4.6).
-double composite_peak_db(const EqState& state, uint32_t channels, const double* freqs, size_t n,
-                         double sample_rate);
+// Peak output level over all channels, relative to a full-scale input, evaluated
+// on `freqs` plus every band centre frequency (narrow high-Q peaks fall between
+// grid points). Includes the speaker setup: routing and bass management sum
+// channels, so an output can reach the sum of every path into it (the sub takes
+// the bass of each small speaker). Per output and frequency this is the most any
+// set of full-scale inputs can produce, reached when they are in phase. Preamp
+// is left out. This is the quantity auto-preamp negates (plan 4.6).
+double composite_peak_db(const EqState& state, uint32_t channels, uint32_t speaker_mask,
+                         const double* freqs, size_t n, double sample_rate);
 
 // `count` log-spaced points from `f_lo` to `f_hi` inclusive.
 std::vector<double> log_grid(double f_lo, double f_hi, size_t count);

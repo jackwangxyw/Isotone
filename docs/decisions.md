@@ -1287,6 +1287,59 @@ backend. Where the ring was recorded, IsoAPO's output matched the processor to
 
 Not yet live: mute's snap (the staged DLL predates it).
 
+## 2026-09-13: Headroom for speaker routing; IsoAPO takes Equalizer APO's record
+
+Mute's snap measured live after the owner staged the DLL: a speaker-muted channel
+has 0 nonzero samples in a second (17,844 before). Owner's decisions on the two
+open items above: both fixed as proposed.
+
+**Auto preamp covers routing and bass management.** `composite_peak_db` now
+takes the speaker mask and models the speaker stages as the processor runs them:
+routing matrix, then each small speaker's Linkwitz-Riley high-pass and the LFE
+channel's sum of every small speaker's low-pass plus its own low-passed content.
+Per output and frequency it adds the magnitude of every path in, the most any
+full-scale inputs can reach (paths from different inputs can be brought into
+phase). Muted outputs need no headroom and are skipped. `butterworth2` moved
+from the processor to `biquad.h` so both use the same sections. The UI passes the
+device's speaker mask. Upmix with every speaker small peaks at +21.0 dB at 40 Hz
+on the LFE, so auto preamp would be -21 dB there.
+
+Test (`test_speakers.cpp`): at 40, 100 and 1000 Hz the processor's loudest output,
+with the LFE input's phase searched in 10° steps, is never above the bound and
+within 0.004 dB of it. Four checks fail with the speaker terms removed.
+Identical in-phase inputs are not the worst case: at 100 Hz they fall 0.78 dB
+short, because the LFE's own 120 Hz low-pass and the 80 Hz crossover differ in
+phase.
+
+**Correction to the open item above.** Equalizer APO's uninstaller could not
+write over IsoAPO: it runs `DeviceSelector /u`, which uninstalls only endpoints
+where `DeviceAPOInfo::isInstalled` is true, meaning its classes are in the
+effect slots (read in upstream `Setup.nsi`, `DeviceSelector/main.cpp`,
+`DeviceAPOInfo.cpp` at the pinned commit). After a replacement they are not.
+Device Selector would only do so if the user ticked the device again. The
+leftover record was still wrong in two ways: IsoAPO's uninstall restored
+Equalizer APO rather than the device's own APOs, and the record outlived
+Equalizer APO.
+
+**Replacing Equalizer APO takes its record over.** For each slot where IsoAPO's
+record says it replaced an Equalizer APO class, IsoAPO's record now holds what
+Equalizer APO's record says was there before (a vendor CLSID, or `!VALUE`), and
+Equalizer APO's record for the endpoint is deleted. Uninstalling IsoAPO restores
+the device as it was before either EQ, as Equalizer APO's own uninstall would.
+`install --replace-equalizerapo` on an endpoint an earlier replacement left a
+record for does only the takeover, which migrates CABLE Input. `status` reports
+Equalizer APO's uninstaller (`equalizerapo.uninstaller`) for the UI to run once
+the user has moved every device they want to IsoAPO; running it is left to the
+UI and the user, not devicetool.
+
+`roundtrip` now expects, when replacing, the pre-Equalizer APO slots after
+uninstall, checks the record is gone, and runs its second cycle (driver update,
+repair) from the state the first uninstall left. 32 dry runs pass: 4 present
+outputs × plain, replacing, and 6 simulations (Microsoft WM and Realtek classes,
+hosted, unhosted, Equalizer APO unregistered). With the takeover disabled the
+replacing runs fail and the plain ones do not. Dry run on CABLE Input: its record
+takes `!VALUE` for SFX and MFX and Equalizer APO's record is deleted.
+
 ---
 
 # Where things stand (end of 2026-09-13)

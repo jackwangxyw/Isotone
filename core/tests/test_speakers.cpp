@@ -16,6 +16,7 @@
 #include "isotone/biquad.h"
 #include "isotone/param_block.h"
 #include "isotone/processor.h"
+#include "isotone/response.h"
 #include "isotone/speakers.h"
 
 using namespace isotone;
@@ -331,6 +332,45 @@ TEST_CASE("bass management: a small speaker and the sub sum flat through the cro
         for (size_t i = 0; i < kN; ++i) other[i] = out[FR][i];
         CHECK(amplitude(other, bin) < 1e-6);   // a speaker that is not small gets none of it
     }
+}
+
+TEST_CASE("the peak auto preamp negates includes routing and bass management") {
+    // Upmix with every speaker small: the sub carries the bass of all seven
+    // speakers at once, far above any input's level. The worst case is every
+    // path into one output arriving in phase. The seven redirected speakers
+    // share the crossover's phase; the LFE channel's own content goes through
+    // its own low-pass, so its input's phase is searched to line it up.
+    // No bands: their centres are always evaluated, which would move the peak
+    // away from the one frequency tested.
+    EqState s;
+    s.speakers.upmix = Upmix::All;
+    s.speakers.bass_management = true;
+    s.speakers.small_speakers = 0xF7;
+    s.channel_gain_db[6] = 2.0;
+    for (const double f : {40.0, 100.0, 1000.0}) {
+        CAPTURE(f);
+        const double bound = composite_peak_db(s, 8, kMask71, &f, 1, kFs);
+        double loudest = 0.0;
+        for (int step = 0; step < 36; ++step) {
+            const double lfe_phase = 2.0 * kPi * step / 36.0;
+            Processor p = make(8, kMask71, s, 1024);
+            const auto out = run(p, 48000, [f, lfe_phase](uint32_t c, size_t i) {
+                return std::sin(2.0 * kPi * f * static_cast<double>(i) / kFs + (c == 3 ? lfe_phase : 0.0));
+            });
+            for (uint32_t c = 0; c < 8; ++c) {
+                const std::vector<double> tail(out[c].begin() + 24000, out[c].end());
+                loudest = std::max(loudest, amplitude(tail, static_cast<uint32_t>(f / 2.0)));
+            }
+        }
+        CHECK(db(loudest) <= bound + 0.001);
+        CHECK(bound - db(loudest) < 0.03);
+    }
+    // Far above 0 dB: this is what the engine's limiter caught at 7.1.
+    const double f40 = 40.0;
+    CHECK(composite_peak_db(s, 8, kMask71, &f40, 1, kFs) > 12.0);
+    // A muted output plays nothing, so it needs no headroom.
+    s.speakers.muted = ChannelMask{1} << 3;
+    CHECK(composite_peak_db(s, 8, kMask71, &f40, 1, kFs) < 0.0);
 }
 
 TEST_CASE("the LFE low-pass filters the LFE channel's own content") {

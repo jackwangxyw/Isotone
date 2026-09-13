@@ -35,6 +35,10 @@ inline constexpr double kMaxFcOfNyquist = 0.95;
 // Clamp fc into the range this sample rate can represent.
 double clamp_fc(double fc, double sample_rate);
 
+// A second-order Butterworth section; two in series are a 24 dB/oct
+// Linkwitz-Riley filter, as bass management uses.
+BiquadCoeffs butterworth2(FilterType type, double fc, double sample_rate);
+
 // Design a single biquad. Returns identity coefficients for a disabled band, a
 // non-finite parameter, or a non-positive sample rate.
 BiquadCoeffs design(const Band& band, double sample_rate);

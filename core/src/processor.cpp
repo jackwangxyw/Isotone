@@ -53,14 +53,6 @@ inline double step(const BiquadCoeffs& c, double& s1, double& s2, double x) {
     return y;
 }
 
-BiquadCoeffs butterworth2(FilterType type, double fc, double sample_rate) {
-    Band b;
-    b.type  = type;
-    b.fc    = fc;
-    b.width = std::sqrt(0.5);
-    return design(b, sample_rate);
-}
-
 void set_identity(double m[kMaxChannels][kMaxChannels]) {
     for (uint32_t o = 0; o < kMaxChannels; ++o) {
         for (uint32_t i = 0; i < kMaxChannels; ++i) {

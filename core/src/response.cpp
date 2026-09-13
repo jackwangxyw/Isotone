@@ -8,7 +8,10 @@
 #include <complex>
 #include <limits>
 
+#include "isotone/apo_config.h"
 #include "isotone/biquad.h"
+#include "isotone/processor.h"
+#include "isotone/speakers.h"
 
 namespace isotone {
 namespace {
@@ -85,15 +88,63 @@ void band_magnitude_db(const Band& band, const double* freqs, size_t n, double s
     }
 }
 
-double composite_peak_db(const EqState& state, uint32_t channels, const double* freqs, size_t n,
-                         double sample_rate) {
+double composite_peak_db(const EqState& state, uint32_t channels, uint32_t speaker_mask,
+                         const double* freqs, size_t n, double sample_rate) {
     if (state.bypass || channels == 0) {
         return 0.0;
     }
     double peak = -std::numeric_limits<double>::infinity();
 
+    // The speaker stages as the processor runs them, before the bands: routing,
+    // then bass management (a small speaker keeps what is above the crossover
+    // and the LFE channel adds what is below, to its own low-passed content).
+    const SpeakerSetup& sp = state.speakers;
+    const uint32_t mask = speaker_mask != 0 ? speaker_mask : default_speaker_mask(channels);
+    const uint32_t routed = std::min(channels, kMaxChannels);
+    double routing[kMaxChannels][kMaxChannels];
+    routing_matrix(sp, mask, channels, routing);
+    const int lfe = speaker_channel(mask, channels, kSpeakerLowFrequency);
+    const bool managed = sp.bass_management && lfe >= 0;
+    const auto bass_hz = [](double hz, double fallback) {
+        return std::clamp(std::isfinite(hz) ? hz : fallback, kMinBassHz, kMaxBassHz);
+    };
+    const BiquadCoeffs xover_lp = butterworth2(FilterType::LowPass, bass_hz(sp.crossover_hz, 80.0), sample_rate);
+    const BiquadCoeffs xover_hp = butterworth2(FilterType::HighPass, bass_hz(sp.crossover_hz, 80.0), sample_rate);
+    const BiquadCoeffs lfe_lp = butterworth2(FilterType::LowPass, bass_hz(sp.lfe_lowpass_hz, 120.0), sample_rate);
+    const auto small = [&](uint32_t c) {
+        return managed && static_cast<int>(c) != lfe && (sp.small_speakers & (ChannelMask{1} << c)) != 0;
+    };
+
+    // Sum over inputs of the magnitude of every path from that input into `ch`.
+    auto speaker_gain = [&](uint32_t ch, double freq) {
+        if (ch >= routed) {
+            return 1.0;
+        }
+        const std::complex<double> lp = std::pow(response(xover_lp, freq, sample_rate), 2);
+        const std::complex<double> hp = std::pow(response(xover_hp, freq, sample_rate), 2);
+        const std::complex<double> lfe_own = std::pow(response(lfe_lp, freq, sample_rate), 2);
+        double sum = 0.0;
+        for (uint32_t i = 0; i < routed; ++i) {
+            std::complex<double> path = routing[ch][i];
+            if (small(ch)) {
+                path *= hp;
+            } else if (managed && static_cast<int>(ch) == lfe) {
+                double redirected = 0.0;
+                for (uint32_t c = 0; c < routed; ++c) {
+                    if (small(c)) redirected += routing[c][i];
+                }
+                path = path * lfe_own + redirected * lp;
+            }
+            sum += std::abs(path);
+        }
+        return sum;
+    };
+
     auto consider = [&](uint32_t ch, double freq) {
-        const double mag = std::abs(composite_at(state, ch, freq, sample_rate));
+        if (ch < kMaskChannels && (sp.muted & (ChannelMask{1} << ch)) != 0) {
+            return;
+        }
+        const double mag = std::abs(composite_at(state, ch, freq, sample_rate)) * speaker_gain(ch, freq);
         double db = 20.0 * std::log10(mag);
         if (ch < kMaxChannels) {
             db += state.channel_gain_db[ch];
