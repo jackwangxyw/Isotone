@@ -596,6 +596,19 @@ int cmd_measure(IMMDeviceEnumerator* enumerator, const MeasureOptions& opt) {
                 Sleep(10);
             }
             glitched = capture.discontinuities() + render.underruns() - before;
+            // A splice WASAPI does not flag: measured on the cables, a window whose
+            // level read 0.2 dB low on every channel had no discontinuity and no
+            // underrun, but a residual of -7 dB against -99 dB in a clean one.
+            // More than -40 dB of residual relative to the fitted sine, on any
+            // channel carrying the tone, counts as a glitch.
+            for (uint32_t c = 0; c < captured.size(); ++c) {
+                const std::complex<double> fit = dft_at(captured[c], freq, cf.sample_rate);
+                const double a = std::abs(fit);
+                if (a > 1e-4 && residual_rms(captured[c], fit, freq, cf.sample_rate) > 0.01 * a / std::sqrt(2.0)) {
+                    ++glitched;
+                    break;
+                }
+            }
             if (glitched == 0 || attempt == kMaxAttempts) break;
         }
         glitches.push_back(glitched);
@@ -717,9 +730,9 @@ void usage() {
         "                         (default 1 for every channel)\n"
         "      --settle s         seconds to discard before each measurement (default 0.30)\n"
         "      --window s         seconds to measure (default 0.30)\n"
-        "      A window with a capture discontinuity or a render underrun near it is\n"
-        "      taken again, up to 3 times; glitches, attempts and each channel's\n"
-        "      residual after the fitted sine (dB re the tone) are reported.\n"
+        "      A window with a capture discontinuity, a render underrun near it, or a\n"
+        "      residual above -40 dB re its fitted sine is taken again, up to 3 times;\n"
+        "      glitches, attempts and each channel's residual (dB re the tone) are reported.\n"
         "      --label text       copied into the JSON output\n"
         "      --json             machine-readable output\n"
         "\n"

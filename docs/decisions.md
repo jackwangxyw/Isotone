@@ -1459,11 +1459,29 @@ count slots upstream's install deleted.
 **Tests:** `core_tests` 177 cases, `compat_tests` 35, APO self test and the shm
 transport check pass on MSVC; `core_tests` passes on GCC 16.1 with no warnings.
 
-**Not yet verified live** (needs the new DLL staged, and for the compat items
-Equalizer APO on an endpoint that can be measured): saved state loaded by
-audiodg as LocalService from ProgramData; Equalizer APO evaluating
-`outputChannelCount`, `sampleRate >= X` and a -1000 dB preamp as modelled; the
-two-reload question for `Isotone.txt.tmp`.
+**Measured live** after the owner staged the reviewed DLL (hash-identical to
+the build of `4df7343`):
+- **Saved state in audiodg:** with a -6 dB band saved for CABLE Input, the region
+  IsoAPO created held that band and the ring read -6.000 dB at 1 kHz; with the
+  file deleted, 0 bands and 0.000 dB. LocalService reads the file a user wrote.
+- **IsoAPO at 7.1:** every speaker case within 0.001 dB and 0.002° of the core;
+  silent-buffer tail, exact-zero speaker mute and the band move all pass.
+- **Compat on CABLE Output's Equalizer APO, 7.1, 48 kHz:** the speaker cases
+  within 0.0002 dB; bypass keeps the speaker setup and drops the band; the band
+  reads -6.000 dB on every channel when not bypassed; a block written for 2
+  channels skips its routing on the 8-channel device; bands written for 96 kHz
+  carry `If: sampleRate >= 84211` and do nothing at 48 kHz, the same band written
+  for 48 kHz plays; mute is exact zeros (the tool's -200 dB floor) on every
+  channel. `config.txt` matched the snapshot before and after, and Isotone.txt
+  was put back byte for byte.
+- **The unexplained level drops found.** One run read 0.212 dB low at 160 Hz on
+  all 8 channels, with exact phase. That window had no capture discontinuity
+  and no render underrun, but a residual after the fitted sine of -7 dB, against
+  -99 dB in every clean window: a splice WASAPI does not flag. `isotone-measure`
+  now also retakes a window whose residual is above -40 dB re the fitted sine on
+  any channel carrying the tone. The rerun passed, with no glitch to retake.
+- **Not measured:** whether writing `Isotone.txt.tmp` makes Equalizer APO reload
+  twice. Its trace log needs an HKLM setting.
 
 ---
 
