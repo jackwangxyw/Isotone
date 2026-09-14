@@ -26,10 +26,11 @@ namespace isotone {
 // position each carries (the WAVEFORMATEXTENSIBLE dwChannelMask, in bit order).
 // Equalizer APO resolves channel names through it (helpers/ChannelHelper.cpp),
 // so `SL` is channel 5 on 5.1 but channel 7 on 7.1. Pass the layout of the
-// device a config is for. The default is 7.1 surround.
+// device a config is for. The default, 0 channels, is unspecified; the parser
+// and the formatter read it as stereo.
 struct ChannelLayout {
-    uint32_t channels     = 8;
-    uint32_t speaker_mask = 0x63F;   // KSAUDIO_SPEAKER_7POINT1_SURROUND
+    uint32_t channels     = 0;
+    uint32_t speaker_mask = 0;
 };
 
 // The most channels a stream can have, and so upstream: WAVEFORMATEX counts
@@ -103,7 +104,8 @@ struct ApoParseResult {
 // `layout` must be the layout of the device the result is for. Channel names
 // resolve through it, and mute is recognised only as a Copy line silencing
 // every channel it has: mute written for stereo and read as 7.1 is not mute,
-// as it is not on a 7.1 device in Equalizer APO.
+// as it is not on a 7.1 device in Equalizer APO. An unspecified layout is read
+// as stereo (2 channels, 0x3). The state records the layout it was read for.
 ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& layout = {});
 
 struct ApoFormatOptions {
@@ -112,7 +114,10 @@ struct ApoFormatOptions {
     // device. Empty means no Device line at all.
     std::string device;
 
-    // Channel names in Channel: lines are written for this layout.
+    // Channel names in Channel: lines are written for this layout, after the
+    // state's per-channel values are moved to it by remap_channels. Unspecified,
+    // the state's own layout (EqState::layout_channels); when that is
+    // unspecified too, stereo.
     ChannelLayout layout;
 
     // Written above the filters. Each line is prefixed with '# '.

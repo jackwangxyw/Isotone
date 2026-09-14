@@ -8,10 +8,13 @@
 //   isotone-compat attach   [root]
 //   isotone-compat detach   [root]
 //   isotone-compat apply    [root] --device <guid> --channels N [--mask 0xMASK] --rate HZ
+//                           [--text-channels N [--text-mask 0xMASK]]
 //                           [--bypass] [--mute] [--speakers "key=value ..."] <config.txt | ->
 //
 // apply needs the device's format: the block is written for that channel count
-// and rate, and does nothing on another.
+// and rate, and does nothing on another. The text is read for the device's
+// layout, or for --text-channels/--text-mask when it was written for another,
+// and its per-channel values are moved to the device's speakers.
 //   isotone-compat show     [root] [--channels N --mask 0xMASK]
 //   isotone-compat loopback --render <guid> --seconds <s> <out.wav>
 //
@@ -61,7 +64,8 @@ int usage() {
                  "  isotone-compat attach   [--root DIR | --real-install]\n"
                  "  isotone-compat detach   [--root DIR | --real-install]\n"
                  "  isotone-compat apply    [--root DIR | --real-install] --device GUID\n"
-                 "                          --channels N [--mask 0xMASK] --rate HZ [--bypass] [--mute] [--speakers SETTINGS]\n"
+                 "                          --channels N [--mask 0xMASK] --rate HZ [--text-channels N [--text-mask 0xMASK]]\n"
+                 "                          [--bypass] [--mute] [--speakers SETTINGS]\n"
                  "                          <config.txt | ->\n"
                  "  isotone-compat show     [--root DIR | --real-install] [--channels N --mask 0xMASK]\n"
                  "  isotone-compat loopback --render GUID --seconds S <out.wav>\n");
@@ -123,8 +127,8 @@ int fail(const std::string& what, DWORD e) {
 
 struct Args {
     std::vector<std::string> positional;
-    std::string root, device, mask, render, speakers;
-    uint32_t channels = 0;
+    std::string root, device, mask, render, speakers, text_mask;
+    uint32_t channels = 0, text_channels = 0;
     double seconds = 0.0;
     double rate = 0.0;
     bool real_install = false, bypass = false, mute = false, bad = false;
@@ -146,6 +150,8 @@ Args parse_args(int argc, const std::vector<std::string>& argv) {
         else if (s == "--device") a.device = value();
         else if (s == "--channels") a.channels = static_cast<uint32_t>(std::strtoul(value().c_str(), nullptr, 10));
         else if (s == "--mask") a.mask = value();
+        else if (s == "--text-channels") a.text_channels = static_cast<uint32_t>(std::strtoul(value().c_str(), nullptr, 10));
+        else if (s == "--text-mask") a.text_mask = value();
         else if (s == "--render") a.render = value();
         else if (s == "--seconds") a.seconds = std::strtod(value().c_str(), nullptr);
         else if (s == "--rate") a.rate = std::strtod(value().c_str(), nullptr);
@@ -155,6 +161,7 @@ Args parse_args(int argc, const std::vector<std::string>& argv) {
         else if (s.rfind("--", 0) == 0 && s != "-") a.bad = true;
         else a.positional.push_back(s);
     }
+    if (!a.text_mask.empty() && a.text_channels == 0) a.bad = true;
     return a;
 }
 
@@ -212,13 +219,14 @@ bool resolve_root(const Args& a, fs::path* root, int* rc) {
     return true;
 }
 
-ChannelLayout layout_from(const Args& a) {
+// A layout from a channel count and an optional mask; 0 channels is unspecified.
+ChannelLayout layout_from(uint32_t channels, const std::string& mask) {
     ChannelLayout layout;
-    if (a.channels != 0) {
-        layout.channels = a.channels;
-        layout.speaker_mask = a.mask.empty()
-                                  ? default_speaker_mask(a.channels)
-                                  : static_cast<uint32_t>(std::strtoul(a.mask.c_str(), nullptr, 16));
+    if (channels != 0) {
+        layout.channels = channels;
+        layout.speaker_mask = mask.empty()
+                                  ? default_speaker_mask(channels)
+                                  : static_cast<uint32_t>(std::strtoul(mask.c_str(), nullptr, 16));
     }
     return layout;
 }
@@ -404,9 +412,12 @@ int wmain(int argc, wchar_t** wargv) {
         // last brace group; the Device line needs the GUID alone.
         const size_t open = a.device.rfind('{');
         device.endpoint_guid = open == std::string::npos ? a.device : a.device.substr(open);
-        device.layout = layout_from(a);
+        device.layout = layout_from(a.channels, a.mask);
         device.sample_rate = a.rate;
-        ApoParseResult parsed = parse_apo_config(text, device.layout);
+        // The state records the layout it was read for; format_device_block
+        // moves it to the device's.
+        ApoParseResult parsed =
+            parse_apo_config(text, a.text_channels != 0 ? layout_from(a.text_channels, a.text_mask) : device.layout);
         device.state = parsed.state;
         device.state.bypass = a.bypass;
         device.state.mute = a.mute;
@@ -448,7 +459,8 @@ int wmain(int argc, wchar_t** wargv) {
         std::string text;
         const DWORD e = read_file_bytes(root / kIsotoneFileName, &text);
         if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) return fail("cannot read Isotone.txt", e);
-        const ChannelLayout layout = layout_from(a);
+        // Read for stereo unless a layout is given, as an unspecified layout is everywhere.
+        const ChannelLayout layout = a.channels != 0 ? layout_from(a.channels, a.mask) : ChannelLayout{};
         const auto devices = parse_isotone_file(text, [&](const std::string&) { return layout; });
         std::string list = "[";
         for (size_t k = 0; k < devices.size(); ++k) {

@@ -110,8 +110,8 @@ namespace isotone::compat {
 
 struct DeviceConfig {
     std::string   endpoint_guid;   // with or without braces, or a full device ID
-    // The device's mix format: channel count and speaker mask. Not ChannelLayout's
-    // 7.1 default: 0 channels is unset, and CompatWriter refuses it.
+    // The device's mix format: channel count and speaker mask. 0 channels is
+    // unset, and CompatWriter refuses it.
     ChannelLayout layout{0, 0};
     double        sample_rate = 0; // the device's rate; 0 is unset, and CompatWriter refuses it
     EqState       state;
@@ -143,12 +143,12 @@ struct ParsedDevice {
 };
 
 // Reads Isotone.txt back into per-device state, for the layout `layout_for`
-// gives, which the state records. Bands, preamp and trims come from
-// parse_apo_config with that layout; bypass, mute and the speaker setup from the
-// markers, with the per-speaker values moved from the layout they were written
-// for. Band ids are not stored in the file, so they do not round-trip; disabled
-// bands are written as OFF lines, which upstream skips and the parser reads back
-// as disabled bands.
+// gives (stereo when it gives none), which the state records. Bands, preamp
+// and trims come from parse_apo_config with that layout; bypass, mute and the
+// speaker setup from the markers, with the per-speaker values moved from the
+// layout they were written for. Band ids are not stored in the file, so they do
+// not round-trip; disabled bands are written as OFF lines, which upstream skips
+// and the parser reads back as disabled bands.
 std::vector<ParsedDevice> parse_isotone_file(
     const std::string& text,
     const std::function<ChannelLayout(const std::string& endpoint_guid)>& layout_for);

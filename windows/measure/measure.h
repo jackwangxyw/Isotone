@@ -65,6 +65,13 @@ struct Endpoint {
 // endpoint whose description or name contains it. More than one is ambiguous.
 std::vector<const Endpoint*> match_endpoints(const std::vector<Endpoint>& list, const std::string& query);
 
+// The settle before each window discards what the streams deliver as they start.
+// VB-Cable replays one frame of audio rendered while no capture was open, 20 to
+// 55 ms after the later of the capture and render starts, so a settle under
+// 0.1 s can put that frame in a window.
+inline constexpr double kMinSettleSeconds = 0.1;
+bool settle_is_enough(double seconds);
+
 // Format description reduced to what the tone generator and analyser need.
 struct StreamFormat {
     uint32_t sample_rate  = 0;
@@ -170,6 +177,23 @@ struct WindowPlan {
 // Frames a window of `seconds` must capture at `sample_rate`.
 uint64_t frames_required(double seconds, uint32_t sample_rate);
 
+// An attempt that failed and was taken again, with the figures that failed it.
+struct DiscardedAttempt {
+    uint32_t attempt = 0;           // 1 for the first
+    bool     stream_error = false;
+    bool     short_capture = false;
+    bool     glitched = false;
+    uint32_t glitches = 0;          // discontinuities + underruns + 1 for a splice
+    uint32_t discontinuities = 0;
+    uint32_t underruns = 0;
+    uint32_t stream_errors = 0;
+    uint64_t frames_rendered = 0;
+    uint64_t frames_captured = 0;
+    // Worst residual re its fitted sine over the channels carrying the tone;
+    // above -40 dB is a splice. NaN when no channel carries it.
+    double   residual_re_fit_db = 0.0;
+};
+
 struct WindowResult {
     std::vector<std::vector<float>> captured;   // [channel][frame], the kept attempt
     uint32_t attempts = 0;
@@ -181,6 +205,7 @@ struct WindowResult {
     bool stream_error = false;
     bool short_capture = false;
     bool glitched = false;
+    std::vector<DiscardedAttempt> discarded;    // the attempts before the kept one
 
     bool failed() const { return stream_error || short_capture || glitched; }
     // The numbers describe the path: the streams ran and the window is full.

@@ -265,7 +265,10 @@ in the engine; the UI must not break it.
   that land on one channel combine (masks as a union, trims and delays summed);
   a band left with no channel is disabled and keeps its mask.
 - **Import parses for the device the preset is for.** Call `parse_apo_config`
-  with that device's layout (channels and speaker mask from `windows/devices`). Show `warnings` in the import dialog's skipped lines:
+  with that device's layout (channels and speaker mask from `windows/devices`);
+  a layout not given (`ChannelLayout{}`) is read as stereo. Export with
+  `format_apo_config` writes for `options.layout` when given (remapping the
+  state to it), else for the state's own layout, else stereo. Show `warnings` in the import dialog's skipped lines:
   every line the import does not apply is there (GraphicEQ, Include, Delay,
   Copy, Convolution, VST, unknown commands), as are lines Equalizer APO would
   ignore (lower-case `on`, a frequency without `Hz`), `Device:` sections and

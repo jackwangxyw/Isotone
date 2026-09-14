@@ -25,6 +25,9 @@ namespace {
 // shelf: "found out by experimentation with RoomEQWizard" (BiQuadFilterFactory).
 constexpr double kDefaultShelfS = 0.9;
 
+// What an unspecified layout is read and written as.
+constexpr ChannelLayout kStereoLayout{2, 0x3};
+
 // Speaker positions upstream has names for (ChannelHelper's constructor), with
 // their ksmedia.h SPEAKER_* bits.
 struct NamedPosition {
@@ -575,8 +578,9 @@ std::string apo_device_pattern_for_guid(const std::string& guid) {
     return g;
 }
 
-ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& layout) {
+ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& given) {
     ApoParseResult result;
+    const ChannelLayout layout = given.channels != 0 ? given : kStereoLayout;
 
     const std::vector<std::string> channel_names = apo_channel_names(layout);
     if (layout.channels > kMaxApoChannels) {
@@ -888,12 +892,21 @@ bool parse_apo_number(const std::string& s, double* out) {
     return true;
 }
 
-std::string format_apo_config(const EqState& state, const ApoFormatOptions& options) {
+std::string format_apo_config(const EqState& written, const ApoFormatOptions& options) {
     std::ostringstream out;
+
+    // The layout asked for, else the one the state was written for, else stereo;
+    // the state's values move to that layout's speakers.
+    const ChannelLayout own{written.layout_channels, written.layout_speaker_mask};
+    const ChannelLayout layout = options.layout.channels != 0 ? options.layout
+                                 : own.channels != 0          ? own
+                                                              : kStereoLayout;
+    EqState state = written;
+    remap_channels(&state, layout);
 
     // A channel the layout does not have is still written, by number, so the
     // band is not lost; Equalizer APO reports it as out of range on that device.
-    const std::vector<std::string> channel_names = apo_channel_names(options.layout);
+    const std::vector<std::string> channel_names = apo_channel_names(layout);
     const auto fc_text = [&](const Band& b) {
         return format_apo_frequency(options.sample_rate > 0.0 ? clamp_fc(b.fc, options.sample_rate) : b.fc);
     };

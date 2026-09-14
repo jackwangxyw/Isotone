@@ -276,7 +276,7 @@ TEST_CASE("SL on 5.1 is the fifth channel, whichever 5.1 the device is") {
         CHECK(r.state.bands[0].channels == (ChannelMask{1} << 4));
     }
     // On 7.1 it is the seventh.
-    const ApoParseResult r71 = parse_apo_config(text);
+    const ApoParseResult r71 = parse_apo_config(text, {8, 0x63F});
     REQUIRE(r71.state.bands.size() == 1);
     CHECK(r71.state.bands[0].channels == (ChannelMask{1} << 6));
 
@@ -681,7 +681,10 @@ TEST_CASE("channel trims survive a round trip alongside the preamp") {
     s.preamp_db = -6.0;
     s.channel_gain_db[1] = -3.0;
     s.channel_gain_db[5] = 1.5;
-    const ApoParseResult r = parse_apo_config(format_apo_config(s));
+    const ChannelLayout surround71{8, 0x63F};
+    ApoFormatOptions options;
+    options.layout = surround71;
+    const ApoParseResult r = parse_apo_config(format_apo_config(s, options), surround71);
     CHECK(r.warnings.empty());
     CHECK(r.state.preamp_db == doctest::Approx(-6.0));
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
@@ -850,6 +853,73 @@ TEST_CASE("a parsed state records the layout its channel indexes are for") {
     CHECK(r.state.channel_gain_db[4] == -3.0);
     const ApoParseResult huge = parse_apo_config("", {1000000, 0});
     CHECK(huge.state.layout_channels == kMaxApoChannels);
+}
+
+TEST_CASE("a layout that was not given is stereo") {
+    // Stereo's R, and a Copy that is mute on stereo but not on 7.1.
+    const ApoParseResult r =
+        parse_apo_config("Channel: R\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\nCopy: L=0 R=0\n");
+    CHECK(r.warnings.empty());
+    REQUIRE(r.state.bands.size() == 1);
+    CHECK(r.state.bands[0].channels == bit(1));
+    CHECK(r.state.mute);
+    CHECK(r.state.layout_channels == 2);
+    CHECK(r.state.layout_speaker_mask == 0x3u);
+}
+
+TEST_CASE("an export writes for the layout asked for, else the state's own, else stereo") {
+    SUBCASE("with no layout asked for, a state is written for its own layout") {
+        for (const ChannelLayout& own : {ChannelLayout{8, 0x63F}, ChannelLayout{6, kSpeaker51Surround}}) {
+            CAPTURE(own.channels);
+            EqState s;
+            s.layout_channels = own.channels;
+            s.layout_speaker_mask = own.speaker_mask;
+            s.bands.push_back(band_on(1, 1000, bit(4)));
+            s.channel_gain_db[5] = -2.0;
+            const std::string text = format_apo_config(s);
+            CAPTURE(text);
+            const std::vector<std::string> names = apo_channel_names(own);
+            CHECK(text.find("Channel: " + names[4] + "\n") != std::string::npos);
+            CHECK(text.find("Channel: " + names[5] + "\nPreamp: -2 dB\n") != std::string::npos);
+            const ApoParseResult back = parse_apo_config(text, own);
+            REQUIRE(back.state.bands.size() == 1);
+            CHECK(back.state.bands[0].channels == bit(4));
+            CHECK(back.state.channel_gain_db[5] == -2.0);
+        }
+    }
+    SUBCASE("for another layout, each value is written for the speaker it was set for") {
+        EqState s;
+        s.layout_channels = 8;
+        s.layout_speaker_mask = 0x63F;                 // L R C LFE RL RR SL SR
+        s.bands.push_back(band_on(1, 1000, bit(6)));   // SL
+        s.channel_gain_db[7] = -2.0;                   // SR
+        ApoFormatOptions options;
+        options.layout = {6, kSpeaker51Surround};      // L R C LFE SL SR
+        const std::string text = format_apo_config(s, options);
+        CAPTURE(text);
+        CHECK(text.find("Channel: SL\n") != std::string::npos);
+        CHECK(text.find("Channel: SR\nPreamp: -2 dB\n") != std::string::npos);
+        const ApoParseResult back = parse_apo_config(text, options.layout);
+        CHECK(back.warnings.empty());
+        EqState moved = s;
+        remap_channels(&moved, options.layout);
+        REQUIRE(back.state.bands.size() == 1);
+        CHECK(back.state.bands[0].channels == bit(4));
+        CHECK(back.state.bands[0].channels == moved.bands[0].channels);
+        for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            CAPTURE(c);
+            CHECK(back.state.channel_gain_db[c] == moved.channel_gain_db[c]);
+        }
+    }
+    SUBCASE("a state with no layout, and none asked for, is written for stereo") {
+        EqState s;
+        s.bands.push_back(band_on(1, 1000, bit(2)));
+        s.mute = true;
+        const std::string text = format_apo_config(s);
+        CAPTURE(text);
+        CHECK(text.find("Channel: 3\n") != std::string::npos);
+        CHECK(text.find("Copy: L=0 R=0\n") != std::string::npos);
+    }
 }
 
 TEST_CASE("remap_channels moves every per-channel value to the same speaker on another layout") {

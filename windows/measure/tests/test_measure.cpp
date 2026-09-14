@@ -46,6 +46,7 @@ struct Cable {
 
     Fail padding, render_get, render_release, packet_size, capture_get, capture_release;
     Fail discontinuity;             // packets flagged as discontinuous
+    Fail dropout;                   // the cable plays zeros, unflagged: a splice
 
     uint64_t tick = 0;
     std::deque<float> queue;        // rendered, not yet played (interleaved)
@@ -64,6 +65,7 @@ struct Cable {
                     queue.pop_front();
                 }
                 if (c < gains.size()) v *= gains[c];
+                if (dropout.at(tick)) v = 0.0f;
                 if (capture_records) recorded.push_back(v);
             }
         }
@@ -395,6 +397,120 @@ TEST_CASE("a window still glitched after its retakes fails the run and is named"
     const std::string json = json_of(rep);
     CHECK(contains(json, "\"failed\": [false, true, false]"));
     CHECK(contains(json, "\"failed_windows\": [\n    {\"index\": 1, \"frequency\": 2000.000000, \"reasons\": [\"glitch\"]}\n  ]"));
+    // The reported attempt is the third; the first two are the discarded ones.
+    REQUIRE(rep.results[1].window.discarded.size() == 2);
+    CHECK(rep.results[1].window.discarded[0].attempt == 1);
+    CHECK(rep.results[1].window.discarded[1].attempt == 2);
+    CHECK(contains(json, "\"discarded_attempts\": [[], [{\"attempt\": 1, \"reasons\": [\"glitch\"]"));
+}
+
+TEST_CASE("a retaken window reports the attempts it discarded and why") {
+    // Settle is ticks 0 to 29 and the first window 30 to 59.
+    const auto attempt_json = [](const DiscardedAttempt& d, const char* reasons) {
+        return "{\"attempt\": " + std::to_string(d.attempt) + ", \"reasons\": [" + reasons +
+               "], \"glitches\": " + std::to_string(d.glitches) +
+               ", \"discontinuities\": " + std::to_string(d.discontinuities) +
+               ", \"underruns\": " + std::to_string(d.underruns) +
+               ", \"stream_errors\": " + std::to_string(d.stream_errors) +
+               ", \"frames_rendered\": " + std::to_string(d.frames_rendered) +
+               ", \"frames_captured\": " + std::to_string(d.frames_captured) +
+               ", \"residual_re_fit_db\": " + json_number(d.residual_re_fit_db) + "}";
+    };
+
+    SUBCASE("a glitch, then a pass") {
+        Rig rig;
+        rig.cable.discontinuity = Fail{40, 41};
+        const FrequencyResult r = rig.measure(Rig::plan());
+        CHECK(r.window.attempts == 2);
+        CHECK_FALSE(r.window.failed());
+        CHECK(r.window.glitches == 0);
+        CHECK(r.window.stream_errors == 0);
+        CHECK(r.window.frames_captured == 14400);
+
+        REQUIRE(r.window.discarded.size() == 1);
+        const DiscardedAttempt& d = r.window.discarded[0];
+        CHECK(d.attempt == 1);
+        CHECK(d.glitched);
+        CHECK_FALSE(d.stream_error);
+        CHECK_FALSE(d.short_capture);
+        CHECK(d.glitches == 1);
+        CHECK(d.discontinuities == 1);
+        CHECK(d.underruns == 0);
+        CHECK(d.stream_errors == 0);
+        CHECK(d.frames_captured == 14400);
+        CHECK(d.residual_re_fit_db < -40.0);   // flagged, not spliced
+
+        MeasureReport rep = rig.report();
+        rep.results.push_back(r);
+        CHECK(rep.ok());
+        const std::string json = json_of(rep);
+        CHECK(contains(json, "\"discarded_attempts\": [[" + attempt_json(d, "\"glitch\"") + "]],\n"));
+        CHECK(contains(json, "\"glitches\": [0]"));
+        CHECK(contains(json, "\"attempts\": [2]"));
+        CHECK(contains(json, "\"failed_windows\": []"));
+    }
+
+    SUBCASE("a stream error, then a pass") {
+        Rig rig;
+        rig.cable.padding = Fail{5, 6};
+        const FrequencyResult r = rig.measure(Rig::plan());
+        CHECK(r.window.attempts == 2);
+        CHECK_FALSE(r.window.failed());
+        CHECK(r.window.glitches == 0);
+
+        REQUIRE(r.window.discarded.size() == 1);
+        const DiscardedAttempt& d = r.window.discarded[0];
+        CHECK(d.attempt == 1);
+        CHECK(d.stream_error);
+        CHECK(d.stream_errors == 1);
+        // The error ended the attempt in its settle, so its window captured nothing.
+        CHECK(d.short_capture);
+        CHECK(d.frames_captured == 0);
+        CHECK_FALSE(d.glitched);
+        CHECK(std::isnan(d.residual_re_fit_db));
+
+        MeasureReport rep = rig.report();
+        rep.results.push_back(r);
+        const std::string json = json_of(rep);
+        CHECK(contains(json, "\"discarded_attempts\": [[" + attempt_json(d, "\"stream_error\", \"short_capture\"") +
+                                 "]],\n"));
+        CHECK(contains(json, "\"residual_re_fit_db\": null}"));
+        CHECK(contains(json, "\"failed_windows\": []"));
+    }
+
+    SUBCASE("an unflagged splice, then a pass") {
+        Rig rig;
+        rig.cable.dropout = Fail{40, 41};
+        const FrequencyResult r = rig.measure(Rig::plan());
+        CHECK(r.window.attempts == 2);
+        CHECK_FALSE(r.window.failed());
+
+        REQUIRE(r.window.discarded.size() == 1);
+        const DiscardedAttempt& d = r.window.discarded[0];
+        CHECK(d.glitched);
+        CHECK(d.glitches == 1);
+        CHECK(d.discontinuities == 0);
+        CHECK(d.underruns == 0);
+        // 10 ms of zeros in a 300 ms window: over the splice threshold, well under the tone.
+        CHECK(d.residual_re_fit_db > -40.0);
+        CHECK(d.residual_re_fit_db < -6.0);
+
+        MeasureReport rep = rig.report();
+        rep.results.push_back(r);
+        CHECK(contains(json_of(rep), "\"discarded_attempts\": [[" + attempt_json(d, "\"glitch\"") + "]],\n"));
+    }
+
+    SUBCASE("no retakes: empty lists") {
+        Rig rig;
+        MeasureReport rep = rig.report();
+        rep.results.push_back(rig.measure(Rig::plan(1000.0)));
+        rep.results.push_back(rig.measure(Rig::plan(2000.0)));
+        for (const FrequencyResult& f : rep.results) {
+            CHECK(f.window.attempts == 1);
+            CHECK(f.window.discarded.empty());
+        }
+        CHECK(contains(json_of(rep), "\"discarded_attempts\": [[], []],\n"));
+    }
 }
 
 TEST_CASE("phase needs a reference carrying the tone") {
@@ -479,6 +595,17 @@ TEST_CASE("render and capture layouts are recorded and a channel count mismatch 
                          "\"bits\": 24, \"frame_bytes\": 24, \"channel_mask\": 1599}"));
     CHECK(contains(json, "\"capture_format\": {\"sample_rate\": 48000, \"channels\": 8, \"sample_format\": \"float\", "
                          "\"bits\": 32, \"frame_bytes\": 32, \"channel_mask\": 1599}"));
+}
+
+TEST_CASE("a settle too short to clear VB-Cable's replayed frame is refused") {
+    // VB-Cable replays one old frame 20 to 55 ms after the later of the capture
+    // and render starts (2026-09-14); a settle of 0 put it in the first window.
+    CHECK_FALSE(settle_is_enough(0.0));
+    CHECK_FALSE(settle_is_enough(0.05));
+    CHECK_FALSE(settle_is_enough(-1.0));
+    CHECK_FALSE(settle_is_enough(std::nan("")));
+    CHECK(settle_is_enough(0.1));
+    CHECK(settle_is_enough(0.3));
 }
 
 TEST_CASE("an endpoint fragment must name one endpoint") {

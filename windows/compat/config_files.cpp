@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <sstream>
 
 #include "eapo_install.h"
@@ -75,36 +76,79 @@ std::string newline_of(const std::string& bytes) {
 }
 
 constexpr char kAttachComment[] = "# Added by Isotone. Remove these ";
+constexpr char kAfterLineBreak[] = " and the line break before them";
 constexpr char kStageReset[] = "Stage: post-mix capture";
 
-// `open_ifs` EndIf lines close Ifs config.txt leaves open, and the Stage line
-// undoes a Stage line that leaves the end of the file for other instances. Both
-// come after `Device: all`, since a Device line that does not match skips them.
-std::string attach_block(const std::string& nl, unsigned open_ifs = 0, bool reset_stage = false) {
+// An `EndIf:` for each If config.txt leaves open, and `Stage: post-mix capture`
+// for each Device pattern whose Stage lines leave the end of the file for other
+// instances, each under the Device pattern the If or Stage line was under, since
+// upstream skips both on a device that pattern does not match; then
+// `Device: all` and the Include. A Device line is written only where the
+// pattern changes. After a line break, which the comment counts, when the
+// file's last line has none.
+std::string attach_block(const std::string& nl, const ConfigInspection& closing, bool after_line_break) {
     static constexpr const char* kWords[] = {"three", "four", "five", "six", "seven", "eight", "nine"};
-    const unsigned lines = 3 + open_ifs + (reset_stage ? 1 : 0);
-    std::string out = nl + kAttachComment + (lines - 3 < 7 ? kWords[lines - 3] : std::to_string(lines)) +
-                      " lines to detach it." + nl + "Device: all" + nl;
-    for (unsigned i = 0; i < open_ifs; ++i) out += "EndIf:" + nl;
-    if (reset_stage) out += kStageReset + nl;
+    std::vector<std::string> lines;
+    std::optional<std::string> device;
+    const auto under = [&](const std::string& pattern) {
+        if (device != pattern) lines.push_back("Device: " + pattern);
+        device = pattern;
+    };
+    for (const auto& [pattern, count] : closing.open_ifs_under) {
+        under(pattern);
+        lines.insert(lines.end(), count, "EndIf:");
+    }
+    for (const std::string& pattern : closing.stage_changed_under) {
+        under(pattern);
+        lines.push_back(kStageReset);
+    }
+    under("all");
+    const size_t count = lines.size() + 2;
+    std::string out = (after_line_break ? nl : "") + kAttachComment +
+                      (count - 3 < 7 ? kWords[count - 3] : std::to_string(count)) + " lines" +
+                      (after_line_break ? kAfterLineBreak : "") + " to detach it." + nl;
+    for (const std::string& line : lines) out += line + nl;
     return out + "Include: " + kIsotoneFileName + nl;
 }
 
 // The size of the block attach_include appended, when it is the file's tail; 0
 // when it is not.
 size_t attached_block_size(const std::string& bytes) {
-    for (const std::string nl : {"\r\n", "\n"}) {
-        const size_t at = bytes.rfind(nl + kAttachComment);
-        if (at == std::string::npos) continue;
-        const std::string tail = bytes.substr(at);
-        unsigned open_ifs = 0;
-        for (size_t p = tail.find(nl + "EndIf:" + nl); p != std::string::npos; p = tail.find(nl + "EndIf:" + nl, p + 1)) {
-            ++open_ifs;
+    const size_t at = bytes.rfind(kAttachComment);
+    if (at == std::string::npos || (at != 0 && bytes[at - 1] != '\n')) return 0;
+    const size_t eol = bytes.find('\n', at);
+    if (eol == std::string::npos) return 0;
+    const std::string nl = bytes[eol - 1] == '\r' ? "\r\n" : "\n";
+    const bool after_line_break = bytes.substr(at, eol - at).find(kAfterLineBreak) != std::string::npos;
+    if (after_line_break && (at < nl.size() || bytes.compare(at - nl.size(), nl.size(), nl) != 0)) return 0;
+
+    // What the lines after the comment close, then the block that closes it.
+    ConfigInspection closing;
+    std::string device;
+    for (size_t pos = eol + 1;;) {
+        const size_t end = bytes.find(nl, pos);
+        if (end == std::string::npos) break;
+        const std::string line = bytes.substr(pos, end - pos);
+        pos = end + nl.size();
+        if (line.rfind("Device: ", 0) == 0) {
+            device = line.substr(8);
+        } else if (line == "EndIf:") {
+            auto& open = closing.open_ifs_under;
+            if (!open.empty() && open.back().first == device) {
+                ++open.back().second;
+            } else {
+                open.emplace_back(device, 1);
+            }
+        } else if (line == kStageReset) {
+            closing.stage_changed_under.push_back(device);
+        } else {
+            break;
         }
-        const bool reset_stage = tail.find(nl + kStageReset + nl) != std::string::npos;
-        if (tail == attach_block(nl, open_ifs, reset_stage)) return tail.size();
     }
-    return 0;
+    const size_t start = after_line_break ? at - nl.size() : at;
+    return bytes.compare(start, std::string::npos, attach_block(nl, closing, after_line_break)) == 0
+               ? bytes.size() - start
+               : 0;
 }
 
 DWORD open_error(const fs::path& path) {
@@ -380,11 +424,28 @@ ConfigInspection inspect_config(const fs::path& config_dir) {
 ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& config_dir) {
     ConfigInspection r;
     // Upstream skips what follows a Device line that does not match the device,
-    // and what is inside an If that is false. Which devices match, and which
-    // conditions hold, only the device can say; `Device: all` and no If reach
-    // every device.
+    // If, EndIf and Stage lines included, and what is inside an If that is false.
+    // Which devices match, and which conditions hold, only the device can say;
+    // `Device: all` and no If reach every device.
     bool every_device = true;
-    unsigned if_depth = 0;
+    std::string device = "all";
+    // The Ifs open under each Device pattern, as IfFilterFactory counts them on
+    // a device the pattern matches: an If adds one, an EndIf takes one away if
+    // any is open. Patterns compare in lower case, as matchDevice does, and are
+    // otherwise taken as unrelated. An EndIf under a pattern with no If open
+    // closes one only on the devices that also match another pattern, which is
+    // known only under `Device: all` with Ifs open under one pattern; otherwise
+    // the If stays counted, so attach writes an EndIf some devices log as one
+    // without an If and ignore, rather than too few, which would hide the Include.
+    auto& open_ifs = r.open_ifs_under;
+    const auto find_pattern = [&](auto& list, const std::string& pattern) {
+        return std::find_if(list.begin(), list.end(), [&](const auto& e) { return lower(e.first) == lower(pattern); });
+    };
+    const auto if_depth = [&] {
+        unsigned n = 0;
+        for (const auto& e : open_ifs) n += e.second;
+        return n;
+    };
     // Which Equalizer APO instances a line reaches after Stage lines, as the
     // values it can have: StageFilterFactory starts every configuration with
     // stageMatches = capture || !preMix || !postMixInstalled, and a Stage line
@@ -400,8 +461,15 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
         bool can_match, can_skip;
     };
     Reach post_mix{true, false}, capture{true, false}, pre_mix{false, true};
+    // Whether every device's Stage lines leave it reaching what no Stage line
+    // does: the last Stage line every device saw, then each Device pattern's
+    // Stage lines after it. One inside an If, which some devices may skip, can
+    // leave a pattern changed but cannot undo a change.
+    bool stage_default_everywhere = true;
+    std::vector<std::pair<std::string, bool>> stage_changed;   // pattern, left changed
     const auto stage_is_default = [&] {
-        return !post_mix.can_skip && !capture.can_skip && !pre_mix.can_match;
+        return stage_default_everywhere &&
+               std::none_of(stage_changed.begin(), stage_changed.end(), [](const auto& e) { return e.second; });
     };
     for (const std::string& line : config_lines(bytes)) {
         const size_t colon = line.find(':');
@@ -411,7 +479,7 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
         if (key == "Include") {
             r.includes.push_back(trim(value));
             if (names_isotone_file(value, config_dir)) {
-                if (every_device && if_depth == 0 && stage_is_default()) {
+                if (every_device && if_depth() == 0 && stage_is_default()) {
                     r.isotone_included = true;
                 } else if (post_mix.can_match || capture.can_match || pre_mix.can_match) {
                     r.isotone_included_conditionally = true;
@@ -419,9 +487,9 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
             }
             r.peace_included |= names_peace_file(value);
         } else if (key == "Device") {
-            std::string pattern = trim(value);
-            for (char& c : pattern) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            every_device = pattern == "all";
+            device = trim(value);
+            every_device = lower(device) == "all";
+            if (every_device) device = "all";
         } else if (key == "Stage") {
             r.has_stage_lines = true;
             // StageFilterFactory: lower case, split on spaces, any part matching.
@@ -433,19 +501,49 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
                 pre |= part == "pre-mix";
             }
             // A Stage line some devices or conditions skip leaves either value.
-            const bool everywhere = every_device && if_depth == 0;
+            const bool everywhere = every_device && if_depth() == 0;
             for (auto [reach, matches] : {std::pair{&post_mix, post}, {&capture, cap}, {&pre_mix, pre}}) {
                 *reach = everywhere ? Reach{matches, !matches}
                                     : Reach{reach->can_match || matches, reach->can_skip || !matches};
             }
+            const bool changed = !(post && cap && !pre);
+            if (everywhere) {
+                stage_default_everywhere = !changed;
+                stage_changed.clear();
+            } else {
+                auto it = find_pattern(stage_changed, device);
+                if (it == stage_changed.end()) it = stage_changed.emplace(stage_changed.end(), device, false);
+                it->second = if_depth() == 0 ? changed : it->second || changed;
+            }
         } else if (key == "If" || key == "ElseIf" || key == "Else" || key == "EndIf") {
             r.has_conditionals = true;
-            if (key == "If") ++if_depth;
-            if (key == "EndIf" && if_depth > 0) --if_depth;
+            const auto it = find_pattern(open_ifs, device);
+            if (key == "If") {
+                if (it != open_ifs.end()) {
+                    ++it->second;
+                } else {
+                    open_ifs.emplace_back(device, 1);
+                }
+            } else if (key == "EndIf") {
+                // Under `Device: all` with Ifs open under one pattern only, it
+                // closes one of those on every device that has one.
+                auto closed = it;
+                if (closed == open_ifs.end() && every_device && open_ifs.size() == 1) closed = open_ifs.begin();
+                if (closed != open_ifs.end() && --closed->second == 0) open_ifs.erase(closed);
+            }
         }
     }
-    r.open_ifs = if_depth;
+    r.open_ifs = if_depth();
     r.stage_changed_at_end = !stage_is_default();
+    // A change every device saw, or one under `Device: all`, is undone for all
+    // devices; otherwise each pattern's is undone for its devices.
+    const bool for_all = !stage_default_everywhere ||
+                         std::any_of(stage_changed.begin(), stage_changed.end(),
+                                     [](const auto& e) { return e.second && e.first == "all"; });
+    for (const auto& [pattern, changed] : stage_changed) {
+        if (changed && !for_all) r.stage_changed_under.push_back(pattern);
+    }
+    if (for_all) r.stage_changed_under.push_back("all");
     r.attached_by_isotone = attached_block_size(bytes) != 0;
     return r;
 }
@@ -488,7 +586,7 @@ AttachResult attach_include(const fs::path& config_dir) {
         return r;
     }
     const std::string block =
-        attach_block(newline_of(original), r.before.open_ifs, r.before.stage_changed_at_end);
+        attach_block(newline_of(original), r.before, !original.empty() && original.back() != '\n');
     LARGE_INTEGER zero{};
     DWORD written = 0;
     const bool ok = SetFilePointerEx(h, zero, nullptr, FILE_END) &&

@@ -81,13 +81,23 @@ std::string get(const fs::path& p) {
 // CRLF). Written out literally so CI, which has no sim/, runs the same test.
 constexpr char kOwnerConfig[] = "Include: peace.txt\r\n";
 
-// The block attach appends, with any lines it puts before the Include.
-std::string block(const char* nl, const std::vector<std::string>& before_include = {}) {
-    static const char* const kWords[] = {"three", "four", "five", "six"};
-    std::string out = std::string(nl) + "# Added by Isotone. Remove these " + kWords[before_include.size()] +
-                      " lines to detach it." + nl + "Device: all" + nl;
-    for (const std::string& line : before_include) out += line + nl;
+// The block attach appends, with `lines` between its comment and the Include,
+// after a line break when the file's last line has none.
+std::string attach_text(const char* nl, const std::vector<std::string>& lines, bool after_line_break = false) {
+    static const char* const kWords[] = {"three", "four", "five", "six", "seven", "eight", "nine"};
+    const size_t count = lines.size() + 2;
+    std::string out = std::string(after_line_break ? nl : "") + "# Added by Isotone. Remove these " +
+                      (count - 3 < 7 ? kWords[count - 3] : std::to_string(count)) + " lines" +
+                      (after_line_break ? " and the line break before them" : "") + " to detach it." + nl;
+    for (const std::string& line : lines) out += line + nl;
     return out + "Include: Isotone.txt" + nl;
+}
+
+// The same, for lines all under `Device: all`.
+std::string block(const char* nl, const std::vector<std::string>& before_include = {}, bool after_line_break = false) {
+    std::vector<std::string> lines{"Device: all"};
+    lines.insert(lines.end(), before_include.begin(), before_include.end());
+    return attach_text(nl, lines, after_line_break);
 }
 
 // Where write_file_atomically makes its temporary files by default.
@@ -658,9 +668,11 @@ TEST_CASE("every byte of a busy config survives, whatever its line endings and l
     CHECK(r.before.includes.size() == 2);
 
     // `Stage: post-mix` leaves the end of the file out of reach of capture
-    // devices, so the block undoes it before the Include.
+    // devices its Device line matches, so the block undoes it for them before
+    // the Include.
     const std::string after = get(s.dir / "config.txt");
-    const std::string appended = block("\n", {"Stage: post-mix capture"});
+    const std::string appended =
+        attach_text("\n", {"Device: Speakers Realtek", "Stage: post-mix capture", "Device: all"}, true);
     REQUIRE(after.size() == original.size() + appended.size());
     CHECK(after.compare(0, original.size(), original) == 0);
     CHECK(after.substr(original.size()) == appended);
@@ -1266,8 +1278,9 @@ bool match_device(const std::string& deviceString, const std::string& pattern) {
 //   Device   matches by DeviceFilterFactory::matchDevice; skips what follows
 //            until the next Device line, and is reset at the end of a file.
 //   If       IfFilterFactory's true and false counts, per file; an If left open
-//            is closed at the end of its file. Only the forms of expression
-//            Isotone and these tests write are evaluated.
+//            is closed at the end of its file, and an EndIf with none open is
+//            counted. Only the forms of expression Isotone and these tests
+//            write are evaluated.
 //   Include  loads the named file (from `files`), restoring the channel
 //            selection afterwards. It comes before Stage, so a file included
 //            under a Stage that does not match is loaded but none of its
@@ -1324,10 +1337,14 @@ public:
         true_counts_.clear();
         stage_matches_ = instance_.capture || !instance_.pre_mix || !instance_.post_mix_installed;
         stage_stack_.clear();
+        endif_without_if_ = 0;
         load_file(config, files);
         x_.resize(names_.size());
         return x_;
     }
+
+    // How many times the last run logged "EndIf without If!".
+    int endif_without_if() const { return endif_without_if_; }
 
 private:
     static std::string trim(const std::string& s) {
@@ -1388,6 +1405,7 @@ private:
         } else if (command == "EndIf") {
             if (false_count_ == 0) {
                 if (true_count_ != 0) true_count_--;
+            else ++endif_without_if_;   // upstream logs "EndIf without If!" and carries on
             } else {
                 false_count_--;
             }
@@ -1564,6 +1582,7 @@ private:
     std::vector<long> selection_;
     bool device_matches_ = true;
     int true_count_ = 0, false_count_ = 0;
+    int endif_without_if_ = 0;
     bool execute_else_ = false;
     std::vector<int> true_counts_;
     bool stage_matches_ = true;
@@ -2039,6 +2058,22 @@ TEST_CASE("a block read for another layout moves the speaker setup to that layou
     CHECK(unread[0].state.speakers.delay_ms[6] == 1.0);
 }
 
+TEST_CASE("a block read for no layout is read for stereo, speaker setup included") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {8, 0x63F};
+    d.sample_rate = 48000.0;
+    d.state.bands.push_back(band(FilterType::Peaking, 1000, -6, 1, WidthMode::Q, 1u << 1));   // R
+    d.state.speakers.inverted = (1u << 1) | (1u << 7);                                        // R, SR
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [](const std::string&) { return ChannelLayout{}; });
+    REQUIRE(parsed.size() == 1);
+    CHECK(parsed[0].state.layout_channels == 2);
+    CHECK(parsed[0].state.layout_speaker_mask == 0x3u);
+    REQUIRE(parsed[0].state.bands.size() == 1);
+    CHECK(parsed[0].state.bands[0].channels == 1u << 1);
+    CHECK(parsed[0].state.speakers.inverted == 1u << 1);
+}
+
 TEST_CASE("a channel count past what a stream can carry is written as the most it can") {
     DeviceConfig d;
     d.endpoint_guid = kStereo;
@@ -2412,6 +2447,152 @@ TEST_CASE("an Include under a Stage or an open If is not attached, and attach ap
     }
 }
 
+TEST_CASE("attach adds no blank line, and a line break only after a last line that has none") {
+    Sandbox s;
+    const std::string isotone_txt = update_isotone_file("", preamp_device(kStereo, -6.0));
+    struct Case {
+        const char* original;
+        std::string appended;
+        double gain_db;   // the file's own preamps, then Isotone.txt's
+    };
+    const Case cases[] = {
+        {"Preamp: -3 dB\r\n", block("\r\n"), -9.0},
+        {"Preamp: -3 dB\n", block("\n"), -9.0},
+        {"Preamp: -3 dB\r\n\r\n", block("\r\n"), -9.0},
+        {"Preamp: -1 dB\r\nPreamp: -3 dB", block("\r\n", {}, true), -10.0},
+        {"Preamp: -1 dB\nPreamp: -3 dB", block("\n", {}, true), -10.0},
+        {"Preamp: -3 dB", block("\r\n", {}, true), -9.0},
+        {"", block("\r\n"), -6.0},
+    };
+    for (const Case& c : cases) {
+        const std::string original = c.original;
+        CAPTURE(original);
+        put(s.dir / "config.txt", original);
+        REQUIRE(attach_include(s.dir).appended);
+        const std::string attached = get(s.dir / "config.txt");
+        CHECK(attached == original + c.appended);
+        CHECK(model_gain_db(attached, isotone_txt, post_mix()) == doctest::Approx(c.gain_db).epsilon(1e-6));
+        const ConfigInspection after = inspect_config(s.dir);
+        CHECK(after.isotone_included);
+        CHECK(after.attached_by_isotone);
+        CHECK_FALSE(attach_include(s.dir).appended);
+        bool removed = false;
+        REQUIRE(detach_include(s.dir, &removed) == ERROR_SUCCESS);
+        CHECK(removed);
+        CHECK(get(s.dir / "config.txt") == original);
+    }
+}
+
+namespace {
+
+// Device lines that match CABLE Input, by its GUID, and not the other device.
+constexpr char kCablePattern[] = "{798436d2-8c71-4834-9248-00ccbaaca00a}";
+
+UpstreamModel::Instance on_other_device(UpstreamModel::Instance i) {
+    i.device = std::string("Speakers Realtek High Definition Audio ") + kOther;
+    return i;
+}
+
+struct ModelRun {
+    double gain_db;
+    int endif_without_if;
+};
+
+ModelRun model_run(const std::string& config, const std::string& isotone_txt, const UpstreamModel::Instance& instance,
+                   double rate) {
+    std::vector<std::vector<double>> input(2, std::vector<double>(64, 0.5));
+    UpstreamModel model({2, 0x3}, rate, instance);
+    const auto out = model.run_config(config, {{"Isotone.txt", isotone_txt}}, input);
+    return {20.0 * std::log10(out[0][10] / 0.5), model.endif_without_if()};
+}
+
+}  // namespace
+
+TEST_CASE("attach closes each If and undoes each Stage only for the devices a Device line let see it") {
+    // Upstream's DeviceFilterFactory skips every other line, If, EndIf and
+    // Stage included, on a device its pattern does not match.
+    Sandbox s;
+    const std::string isotone_txt =
+        update_isotone_file(update_isotone_file("", preamp_device(kStereo, -6.0)), preamp_device(kOther, -6.0));
+    const auto config = [&] { return get(s.dir / "config.txt"); };
+    const std::string cable = std::string("Device: ") + kCablePattern;
+    UpstreamModel::Instance pre_mix_alone = pre_mix();
+    pre_mix_alone.post_mix_installed = false;
+
+    // Isotone.txt applies once for every device in every instance attach is for,
+    // and the block logs no EndIf without If that the file did not already.
+    const auto check_everywhere = [&](const std::string& text, bool stage_on_cable, bool stage_on_other) {
+        const std::string attached = config();
+        for (double rate : {48000.0, 44100.0}) {
+            for (bool other : {false, true}) {
+                struct Expected {
+                    const char* name;
+                    UpstreamModel::Instance instance;
+                    double gain_db;
+                };
+                std::vector<Expected> expected = {
+                    {"post-mix", post_mix(), -6.0}, {"capture", capture(), -6.0}, {"pre-mix", pre_mix(), 0.0}};
+                // A device that saw a Stage line is reset to post-mix capture,
+                // which a pre-mix instance with no post-mix installed does not match.
+                if (!(other ? stage_on_other : stage_on_cable)) expected.push_back({"pre-mix alone", pre_mix_alone, -6.0});
+                for (Expected e : expected) {
+                    if (other) e.instance = on_other_device(e.instance);
+                    CAPTURE(rate);
+                    CAPTURE(other);
+                    CAPTURE(e.name);
+                    const ModelRun with = model_run(attached, isotone_txt, e.instance, rate);
+                    const ModelRun without = model_run(text, "", e.instance, rate);
+                    CHECK(with.gain_db == doctest::Approx(e.gain_db).epsilon(1e-6));
+                    CHECK(with.endif_without_if == without.endif_without_if);
+                }
+            }
+        }
+        const ConfigInspection after = inspect_config(s.dir);
+        CHECK(after.isotone_included);
+        CHECK(after.attached_by_isotone);
+        CHECK_FALSE(attach_include(s.dir).appended);
+        bool removed = false;
+        REQUIRE(detach_include(s.dir, &removed) == ERROR_SUCCESS);
+        CHECK(removed);
+        CHECK(config() == text);
+    };
+
+    SUBCASE("an If left open under a Device line") {
+        const std::string text = cable + "\r\nIf: sampleRate == 44100\r\n";
+        put(s.dir / "config.txt", text);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + attach_text("\r\n", {cable, "EndIf:", "Device: all"}));
+        check_everywhere(text, false, false);
+    }
+
+    SUBCASE("a Stage line under a Device line") {
+        const std::string text = cable + "\r\nStage: capture\r\n";
+        put(s.dir / "config.txt", text);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + attach_text("\r\n", {cable, "Stage: post-mix capture", "Device: all"}));
+        check_everywhere(text, true, false);
+    }
+
+    SUBCASE("Ifs and Stage lines under several Device lines") {
+        const std::string text = "If: sampleRate == 44100\r\n" + cable + "\r\nIf: sampleRate == 44100\r\nStage: pre-mix\r\n"
+                                 "Device: Speakers\r\nIf: sampleRate == 48000\r\nStage: capture\r\n";
+        put(s.dir / "config.txt", text);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + attach_text("\r\n", {"Device: all", "EndIf:", cable, "EndIf:", "Device: Speakers", "EndIf:",
+                                                      cable, "Stage: post-mix capture", "Device: Speakers",
+                                                      "Stage: post-mix capture", "Device: all"}));
+        check_everywhere(text, true, true);
+    }
+
+    SUBCASE("an If opened under a Device line and closed under Device: all needs no EndIf") {
+        const std::string text = cable + "\r\nIf: sampleRate == 44100\r\nDevice: all\r\nEndIf:\r\n";
+        put(s.dir / "config.txt", text);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + block("\r\n"));
+        check_everywhere(text, false, false);
+    }
+}
+
 TEST_CASE("two writers in two threads never lose each other's blocks") {
     // Each writer re-reads the file after every persist: its own block must be
     // the one it just wrote, whatever the other did in between.
@@ -2677,10 +2858,10 @@ TEST_CASE("a writer refuses a device whose channel count or rate was not set") {
     CHECK(writer.persist(no_layout) == ERROR_INVALID_PARAMETER);
     CHECK_FALSE(fs::exists(writer.path()));
 
-    // What a default would do: ChannelLayout's 7.1 writes the routing for 8
-    // channels, which a stereo device never plays.
+    // What a guess would do: 7.1 writes the routing for 8 channels, which a
+    // stereo device never plays.
     DeviceConfig guessed = no_layout;
-    guessed.layout = ChannelLayout{};
+    guessed.layout = ChannelLayout{8, 0x63F};
     guessed.state.speakers.swap_left_right = true;
     std::vector<std::vector<double>> input(2, std::vector<double>(64, 0.5));
     input[1].assign(64, 0.25);
@@ -2725,6 +2906,64 @@ TEST_CASE("isotone-compat takes paths outside the ANSI code page and writes UTF-
     CAPTURE(inspected.out);
     CHECK(inspected.exit_code == 0);
     CHECK(inspected.out.find("\"ok\":true") != std::string::npos);
+}
+
+TEST_CASE("isotone-compat apply reads its input for the layout the text was written for") {
+    Sandbox s;
+    put(s.dir / "config.txt", "");
+    const fs::path input = s.dir / "surround51.txt";
+    // On 5.1 surround (L R C LFE SL SR) channel 6 is SR; on 7.1 it is RR.
+    put(input, "Channel: SL\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n"
+               "Channel: 6\nFilter 2: ON PK Fc 2000 Hz Gain -3 dB Q 1\n");
+    const auto apply = [&](std::vector<std::wstring> text_layout) {
+        std::vector<std::wstring> args = {L"apply", L"--root", s.dir.wstring(),
+                                          L"--device", L"{798436D2-8C71-4834-9248-00CCBAACA00A}",
+                                          L"--channels", L"8", L"--mask", L"0x63F", L"--rate", L"48000",
+                                          L"--speakers", L"lip_sync_ms=1"};
+        args.insert(args.end(), text_layout.begin(), text_layout.end());
+        args.push_back(input.wstring());
+        return run_cli(args);
+    };
+
+    const CliResult r = apply({L"--text-channels", L"6", L"--text-mask", L"0x60F"});
+    CAPTURE(r.out);
+    REQUIRE(r.exit_code == 0);
+    const std::string text = get(s.dir / "Isotone.txt");
+    CAPTURE(text);
+    CHECK(text.find("# Isotone: layout 8 0x63f\n") != std::string::npos);
+    CHECK(text.find("Channel: SL\nFilter 1: ON PK Fc 1000 Hz") != std::string::npos);
+    CHECK(text.find("Channel: SR\nFilter 2: ON PK Fc 2000 Hz") != std::string::npos);
+
+    // Without it the text is read for the device's layout.
+    const CliResult device = apply({});
+    CAPTURE(device.out);
+    REQUIRE(device.exit_code == 0);
+    CHECK(get(s.dir / "Isotone.txt").find("Channel: RR\nFilter 2: ON PK Fc 2000 Hz") != std::string::npos);
+
+    // A mask with no channel count is refused.
+    CHECK(apply({L"--text-mask", L"0x60F"}).exit_code == 2);
+}
+
+TEST_CASE("isotone-compat show reads for stereo unless a layout is given") {
+    Sandbox s;
+    put(s.dir / "config.txt", "");
+    // A 5.1 block with FR and SL muted.
+    put(s.dir / "flat.txt", "");
+    const CliResult applied = run_cli({L"apply", L"--root", s.dir.wstring(), L"--device",
+                                       L"{798436D2-8C71-4834-9248-00CCBAACA00A}", L"--channels", L"6", L"--mask",
+                                       L"0x60F", L"--rate", L"48000", L"--speakers", L"muted=0x12",
+                                       (s.dir / "flat.txt").wstring()});
+    CAPTURE(applied.out);
+    REQUIRE(applied.exit_code == 0);
+    // Stereo has FR and no SL; 7.1 would put SL on channel 6 as well.
+    const CliResult stereo = run_cli({L"show", L"--root", s.dir.wstring()});
+    CAPTURE(stereo.out);
+    REQUIRE(stereo.exit_code == 0);
+    CHECK(stereo.out.find("muted=0x2") != std::string::npos);
+    CHECK(stereo.out.find("muted=0x42") == std::string::npos);
+    const CliResult surround = run_cli({L"show", L"--root", s.dir.wstring(), L"--channels", L"8", L"--mask", L"0x63F"});
+    CAPTURE(surround.out);
+    CHECK(surround.out.find("muted=0x42") != std::string::npos);
 }
 
 TEST_CASE("the discontinuity flag on the first packet after Start is not a glitch") {

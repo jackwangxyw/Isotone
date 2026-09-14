@@ -428,6 +428,8 @@ int wmain(int argc, wchar_t** wargv) {
             std::fprintf(stderr, "measure needs --capture, or --loopback to capture the render endpoint\n");
         } else if (phase_ref != nullptr && (*phase_ref == '\0' || *phase_ref_end != '\0' || phase_ref_value < 0)) {
             std::fprintf(stderr, "--phase-ref '%s' is not a channel number\n", phase_ref);
+        } else if (!settle_is_enough(std::strtod(arg("--settle", "0.30"), nullptr))) {
+            std::fprintf(stderr, "--settle must be at least %.2f s\n", kMinSettleSeconds);
         } else {
             opt.render_query  = r;
             opt.capture_query = arg("--capture", "");

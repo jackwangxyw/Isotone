@@ -1702,8 +1702,7 @@ devicetool's JSON and skips visibly on a machine with no audio service.
 
 **Not changed, noted:** compat routing on the same channel count with a
 different mask can address different speakers (IsoAPO resolves routing by role);
-a band the remap disables keeps its old mask; `format_apo_config` (export) does
-not remap; a render stream that stalls without an error is not detected by
+a band the remap disables keeps its old mask; a render stream that stalls without an error is not detected by
 `isotone-measure`; `compat_tests` creates `%LOCALAPPDATA%\Isotone\compat-tmp`.
 
 **Measured live, compat backend and measurement tool** (CABLE Input to CABLE
@@ -1726,15 +1725,32 @@ the same state and analysed by `isotone-measure`'s own analysis code):
 The config directory (72 entries) matched the snapshot by hash and SDDL after
 every batch.
 
-**Noted from the live run, not changed:** the CLI sets a state's layout and the
-device's together (`--channels/--mask`), so a state for another layout was
-written through the library; attach adds a blank line after a file that already
-ends in a newline; attach's `EndIf:` also reaches devices a narrower `Device:`
-line excluded, where upstream would log "EndIf without If!" and carry on;
-`isotone-measure` records only the kept attempt's glitches, not why a retaken
-attempt failed.
+**Found in the live run, fixed afterwards** (each with a test that failed
+first and a mutation check):
+- `isotone-compat apply --text-channels N [--text-mask M]` gives the input's
+  layout separately from the device's.
+- Attach adds no blank line after a file that ends in a newline; when the last
+  line has no line break, the block starts with one and its comment says so, so
+  detach restores byte for byte. A block written by the earlier build still
+  detaches but leaves its blank line.
+- Attach closes each open `If:` and resets each `Stage:` change under the
+  `Device:` pattern it was opened under, so no device sees an `EndIf:` without
+  an `If:` (the upstream model counts them). Ambiguous cases keep the If counted:
+  at worst one extra `EndIf:` that upstream logs and ignores, never a hidden
+  include. A `Stage:` inside an `If:` is reset on every device its pattern
+  matches.
+- `isotone-measure` lists every discarded attempt per frequency with its reasons,
+  glitch parts, stream errors, frames and worst residual (`discarded_attempts`).
+- **A layout not given is stereo.** `ChannelLayout{}` is unspecified:
+  `parse_apo_config` reads it as stereo, `format_apo_config` writes for the given
+  layout (remapping the state), else the state's own, else stereo, and
+  `isotone-compat show` reads for stereo without `--channels`. It was 7.1.
+- A Filter line longer than 1024 characters is skipped before matching (above).
 
-**Tests:** `core_tests` 200 cases (MSVC 19.51 and GCC 16.1, warnings as errors),
+**Also found, not Isotone:** a single stale frame in cable captures, from
+VB-Cable; see the IsoAPO live results below.
+
+**Tests:** `core_tests` 202 cases (MSVC 19.51 and GCC 16.1, warnings as errors),
 `compat_tests`, `measure_tests`, `devices_tests`, the APO self test, the
 transport check and the reference check all pass.
 
@@ -1763,10 +1779,29 @@ missed 0.001 dB on the capture by up to 3.6 LSB; the ring matched the core
 exactly at each of them. A true communications-mode instance cannot be forced:
 CABLE Input's mode lists hold only the default mode.
 
-**Unexplained, not IsoAPO:** with a stream whose buffers are flagged silent,
-one cable capture in four held a single stale sample of an earlier tone on all
-8 channels; a ring capture over the same moment held none. It comes from after
-IsoAPO (the engine or VB-Cable).
+**A stale frame in cable captures, from VB-Cable** (investigated afterwards,
+about 400 live trials). VB-Cable keeps audio rendered into CABLE Input while no
+capture is open on CABLE Output, and when a capture and a render stream next run
+together it plays back one frame of it, once: 20 to 35 ms after the capture
+starts when the render stream was already running, 37 to 54 ms after the render
+starts when the capture was first (120 to 131 ms with exclusive capture).
+
+| Condition | Stale frame |
+|---|---|
+| a render stream running at capture start, silent-flagged or zero-valued | 189 of 190 |
+| no render stream at capture start | 0 of 84 |
+| exclusive render and exclusive capture (no APO on either side, no region) | 20 of 20 |
+| 150 ms or more of silence rendered before the earlier audio was replaced | 0 of 50 |
+
+The silent flag, IsoAPO and Equalizer APO play no part: it happens with no APO
+in the path, IsoAPO's ring is zero at that moment, and on the capture side
+Equalizer APO only filters the frame. The earlier run's 1 in 4 came from its own
+sequencing (a holder stream outliving the capture). `isotone-measure` settles
+before every window, so the frame never reaches one at its 0.3 s default;
+`--settle` below 0.1 s is now refused (test, mutation-checked). A cable test
+expecting exact zeros discards 60 ms after the later of the two starts (140 ms
+with exclusive capture), or renders 150 ms of silence before opening the
+capture.
 
 The Equalizer APO config dir matched its snapshot after every batch;
 `%ProgramData%\IsoAPO\devices` is empty; no region is held.
@@ -1783,7 +1818,7 @@ The Equalizer APO config dir matched its snapshot after every batch;
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 200 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
+| 2. Core | complete | 202 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
@@ -1852,17 +1887,17 @@ longer runs on CABLE Input (its pre-mix class there had been applying
 `peace.txt`). CABLE Output, the capture side, still has Equalizer APO. Every
 other endpoint is untouched. Nothing the owner listens to routes through the
 cable. The staged `C:\Program Files\Isotone\IsoAPO.dll` is the final backend
-review's build (SHA-256 EE9AECEE…8567, param block v5); the one before it is
-beside it as `IsoAPO.previous.dll`. `%ProgramData%\IsoAPO\devices` holds no
+review's build (SHA-256 EE9AECEE…8567, param block v5); the owner deleted the
+previous DLL's backup. `%ProgramData%\IsoAPO\devices` holds no
 saved state. CABLE Input's
 install record predates `Isotone.InstallMode`; `status` derives MFX from the
 slot, and a repair after a detach needs `--mode mfx`.
 
-**CABLE Input and CABLE Output are 7.1** (8 channels, 24-bit, 48 kHz, `0x63F`),
-set for the multichannel measurement; they were 2 channels, 24-bit, `0x3`.
-CABLE In 16ch is unchanged at 2 channels. To go back, Sound control panel:
-CABLE Input > Configure > Stereo, and CABLE Output > Properties > Advanced >
-2 channel, 24 bit, 48000 Hz.
+**CABLE Input and CABLE Output are stereo again** (2 channels, 24-bit, 48 kHz,
+`0x3`; float32 stereo mix format), set back on 2026-09-14 by the owner with the
+same `IPolicyConfig::SetDeviceFormat` call that made them 7.1, and checked in
+the registry and with `devicetool status`. A multichannel live test sets them
+to 7.1 first.
 
 To remove it, elevated:
 `.\build\windows\devicetool\isotone-devicetool.exe uninstall '{798436d2-8c71-4834-9248-00ccbaaca00a}'`

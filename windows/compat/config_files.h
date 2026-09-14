@@ -15,6 +15,7 @@
 
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace isotone::compat {
@@ -62,9 +63,19 @@ struct ConfigInspection {
     bool attached_by_isotone = false;// the block attach_include appends is the file's tail
     bool has_stage_lines = false;    // Stage: can hide what follows from the post-mix APO
     bool has_conditionals = false;   // If:/ElseIf:/Else:/EndIf: can hide it too
-    unsigned open_ifs = 0;           // If lines no EndIf closes by the end of the file
+    unsigned open_ifs = 0;           // If lines no EndIf closes by the end of the file, summed over
+                                     // open_ifs_under
+    // The Device pattern ("all" for none) the open Ifs were opened under, and
+    // how many, in the order first opened. Upstream skips If and EndIf lines on
+    // a device the pattern does not match. Where an EndIf may close an If on
+    // only some of the devices, the If stays counted.
+    std::vector<std::pair<std::string, unsigned>> open_ifs_under;
     bool stage_changed_at_end = false;   // a Stage line leaves the end of the file reaching other
                                          // instances than a file with no Stage line
+    // The Device patterns whose Stage lines leave the end of the file reaching
+    // other instances for their devices, in order; only "all" when a Stage line
+    // every device reached, or one under `Device: all`, does.
+    std::vector<std::string> stage_changed_under;
     std::vector<std::string> includes;   // every Include value, in order
 };
 ConfigInspection inspect_config(const std::filesystem::path& config_dir);
@@ -87,17 +98,32 @@ struct AttachResult {
 //   Device: all
 //   Include: Isotone.txt
 //
-// preceded by a line break so a file without a trailing newline keeps its last
-// line intact. `Device: all` is needed because a Device line earlier in
-// config.txt that does not match would otherwise make upstream skip the Include
-// line itself. An If config.txt leaves open would hide the Include too, so one
-// `EndIf:` per open If follows `Device: all` (IfFilterFactory counts them per
-// file); and a Stage line that leaves the end of the file for other instances
-// is undone by `Stage: post-mix capture` just before the Include. The comment's
-// count of lines includes them. That Stage line matches what a file with no
-// Stage line matches except a pre-mix instance with no post-mix instance
-// installed, which no Stage line can express without also matching pre-mix
-// where post-mix is installed.
+// When the file's last line has no line break, the block starts with one and
+// the comment says "Remove these three lines and the line break before them",
+// so the last line stays intact and detach knows to remove the break.
+// `Device: all` is needed because a Device line earlier in config.txt that does
+// not match would otherwise make upstream skip the Include line itself. An If
+// config.txt leaves open would hide the Include too, so one `EndIf:` per open If
+// comes first (IfFilterFactory counts them per file); and a Stage line that
+// leaves the end of the file for other instances is undone by
+// `Stage: post-mix capture` after them. Upstream skips If, EndIf and Stage
+// lines on a device a Device line does not match, so each EndIf and Stage line
+// is written under the Device pattern the If or Stage line it undoes was under
+// (open_ifs_under, stage_changed_under), with a Device line wherever the
+// pattern changes, and `Device: all` follows them:
+//
+//   # Added by Isotone. Remove these six lines to detach it.
+//   Device: Speakers
+//   EndIf:
+//   Stage: post-mix capture
+//   Device: all
+//   Include: Isotone.txt
+//
+// The comment's count of lines includes them. That Stage line matches what a
+// file with no Stage line matches except a pre-mix instance with no post-mix
+// instance installed, which no Stage line can express without also matching
+// pre-mix where post-mix is installed. A Stage line inside an If is undone
+// for every device its pattern matches, including those the If skipped it on.
 //
 // Nothing before the end of the file is rewritten: config.txt is opened
 // GENERIC_READ | GENERIC_WRITE with FILE_SHARE_READ, checked against the backup

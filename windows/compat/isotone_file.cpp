@@ -505,13 +505,14 @@ std::vector<ParsedDevice> parse_isotone_file(
         d.state = parsed.state;
         d.state.mute = mute;
         d.state.bypass = bypass;
-        // The curve's channel names resolved on this layout; the speaker setup's
-        // values move from the layout they were written for.
+        // The curve's channel names resolved on the layout the parse was for;
+        // the speaker setup's values move there from the layout they were
+        // written for.
         EqState moved;
         moved.speakers = speakers;
         moved.layout_channels = written.channels;
         moved.layout_speaker_mask = written.speaker_mask;
-        remap_channels(&moved, layout);
+        remap_channels(&moved, ChannelLayout{d.state.layout_channels, d.state.layout_speaker_mask});
         d.state.speakers = moved.speakers;
         d.warnings.insert(d.warnings.end(), parsed.warnings.begin(), parsed.warnings.end());
         d.unsupported = parsed.unsupported;

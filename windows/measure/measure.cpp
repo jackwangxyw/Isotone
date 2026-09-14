@@ -67,6 +67,8 @@ std::vector<std::string> utf8_args(int argc, wchar_t** argv) {
     return out;
 }
 
+bool settle_is_enough(double seconds) { return seconds >= kMinSettleSeconds; }
+
 std::vector<const Endpoint*> match_endpoints(const std::vector<Endpoint>& list, const std::string& query) {
     auto lower = [](std::string s) {
         for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -356,9 +358,13 @@ WindowResult take_window(RenderStream& render, CaptureStream& capture, const Win
         // from the filter that is being measured. Glitches are counted from
         // 100 ms before the window, since one reaches the capture only after
         // the path's latency.
-        uint32_t before = capture.discontinuities() + render.underruns();
+        uint32_t discontinuities_before = capture.discontinuities();
+        uint32_t underruns_before = render.underruns();
         for (int t = 0; t < plan.settle_ticks && !errored(); ++t) {
-            if (t == plan.settle_ticks - 10) before = capture.discontinuities() + render.underruns();
+            if (t == plan.settle_ticks - 10) {
+                discontinuities_before = capture.discontinuities();
+                underruns_before = render.underruns();
+            }
             render.pump(plan.frequency, plan.amplitude, phase);
             capture.pump(nullptr);
             tick();
@@ -383,23 +389,42 @@ WindowResult take_window(RenderStream& render, CaptureStream& capture, const Win
         w.stream_error = attempt_errors != 0;
         w.short_capture = w.frames_captured < plan.frames_required;
 
-        w.glitches = capture.discontinuities() + render.underruns() - before;
+        const uint32_t discontinuities = capture.discontinuities() - discontinuities_before;
+        const uint32_t underruns = render.underruns() - underruns_before;
+        w.glitches = discontinuities + underruns;
         // A splice WASAPI does not flag: measured on the cables, a window whose
         // level read 0.2 dB low on every channel had no discontinuity and no
         // underrun, but a residual of -7 dB against -99 dB in a clean one.
         // More than -40 dB of residual relative to the fitted sine, on any
         // channel carrying the tone, counts as a glitch.
+        bool spliced = false;
+        double worst_residual_db = std::numeric_limits<double>::quiet_NaN();
         for (uint32_t c = 0; c < w.captured.size(); ++c) {
             const std::complex<double> fit = dft_at(w.captured[c], plan.frequency, sample_rate);
             const double a = std::abs(fit);
-            if (a > kCarryingAmplitude &&
-                residual_rms(w.captured[c], fit, plan.frequency, sample_rate) > 0.01 * a / std::sqrt(2.0)) {
-                ++w.glitches;
-                break;
-            }
+            if (a <= kCarryingAmplitude) continue;
+            const double rms = residual_rms(w.captured[c], fit, plan.frequency, sample_rate);
+            if (rms > 0.01 * a / std::sqrt(2.0)) spliced = true;
+            const double db = rms > 0.0 ? 20.0 * std::log10(rms / (a / std::sqrt(2.0))) : -200.0;
+            if (std::isnan(worst_residual_db) || db > worst_residual_db) worst_residual_db = db;
         }
+        if (spliced) ++w.glitches;
         w.glitched = w.glitches != 0;
         if (!w.failed() || static_cast<int>(w.attempts) >= plan.max_attempts) break;
+
+        DiscardedAttempt d;
+        d.attempt = w.attempts;
+        d.stream_error = w.stream_error;
+        d.short_capture = w.short_capture;
+        d.glitched = w.glitched;
+        d.glitches = w.glitches;
+        d.discontinuities = discontinuities;
+        d.underruns = underruns;
+        d.stream_errors = attempt_errors;
+        d.frames_rendered = w.frames_rendered;
+        d.frames_captured = w.frames_captured;
+        d.residual_re_fit_db = worst_residual_db;
+        w.discarded.push_back(d);
     }
     return w;
 }
@@ -494,24 +519,43 @@ void write_json(std::FILE* out, const MeasureReport& report) {
     row("frames_captured", [&](const FrequencyResult& f) { return count(f.window.frames_captured); });
     row("failed", [&](const FrequencyResult& f) { return std::string(f.window.failed() ? "true" : "false"); });
 
-    std::fprintf(out, "  \"failed_windows\": [");
-    bool first = true;
-    for (size_t i = 0; i < n; ++i) {
-        const FrequencyResult& f = report.results[i];
-        if (!f.window.failed()) continue;
+    const auto reasons_of = [](bool stream_error, bool short_capture, bool glitched) {
         std::string reasons;
         const auto reason = [&](bool on, const char* name) {
             if (!on) return;
             reasons += (reasons.empty() ? "\"" : ", \"") + std::string(name) + "\"";
         };
-        reason(f.window.stream_error, "stream_error");
-        reason(f.window.short_capture, "short_capture");
-        reason(f.window.glitched, "glitch");
+        reason(stream_error, "stream_error");
+        reason(short_capture, "short_capture");
+        reason(glitched, "glitch");
+        return reasons;
+    };
+
+    std::fprintf(out, "  \"failed_windows\": [");
+    bool first = true;
+    for (size_t i = 0; i < n; ++i) {
+        const FrequencyResult& f = report.results[i];
+        if (!f.window.failed()) continue;
+        const std::string reasons = reasons_of(f.window.stream_error, f.window.short_capture, f.window.glitched);
         std::fprintf(out, "%s\n    {\"index\": %zu, \"frequency\": %s, \"reasons\": [%s]}", first ? "" : ",", i,
                      json_number(f.frequency).c_str(), reasons.c_str());
         first = false;
     }
     std::fprintf(out, "%s],\n", first ? "" : "\n  ");
+
+    row("discarded_attempts", [&](const FrequencyResult& f) {
+        std::string list = "[";
+        for (const DiscardedAttempt& d : f.window.discarded) {
+            if (list.size() > 1) list += ", ";
+            list += "{\"attempt\": " + count(d.attempt) + ", \"reasons\": [" +
+                    reasons_of(d.stream_error, d.short_capture, d.glitched) + "], \"glitches\": " + count(d.glitches) +
+                    ", \"discontinuities\": " + count(d.discontinuities) + ", \"underruns\": " + count(d.underruns) +
+                    ", \"stream_errors\": " + count(d.stream_errors) + ", \"frames_rendered\": " +
+                    count(d.frames_rendered) + ", \"frames_captured\": " + count(d.frames_captured) +
+                    ", \"residual_re_fit_db\": " + json_number(d.residual_re_fit_db) + "}";
+        }
+        return list + "]";
+    });
 
     row("phase_reference", [&](const FrequencyResult& f) {
         return f.channels.phase_reference < 0 ? std::string("null") : count(static_cast<uint64_t>(f.channels.phase_reference));
