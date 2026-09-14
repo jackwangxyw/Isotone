@@ -533,12 +533,17 @@ TEST_CASE("a filter line with a long run of whitespace reads as a short one, and
     CAPTURE(seconds);
     CHECK(seconds < 2.0);
 
-#if defined(NDEBUG)
-    SUBCASE("a line std::regex gives up on is skipped with a warning, as upstream skips it") {
-        // A million digits in Fc: Visual C++ throws error_stack, libstdc++ reads
-        // a number too large to be one. Either way the line is skipped. Optimised
-        // builds only: the debug Visual C++ library takes minutes to give up.
-        const std::string text = "Filter 1: ON PK Fc " + std::string(1000000, '1') + " Hz Gain -3 dB Q 1\n" +
+}
+
+TEST_CASE("a filter line longer than any filter is skipped before it is matched") {
+    // A million digits in Fc: Visual C++ threw error_stack, which was caught,
+    // but libstdc++ 13 matched the repeated group recursively, one frame per
+    // character, and the CI job crashed with SIGSEGV (2026-09-14). Upstream's own
+    // Visual C++ regex gives up on such a line too, so skipping it changes no
+    // result.
+    for (size_t digits : {5000u, 1000000u}) {
+        CAPTURE(digits);
+        const std::string text = "Filter 1: ON PK Fc " + std::string(digits, '1') + " Hz Gain -3 dB Q 1\n" +
                                  "Filter 2: ON PK Fc 200 Hz Gain -3 dB Q 1\n";
         ApoParseResult r;
         CHECK_NOTHROW(r = parse_apo_config(text));
@@ -546,8 +551,11 @@ TEST_CASE("a filter line with a long run of whitespace reads as a short one, and
         CHECK(r.state.bands[0].fc == 200.0);
         REQUIRE(r.warnings.size() == 1);
         CHECK(r.warnings[0].line == 1);
+        CHECK(r.warnings[0].text.find("longer") != std::string::npos);
     }
-#endif
+    // The longest line a real preset writes still reads.
+    const std::string longest = "Filter 1: ON LSC 12 dB Fc " + std::string(40, '1') + ".5 Hz Gain -12.345678901234 dB Q 0.707106781187\n";
+    CHECK(parse_apo_config(longest).state.bands.size() == 1);
 }
 
 TEST_CASE("a channel count larger than a stream can carry is bounded, with a warning") {

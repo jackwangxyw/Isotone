@@ -1505,7 +1505,11 @@ test fails, fix restored), unless listed as verified by reading.
   resets its count at each position and does not); on GCC 50,000 spaces took
   77 s. Whitespace runs are collapsed before matching (upstream's patterns only
   use `\s+`/`\s*`, so no result changes) and a line whose match still throws is
-  skipped with a warning, as upstream's loader does.
+  skipped with a warning, as upstream's loader does. A Filter line longer than
+  1024 characters after that is skipped before matching: on the CI runner's
+  GCC 13.3, libstdc++ matched a million-digit Fc recursively, one frame per
+  character, and crashed with SIGSEGV instead of throwing (the first push of
+  this review failed `core (ubuntu-latest)` on it; Windows builds had passed).
 - **Import reports everything it does not apply.** GraphicEQ, Include, Delay,
   Copy and unknown lines were in `unsupported` only, so an AutoEq GraphicEQ file
   imported as flat with nothing reported. `Filter N: OFF` with a whole filter is
@@ -1730,7 +1734,7 @@ line excluded, where upstream would log "EndIf without If!" and carry on;
 `isotone-measure` records only the kept attempt's glitches, not why a retaken
 attempt failed.
 
-**Tests:** `core_tests` 199 cases (MSVC 19.51 and GCC 16.1, warnings as errors),
+**Tests:** `core_tests` 200 cases (MSVC 19.51 and GCC 16.1, warnings as errors),
 `compat_tests`, `measure_tests`, `devices_tests`, the APO self test, the
 transport check and the reference check all pass.
 
@@ -1779,7 +1783,7 @@ The Equalizer APO config dir matched its snapshot after every batch;
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 199 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
+| 2. Core | complete | 200 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 

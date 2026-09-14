@@ -190,6 +190,13 @@ std::string collapse_whitespace(const std::string& s) {
     return out;
 }
 
+// The longest filter line matched, after whitespace is collapsed. A real one is
+// under 100 characters. libstdc++ matches a repeated group recursively, one
+// stack frame per character, and a line of a million digits overflowed the
+// stack instead of throwing; upstream's Visual C++ regex gives up on such a line
+// as well, so it is skipped either way.
+constexpr size_t kMaxFilterLineChars = 1024;
+
 // Returns false when the words select no channel. Upstream's ChannelFilter
 // starts from an empty selection and adds what it recognises, so the filters
 // after such a line act on nothing. Words it cannot use go to `ignored`.
@@ -693,6 +700,11 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
         if (command.rfind("Filter", 0) == 0) {
             const FilterPatterns& re = filter_patterns();
             const std::string norm = collapse_whitespace(normalise_decimal(params));
+            if (norm.size() > kMaxFilterLineChars) {
+                result.warnings.push_back({line_no, "filter line longer than " + std::to_string(kMaxFilterLineChars) +
+                                                        " characters, skipped"});
+                continue;
+            }
             std::smatch m;
             bool enabled = true;
             if (!std::regex_search(norm, m, re.type)) {
