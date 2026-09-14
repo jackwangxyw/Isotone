@@ -152,7 +152,7 @@ TEST_CASE("measured response matches the analytic curve") {
         const double measured = measure_gain_db(p, bin, kN, 0);
 
         double expected = 0.0;
-        magnitude_db(s, 0, &hz, 1, kFs, &expected);
+        magnitude_db(s, 2, 0, 0, &hz, 1, kFs, &expected);
 
         CAPTURE(bin);
         CAPTURE(hz);
@@ -162,9 +162,32 @@ TEST_CASE("measured response matches the analytic curve") {
     }
 }
 
-TEST_CASE("preamp, channel trim and mute are applied in the right order") {
+TEST_CASE("preamp, channel trim and mute set each channel's level, after routing") {
     constexpr size_t kN = 8192;
     const uint32_t bin = 171;  // about 1002 Hz
+
+    SUBCASE("trims and bands act on the output a signal is routed to") {
+        // Left and right swapped, a tone on the left input only. It plays on the
+        // right, so it takes the right channel's trim and band: -6 + 12 - 3 dB.
+        // Were routing after the EQ stage, it would take the left's: -6 dB.
+        EqState s;
+        s.preamp_db = -6.0;
+        s.channel_gain_db[1] = -3.0;
+        s.bands.push_back(peaking(bin_to_hz(bin, kN), 12.0, 1.0, ChannelMask{1} << 1));
+        s.speakers.swap_left_right = true;
+        Processor p = make(s, 2, static_cast<uint32_t>(kN));
+        std::vector<float> l(kN), r(kN);
+        float* ptr[2] = {l.data(), r.data()};
+        for (size_t pass = 0; pass < 2; ++pass) {   // the first pass settles the filter
+            for (size_t i = 0; i < kN; ++i) {
+                l[i] = static_cast<float>(std::sin(2.0 * kPi * bin * static_cast<double>(i) / static_cast<double>(kN)));
+                r[i] = 0.0f;
+            }
+            p.process(ptr, static_cast<uint32_t>(kN));
+        }
+        CHECK(20.0 * std::log10(amplitude_at_bin(r, bin)) == doctest::Approx(3.0).epsilon(1e-4));
+        CHECK(amplitude_at_bin(l, bin) < 1e-6);
+    }
 
     EqState s;
     s.preamp_db = -6.0;
@@ -279,7 +302,7 @@ TEST_CASE("an interleaved stream wider than the trim table is processed channel 
     const std::vector<double> gains = interleaved_gains_db(s, 12, bin, kN);
     for (uint32_t c = 0; c < 12; ++c) {
         double expected = 0.0;
-        magnitude_db(s, c, &hz, 1, kFs, &expected);
+        magnitude_db(s, 12, 0, c, &hz, 1, kFs, &expected);
         CAPTURE(c);
         CHECK(gains[c] == doctest::Approx(expected).epsilon(0.0).scale(1.0).epsilon(1e-3));
     }
@@ -304,7 +327,7 @@ TEST_CASE("channels past the mask width are reached only by all-channel bands") 
     CHECK(gains[33] == doctest::Approx(0.0).epsilon(1e-3));
 
     double curve = 1.0;
-    magnitude_db(s, 33, &hz, 1, kFs, &curve);
+    magnitude_db(s, 34, 0, 33, &hz, 1, kFs, &curve);
     CHECK(curve == doctest::Approx(0.0).epsilon(1e-9));
 }
 
@@ -452,7 +475,7 @@ TEST_CASE("smoothed parameters converge to their target") {
     const uint32_t bin = 683;  // about 4002 Hz
     const double hz = bin_to_hz(bin, kN);
     double expected = 0.0;
-    magnitude_db(s, 0, &hz, 1, kFs, &expected);
+    magnitude_db(s, 2, 0, 0, &hz, 1, kFs, &expected);
     CHECK(measure_gain_db(q, bin, kN, 0) == doctest::Approx(expected).epsilon(1e-3));
 }
 
@@ -725,7 +748,7 @@ TEST_CASE("measured response matches the analytic curve at 44.1 and 96 kHz") {
                 p.process(ptr, kN);
             }
             double expect = 0.0;
-            magnitude_db(s, 0, &f, 1, fs, &expect);
+            magnitude_db(s, 1, 0, 0, &f, 1, fs, &expect);
             CAPTURE(fs);
             CAPTURE(f);
             CHECK(std::abs(20.0 * std::log10(amplitude_at_bin(x, bin)) - expect) < 0.01);

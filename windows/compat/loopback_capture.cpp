@@ -9,6 +9,7 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <malloc.h>
@@ -95,25 +96,50 @@ std::wstring device_id_for(const std::string& endpoint) {
 
 }  // namespace
 
-HRESULT LoopbackCapture::start(const std::string& endpoint) {
+bool counts_as_glitch(DWORD flags, bool first_packet_after_start) {
+    return (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0 && !first_packet_after_start;
+}
+
+struct LoopbackCapture::State {
+    ~State() {
+        if (region != nullptr) _aligned_free(region);
+        if (ready != nullptr) CloseHandle(ready);
+    }
+    void* region = nullptr;   // AudioRingHeader then samples
+    HANDLE ready = nullptr;   // set when the stream is running or has failed
+    std::atomic<bool> stop{false};
+    std::atomic<bool> running{false};
+    std::atomic<HRESULT> thread_error{S_OK};
+    std::atomic<uint32_t> discontinuities{0};
+    std::atomic<uint32_t> sample_rate{0};
+    std::atomic<uint32_t> channels{0};
+};
+
+HRESULT LoopbackCapture::start(const std::string& endpoint, DWORD timeout_ms) {
     stop();
-    discontinuities_ = 0;
+    auto s = std::make_shared<State>();
     const size_t bytes = sizeof(AudioRingHeader) + size_t{kRingCapacityFrames} * kMaxChannels * sizeof(float);
-    region_ = _aligned_malloc(bytes, alignof(AudioRingHeader));
-    if (region_ == nullptr) return E_OUTOFMEMORY;
-    std::memset(region_, 0, bytes);
-    audio_ring_init(static_cast<AudioRingHeader*>(region_), kRingCapacityFrames);
+    s->region = _aligned_malloc(bytes, alignof(AudioRingHeader));
+    if (s->region == nullptr) return E_OUTOFMEMORY;
+    std::memset(s->region, 0, bytes);
+    audio_ring_init(static_cast<AudioRingHeader*>(s->region), kRingCapacityFrames);
 
-    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (ready == nullptr) return HRESULT_FROM_WIN32(GetLastError());
-    stop_ = false;
-    thread_error_ = S_OK;
-    thread_ = std::thread(&LoopbackCapture::run, this, device_id_for(endpoint), ready);
-    WaitForSingleObject(ready, INFINITE);
-    CloseHandle(ready);
+    s->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (s->ready == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_ = s;
+    }
+    thread_ = std::thread(&LoopbackCapture::run, s, device_id_for(endpoint));
+    const DWORD waited = WaitForSingleObject(s->ready, timeout_ms);
+    if (waited != WAIT_OBJECT_0) {
+        const HRESULT hr = HRESULT_FROM_WIN32(waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError());
+        stop();
+        return hr;
+    }
 
-    if (!running_) {
-        const HRESULT hr = thread_error_.load();
+    if (!s->running) {
+        const HRESULT hr = s->thread_error.load();
         stop();
         return FAILED(hr) ? hr : E_FAIL;
     }
@@ -121,22 +147,61 @@ HRESULT LoopbackCapture::start(const std::string& endpoint) {
 }
 
 void LoopbackCapture::stop() {
-    stop_ = true;
-    if (thread_.joinable()) thread_.join();
-    running_ = false;
-    if (region_ != nullptr) {
-        _aligned_free(region_);
-        region_ = nullptr;
+    std::shared_ptr<State> s;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        s.swap(state_);
     }
+    if (s) s->stop = true;
+    if (thread_.joinable()) {
+        // A thread that has not signalled may be blocked in the audio service
+        // for as long as that takes; it holds the state, so it can be left.
+        if (s && WaitForSingleObject(s->ready, 0) == WAIT_OBJECT_0) {
+            thread_.join();
+        } else {
+            thread_.detach();
+        }
+    }
+}
+
+std::shared_ptr<LoopbackCapture::State> LoopbackCapture::state() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_;
+}
+
+bool LoopbackCapture::running() const {
+    const auto s = state();
+    return s && s->running.load();
+}
+
+uint32_t LoopbackCapture::sample_rate() const {
+    const auto s = state();
+    return s ? s->sample_rate.load() : 0;
+}
+
+uint32_t LoopbackCapture::channels() const {
+    const auto s = state();
+    return s ? s->channels.load() : 0;
+}
+
+HRESULT LoopbackCapture::thread_error() const {
+    const auto s = state();
+    return s ? s->thread_error.load() : S_OK;
+}
+
+uint32_t LoopbackCapture::discontinuities() const {
+    const auto s = state();
+    return s ? s->discontinuities.load() : 0;
 }
 
 uint32_t LoopbackCapture::read(AudioRingCursor* cursor, float* out, uint32_t max_frames,
                                uint32_t* channels) const {
-    if (region_ == nullptr) return 0;
-    return audio_ring_read(static_cast<const AudioRingHeader*>(region_), kRingCapacityFrames, cursor, out, max_frames, channels);
+    const auto s = state();
+    if (!s) return 0;
+    return audio_ring_read(static_cast<const AudioRingHeader*>(s->region), kRingCapacityFrames, cursor, out, max_frames, channels);
 }
 
-void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
+void LoopbackCapture::run(std::shared_ptr<State> s, std::wstring device_id) {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IMMDeviceEnumerator* enumerator = nullptr;
     IMMDevice* device = nullptr;
@@ -145,13 +210,14 @@ void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
     WAVEFORMATEX* format = nullptr;
 
     const auto fail = [&](HRESULT hr) {
-        thread_error_ = hr;
+        s->thread_error = hr;
         return hr;
     };
 
     HRESULT hr = co;
     SampleKind kind = SampleKind::Unsupported;
     AudioRingWriter writer;
+    uint32_t channels = 0;
     if (SUCCEEDED(hr)) {
         hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                               __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
@@ -174,23 +240,25 @@ void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
         hr = client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(&capture));
     }
     if (SUCCEEDED(hr)) {
-        sample_rate_ = format->nSamplesPerSec;
-        channels_ = format->nChannels;
-        writer.attach(static_cast<AudioRingHeader*>(region_), kRingCapacityFrames);
-        writer.set_channels(channels_);
+        channels = format->nChannels;
+        s->sample_rate = format->nSamplesPerSec;
+        s->channels = channels;
+        writer.attach(static_cast<AudioRingHeader*>(s->region), kRingCapacityFrames);
+        writer.set_channels(channels);
         writer.claim((uint64_t{GetCurrentProcessId()} << 32) | 1u);
         hr = client->Start();
     }
 
     if (FAILED(hr)) {
         fail(hr);
-        SetEvent(ready);
+        SetEvent(s->ready);
     } else {
-        running_ = true;
-        SetEvent(ready);
+        s->running = true;
+        SetEvent(s->ready);
 
         std::vector<float> scratch;
-        while (!stop_) {
+        bool first_packet = true;
+        while (!s->stop) {
             Sleep(5);
             for (;;) {
                 UINT32 packet = 0;
@@ -200,13 +268,14 @@ void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
                 UINT32 frames = 0;
                 DWORD flags = 0;
                 if (FAILED(hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
-                if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) discontinuities_.fetch_add(1);
+                if (counts_as_glitch(flags, first_packet)) s->discontinuities.fetch_add(1);
+                first_packet = false;
                 if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                    writer.write(nullptr, channels_, frames);
+                    writer.write(nullptr, channels, frames);
                 } else {
-                    scratch.resize(size_t{frames} * channels_);
+                    scratch.resize(size_t{frames} * channels);
                     to_float(kind, data, scratch.size(), scratch.data());
-                    writer.write(scratch.data(), channels_, frames);
+                    writer.write(scratch.data(), channels, frames);
                 }
                 capture->ReleaseBuffer(frames);
             }
@@ -218,7 +287,7 @@ void LoopbackCapture::run(std::wstring device_id, HANDLE ready) {
             }
         }
         client->Stop();
-        running_ = false;
+        s->running = false;
     }
 
     if (capture) capture->Release();

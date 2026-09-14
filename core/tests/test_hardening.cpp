@@ -131,6 +131,61 @@ TEST_CASE("moving a band to another channel crossfades on both channels") {
     CHECK(level_db(out.r, out.r.size() - 4800, out.r.size(), 1000.0) == doctest::Approx(12.0).epsilon(0.001));
 }
 
+TEST_CASE("widening a band's channels leaves it untouched where it already was") {
+    // A -12 dB bell at 40 Hz, Q 10, on the left, widened to both channels. On the
+    // left it is the same filter before and after. Restarted from rest under the
+    // fade, it lifted the left channel by 9 dB for 125 ms (review 2026-09-13).
+    constexpr uint32_t kAt = 24000;
+    const auto run = [](bool widen, bool change_type) {
+        EqState s;
+        s.bands.push_back(peaking(40.0, -12.0, 10.0));
+        s.bands[0].channels = ChannelMask{1} << 0;
+        Mutation m{[=, &s](uint32_t pos) {
+            if (change_type && pos == kAt) {
+                s.bands[0].type = FilterType::LowShelf;
+                s.bands[0].width = 0.7;
+                return true;
+            }
+            // Alone, at the same moment; with a type change, 2 ms into its fade,
+            // so it waits for that fade to finish.
+            if (widen && pos == (change_type ? kAt + 96 : kAt)) {
+                s.bands[0].channels = (ChannelMask{1} << 0) | (ChannelMask{1} << 1);
+                return true;
+            }
+            return false;
+        }, nullptr};
+        return render(s, 2.0, 48, m, 40.0);
+    };
+    const auto worst_difference = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double worst = 0.0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            worst = std::max(worst, std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+        }
+        return worst;
+    };
+
+    SUBCASE("alone") {
+        const Stereo widened = run(true, false);
+        const Stereo left_only = run(false, false);
+        CAPTURE(worst_difference(widened.l, left_only.l));
+        CHECK(worst_difference(widened.l, left_only.l) < 1e-6);
+        // The right channel fades the band in without a click and ends at -12 dB.
+        CAPTURE(worst_step(widened.r));
+        CHECK(worst_step(widened.r) < sine_step_limit(1.0, 40.0) * 1.10);
+        CHECK(level_db(widened.r, widened.r.size() - 24000, widened.r.size(), 40.0) ==
+              doctest::Approx(-12.0).epsilon(0.001));
+    }
+    SUBCASE("queued behind a change of type") {
+        const Stereo widened = run(true, true);
+        const Stereo left_only = run(false, true);
+        CAPTURE(worst_difference(widened.l, left_only.l));
+        CHECK(worst_difference(widened.l, left_only.l) < 1e-6);
+        // A shelf starting from rest under the fade, as any band appearing does.
+        CAPTURE(worst_step(widened.r));
+        CHECK(worst_step(widened.r) < sine_step_limit(1.0, 40.0) * 1.5);
+    }
+}
+
 TEST_CASE("re-enabling a band while it is still fading out does not click") {
     EqState s;
     s.bands.push_back(peaking(1000.0, 12.0, 1.0));
@@ -287,9 +342,137 @@ TEST_CASE("a band with no width is off in the audio, as it is in the drawn curve
     const Stereo out = render(s, 0.3, 64, m);
     const double freq = 1000.0;
     double drawn = 0.0;
-    magnitude_db(s, 0, &freq, 1, kFs, &drawn);
+    magnitude_db(s, 2, 0, 0, &freq, 1, kFs, &drawn);
     CHECK(drawn == doctest::Approx(0.0));
     CHECK(level_db(out.l, 4800, out.l.size(), 1000.0) == doctest::Approx(drawn).epsilon(0.001));
+}
+
+TEST_CASE("a band's width is clamped, so no filter plays past the gain limit or goes unstable") {
+    // A low-pass peaks at +20 log10(Q): Q 1e6 played +120 dB, around the 60 dB
+    // gain limit, and Q 1e17 designed a2 = 1, whose output grew without bound
+    // (review 2026-09-13). At the clamp it peaks at +60 dB, as the curve draws.
+    for (double q : {1e6, 1e17}) {
+        CAPTURE(q);
+        EqState s;
+        Band lp;
+        lp.type = FilterType::LowPass;
+        lp.fc = 1000.0;
+        lp.width = q;
+        s.bands.push_back(lp);
+        Mutation m{[](uint32_t) { return false; }, nullptr};
+        const Stereo out = render(s, 3.0, 480, m, 1000.0, 1e-4);
+        const double freq = 1000.0;
+        double drawn = 0.0;
+        magnitude_db(s, 2, 0, 0, &freq, 1, kFs, &drawn);
+        CHECK(drawn == doctest::Approx(kMaxBandGainDb).epsilon(1e-6));
+        CHECK(level_db(out.l, out.l.size() - 24000, out.l.size(), 1000.0) ==
+              doctest::Approx(-80.0 + drawn).epsilon(0.0005));
+    }
+    SUBCASE("the export writes the width that is played") {
+        EqState s;
+        Band lp;
+        lp.type = FilterType::LowPass;
+        lp.fc = 1000.0;
+        lp.width = 1e6;
+        s.bands.push_back(lp);
+        Band shelf;
+        shelf.type = FilterType::HighShelf;
+        shelf.fc = 3000.0;
+        shelf.gain_db = 6.0;
+        shelf.width = 50.0;
+        s.bands.push_back(shelf);
+        const ApoParseResult r = parse_apo_config(format_apo_config(s));
+        REQUIRE(r.state.bands.size() == 2);
+        CHECK(r.state.bands[0].width == doctest::Approx(kMaxQ));
+        CHECK(r.state.bands[1].width == doctest::Approx(kMaxShelfQ));
+    }
+}
+
+TEST_CASE("a new band with a non-finite value plays what the curve draws, not the band before it") {
+    // Delete a +12 dB band, add another with a NaN gain: the curve drew it flat
+    // and the processor played +12 dB, the deleted band's target (review
+    // 2026-09-13). A band keeps a previous value only if it had one of its own.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const auto drawn_at_1k = [](const EqState& s) {
+        const double freq = 1000.0;
+        double db = 0.0;
+        magnitude_db(s, 2, 0, 0, &freq, 1, kFs, &db);
+        return std::isfinite(db) ? db : -999.0;
+    };
+
+    SUBCASE("in a free slot") {
+        EqState s;
+        Band first = peaking(1000.0, 12.0, 1.0);
+        first.id = 1;
+        s.bands.push_back(first);
+        Band second = peaking(1000.0, nan, 1.0);
+        second.id = 2;
+        EqState drawn;
+        Mutation m{[&](uint32_t pos) {
+            if (pos == 9600) {
+                s.bands.clear();
+                return true;
+            }
+            if (pos == 19200) {
+                s.bands.push_back(second);
+                drawn = s;
+                return true;
+            }
+            if (pos == 38400) {
+                s.bands[0].gain_db = 6.0;
+                return true;
+            }
+            return false;
+        }, nullptr};
+        const Stereo out = render(s, 1.0, 64, m);
+        CHECK(drawn_at_1k(drawn) == doctest::Approx(0.0));
+        CHECK(level_db(out.l, 28800, 38400, 1000.0) == doctest::Approx(0.0).epsilon(0.001));
+        // The value it gets later is its first, so it starts there rather than
+        // sweeping in from the deleted band's +12 dB.
+        CHECK(level_db(out.l, 38400 + 960, 38400 + 1920, 1000.0) == doctest::Approx(6.0).epsilon(0.01));
+        CHECK(level_db(out.l, out.l.size() - 4800, out.l.size(), 1000.0) == doctest::Approx(6.0).epsilon(0.001));
+    }
+    SUBCASE("replacing a band in its slot") {
+        // One slot, so the new band takes the old band's.
+        Processor p;
+        p.initialize(kFs, 1, 64, 1);
+        EqState s;
+        Band first = peaking(1000.0, 12.0, 1.0);
+        first.id = 1;
+        s.bands.push_back(first);
+        p.set_target(s);
+        p.reset();
+        std::vector<float> out;
+        std::vector<float> buf(64);
+        float* ptr[1] = {buf.data()};
+        for (uint32_t pos = 0; pos < 48000; pos += 64) {
+            if (pos == 9600) {
+                s.bands[0] = peaking(1000.0, nan, 1.0);
+                s.bands[0].id = 2;
+                p.set_target(s);
+            }
+            for (uint32_t i = 0; i < 64; ++i) buf[i] = static_cast<float>(std::sin(2.0 * kPi * 1000.0 * (pos + i) / kFs));
+            p.process(ptr, 64);
+            out.insert(out.end(), buf.begin(), buf.end());
+        }
+        CHECK(drawn_at_1k(s) == doctest::Approx(0.0));
+        CHECK(level_db(out, 24000, 48000, 1000.0) == doctest::Approx(0.0).epsilon(0.001));
+        // A value the band does not have is not one it is moving toward.
+        CHECK_FALSE(p.is_settling());
+    }
+    SUBCASE("a band that had a value keeps it") {
+        EqState s;
+        s.bands.push_back(peaking(1000.0, 12.0, 1.0));
+        Mutation m{[&](uint32_t pos) {
+            if (pos == 9600) {
+                s.bands[0].gain_db = nan;
+                return true;
+            }
+            return false;
+        }, nullptr};
+        const Stereo out = render(s, 0.5, 64, m);
+        CHECK(level_db(out.l, out.l.size() - 4800, out.l.size(), 1000.0) == doctest::Approx(12.0).epsilon(0.001));
+    }
 }
 
 TEST_CASE("changing a band's width mode does not sweep through widths of the other unit") {
@@ -423,18 +606,35 @@ TEST_CASE("for a device's sample rate, frequencies are written as the processor 
 }
 
 TEST_CASE("numbers are read and written with a period whatever the C locale") {
+    // Restores the locale however the test ends, a failed REQUIRE included.
+    struct Restore {
+        std::string saved;
+        ~Restore() { std::setlocale(LC_NUMERIC, saved.c_str()); }
+    };
     const char* previous = std::setlocale(LC_NUMERIC, nullptr);
-    const std::string saved = previous ? previous : "C";
-    const char* german = std::setlocale(LC_NUMERIC, "de-DE");
-    if (german == nullptr) german = std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
-    if (german == nullptr) german = std::setlocale(LC_NUMERIC, "German");
-    if (german == nullptr) {
-        MESSAGE("no comma-decimal locale installed; locale independence not exercised");
+    const Restore restore{previous ? previous : "C"};
+
+    // A locale counts only if the C library then writes a comma.
+    const char* found = nullptr;
+    for (const char* name : {"de_DE.UTF-8", "de_DE", "de-DE", "German", "fr_FR.UTF-8", "fr_FR", "fr-FR",
+                             "French", "es_ES.UTF-8", "it_IT.UTF-8", "nl_NL.UTF-8", "ru_RU.UTF-8"}) {
+        if (std::setlocale(LC_NUMERIC, name) == nullptr) continue;
+        char probe[16];
+        std::snprintf(probe, sizeof(probe), "%.1f", 1.5);
+        if (std::string(probe) == "1,5") {
+            found = name;
+            break;
+        }
+    }
+    if (found == nullptr) {
+        WARN_MESSAGE(false, "no comma-decimal C locale is installed, so this test checks nothing here");
         return;
     }
+    const std::string locale_name = found;
+    CAPTURE(locale_name);
     char probe[16];
     std::snprintf(probe, sizeof(probe), "%.1f", 1.5);
-    CAPTURE(probe);
+    REQUIRE(std::string(probe) == "1,5");
     CHECK(format_apo_number(1419.85) == "1419.85");
     CHECK(format_apo_config(EqState{}).find(',') == std::string::npos);
     const ApoParseResult r = parse_apo_config("Filter 1: ON PK Fc 1419.85 Hz Gain -3.5 dB Q 1.25\n");
@@ -447,7 +647,6 @@ TEST_CASE("numbers are read and written with a period whatever the C locale") {
     std::string error;
     CHECK(parse_speaker_setup(format_speaker_setup(sp), &back, &error));
     CHECK(back.delay_ms[1] == 1.5);
-    std::setlocale(LC_NUMERIC, saved.c_str());
 }
 
 TEST_CASE("width forms the importer does not accept are exported as the Q that designs the same filter") {
@@ -474,8 +673,8 @@ TEST_CASE("width forms the importer does not accept are exported as the Q that d
     REQUIRE(r.state.bands.size() == 3);
     const std::vector<double> grid = log_grid(20.0, 20000.0, 128);
     std::vector<double> a(grid.size()), b(grid.size());
-    magnitude_db(s, 0, grid.data(), grid.size(), kFs, a.data());
-    magnitude_db(r.state, 0, grid.data(), grid.size(), kFs, b.data());
+    magnitude_db(s, 2, 0, 0, grid.data(), grid.size(), kFs, a.data());
+    magnitude_db(r.state, 2, 0, 0, grid.data(), grid.size(), kFs, b.data());
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-6));
@@ -502,8 +701,8 @@ TEST_CASE("a bandwidth shelf with the corner flag exports as the filter the proc
         REQUIRE(r.state.bands.size() == 1);
         const std::vector<double> grid = log_grid(20.0, 20000.0, 128);
         std::vector<double> a(grid.size()), b(grid.size());
-        magnitude_db(s, 0, grid.data(), grid.size(), fs, a.data());
-        magnitude_db(r.state, 0, grid.data(), grid.size(), fs, b.data());
+        magnitude_db(s, 2, 0, 0, grid.data(), grid.size(), fs, a.data());
+        magnitude_db(r.state, 2, 0, 0, grid.data(), grid.size(), fs, b.data());
         double worst = 0.0;
         for (size_t i = 0; i < grid.size(); ++i) worst = std::max(worst, std::abs(a[i] - b[i]));
         CAPTURE(fs);
@@ -536,8 +735,8 @@ TEST_CASE("the export never writes a filter Equalizer APO would design unstable 
         // And it is the filter the processor designs for the original slope.
         const std::vector<double> grid = log_grid(20.0, 20000.0, 64);
         std::vector<double> a(grid.size()), b(grid.size());
-        magnitude_db(s, 0, grid.data(), grid.size(), kFs, a.data());
-        magnitude_db(r.state, 0, grid.data(), grid.size(), kFs, b.data());
+        magnitude_db(s, 2, 0, 0, grid.data(), grid.size(), kFs, a.data());
+        magnitude_db(r.state, 2, 0, 0, grid.data(), grid.size(), kFs, b.data());
         for (size_t i = 0; i < grid.size(); ++i) CHECK(std::abs(a[i] - b[i]) < 0.001);
     }
     SUBCASE("a band with no width is written off") {
@@ -597,4 +796,56 @@ TEST_CASE("mute is exported as silence and read back as mute") {
     CHECK(partial.unsupported.size() == 1);
     const ApoParseResult swap = parse_apo_config("Copy: L=R R=L\n");
     CHECK_FALSE(swap.state.mute);
+}
+
+TEST_CASE("a Copy line is mute only where Equalizer APO reads every source as zero") {
+    // Upstream CopyFilterFactory: a lone summand is a factor only if it is "0"
+    // or contains a period; anything else names a channel, and a name that
+    // resolves to nothing adds a constant 1.0. `L=-0` and `L=00` play full-scale
+    // DC there; they were read as mute (review 2026-09-13).
+    const ChannelLayout stereo{2, 0x3};
+    const char* const mute[] = {
+        "Copy: L=0 R=0",
+        "Copy: L=0.0 R=.0",
+        "Copy: L=+0 R=0",           // split on '+' drops the empty summand
+        "Copy: L=0+0 R=-0.0",
+        "Copy: L==0 R=0",           // split on '=' drops the empty part
+        "Copy: L=0*L R=0*R",
+        "Copy: L=-1000.0dB R=0",    // 10^-50 is 0 as a float
+        "Copy: L=1.0e-400 R=0",     // below double's range, wcstod gives 0
+        "Copy: L=-1.0e400dB R=0",   // wcstod gives -inf, and 10^-inf is 0
+        "Copy: L=0x0.0 R=0",
+        "Copy: L=+-1000.0dB R=0",   // the '+' separates summands: -1000 dB
+        "Copy: 1=0 2=0",
+        "Copy: R=0 L=0",
+    };
+    for (const char* text : mute) {
+        const std::string line = text;
+        CAPTURE(line);
+        const ApoParseResult r = parse_apo_config(std::string(line) + "\n", stereo);
+        CHECK(r.state.mute);
+        CHECK(r.unsupported.empty());
+    }
+    const char* const not_mute[] = {
+        "Copy: L=-0 R=0",           // the channel "-0", which does not exist: DC
+        "Copy: L=00 R=0",           // channel number 0, out of range: DC
+        "Copy: L=0-0 R=0",
+        "Copy: l=0 r=0",            // new channels l and r; L and R play
+        "Copy: L=0dB R=0",          // no period: a channel name
+        "Copy: L=0.0dB R=0",        // 0 dB is a factor of 1
+        "Copy: L=1.0e400 R=0",
+        "Copy: L=--1000.0dB R=0",   // no number, so 0 dB
+        "Copy: L=x.0dB R=0",
+        "Copy: L=0 R=0 L=L",
+        "Copy: L=0",
+        "Copy: L=0\tR=0",           // words split on spaces only
+        "Copy: L=0 R=0\t",          // the tab is part of the source: channel "0\t", DC
+    };
+    for (const char* text : not_mute) {
+        const std::string line = text;
+        CAPTURE(line);
+        const ApoParseResult r = parse_apo_config(std::string(line) + "\n", stereo);
+        CHECK_FALSE(r.state.mute);
+        CHECK(r.unsupported.size() == 1);
+    }
 }

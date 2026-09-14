@@ -182,23 +182,28 @@ CASES = [
 CHECK_TOLERANCE = 1e-9
 
 
-def parse_reference(path: pathlib.Path) -> dict:
-    """Reads a reference file back into {case name: {"magnitude_db": [...], ...}}."""
+def parse_reference(text: str) -> dict:
+    """Reads a reference file's text back into its header, grid and cases."""
     tokens = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if line.startswith("#"):
             continue
         tokens.extend(line.split())
 
-    out, i = {}, 0
-    points = 0
+    header, freqs, cases, i = {}, [], {}, 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok == "points":
-            points = int(tokens[i + 1]); i += 2
+        if tok in ("version", "sample_rate", "points", "cases"):
+            header[tok] = float(tokens[i + 1]); i += 2
+        elif tok == "freqs":
+            points = int(header["points"])
+            freqs = [float(v) for v in tokens[i + 1:i + 1 + points]]
+            i += 1 + points
         elif tok == "case":
-            name = tokens[i + 1]
-            i += 8  # case <name> <type> <fc> <gain> <width> <mode> <corner>
+            points = int(header["points"])
+            # case <name> <type> <fc> <gain> <width> <mode> <corner>
+            name, ftype, fc, gain, width, mode, corner = tokens[i + 1:i + 8]
+            i += 8
             assert tokens[i] == "coeffs", tokens[i]
             coeffs = [float(v) for v in tokens[i + 1:i + 6]]
             i += 6
@@ -208,85 +213,83 @@ def parse_reference(path: pathlib.Path) -> dict:
             assert tokens[i] == "phase_deg", tokens[i]
             phase = [float(v) for v in tokens[i + 1:i + 1 + points]]
             i += 1 + points
-            out[name] = {"coeffs": coeffs, "magnitude_db": mag, "phase_deg": phase}
+            if name in cases:
+                raise ValueError(f"case {name} appears twice")
+            cases[name] = {"labels": [ftype, mode, corner],
+                           "params": [float(fc), float(gain), float(width)],
+                           "coeffs": coeffs, "magnitude_db": mag, "phase_deg": phase}
         else:
-            i += 1
-    return out
+            raise ValueError(f"unexpected token {tok!r}")
+    return {"header": header, "freqs": freqs, "cases": cases}
 
 
 def check(payloads: dict) -> int:
-    """Compares freshly computed values against the checked-in files."""
+    """Compares freshly generated files against the checked-in ones.
+
+    Both go through parse_reference, so what is checked is exactly what the
+    generator writes, and a case either side lacks fails.
+    """
     worst, worst_where, failures = 0.0, "", 0
-    for fs, cases in payloads.items():
+
+    def compare(where: str, fresh: list, old: list) -> None:
+        nonlocal worst, worst_where, failures
+        if len(fresh) != len(old):
+            print(f"LENGTH {where}")
+            failures += 1
+            return
+        for a, b in zip(fresh, old):
+            d = abs(a - b)
+            if d > worst:
+                worst, worst_where = d, where
+            if d > CHECK_TOLERANCE:
+                failures += 1
+
+    for fs, text in payloads.items():
         path = OUT_DIR / f"response_{int(fs)}.txt"
         if not path.exists():
             print(f"MISSING {path.name}")
             failures += 1
             continue
-        stored = parse_reference(path)
+        fresh = parse_reference(text)
+        stored = parse_reference(path.read_text(encoding="utf-8"))
 
-        for c in cases:
-            if c["name"] not in stored:
-                print(f"MISSING case {c['name']} in {path.name}")
+        for key in sorted(fresh["header"].keys() | stored["header"].keys()):
+            if fresh["header"].get(key) != stored["header"].get(key):
+                print(f"HEADER {path.name} {key}: {stored['header'].get(key)}, "
+                      f"expected {fresh['header'].get(key)}")
                 failures += 1
-                continue
-            have = stored[c["name"]]
-            k = c["coeffs"]
-            pairs = [
-                ("coeffs", [k["b0"], k["b1"], k["b2"], k["a1"], k["a2"]], have["coeffs"]),
-                ("magnitude_db", c["magnitude_db"], have["magnitude_db"]),
-                ("phase_deg", c["phase_deg"], have["phase_deg"]),
-            ]
-            for field, fresh, old in pairs:
-                if len(fresh) != len(old):
-                    print(f"LENGTH {path.name} {c['name']} {field}")
-                    failures += 1
-                    continue
-                for a, b in zip(fresh, old):
-                    d = abs(a - b)
-                    if d > worst:
-                        worst, worst_where = d, f"{path.name} {c['name']} {field}"
-                    if d > CHECK_TOLERANCE:
-                        failures += 1
+        compare(f"{path.name} freqs", fresh["freqs"], stored["freqs"])
+
+        for name in sorted(stored["cases"].keys() - fresh["cases"].keys()):
+            print(f"EXTRA case {name} in {path.name} is not in CASES")
+            failures += 1
+        for name in sorted(fresh["cases"].keys() - stored["cases"].keys()):
+            print(f"MISSING case {name} in {path.name}")
+            failures += 1
+
+        for name in sorted(fresh["cases"].keys() & stored["cases"].keys()):
+            new, have = fresh["cases"][name], stored["cases"][name]
+            if new["labels"] != have["labels"]:
+                print(f"HEADER {path.name} {name}: {have['labels']}, expected {new['labels']}")
+                failures += 1
+            for field in ("params", "coeffs", "magnitude_db", "phase_deg"):
+                compare(f"{path.name} {name} {field}", new[field], have[field])
 
     print(f"largest difference {worst:.3e} at {worst_where}")
     print(f"tolerance {CHECK_TOLERANCE:.0e}")
     if failures:
-        print(f"FAIL: {failures} value(s) outside tolerance")
+        print(f"FAIL: {failures} value(s) outside tolerance, or cases missing or extra")
         return 1
     print("OK: checked-in reference data matches a fresh computation")
     return 0
 
 
 def compute() -> dict:
-    """Returns {sample_rate: [case dicts]} without touching the filesystem."""
+    """Returns {sample_rate: file text} without touching the filesystem.
+
+    The generator writes this text and --check parses it, so the two cannot drift.
+    """
     payloads = {}
-    for fs in SAMPLE_RATES:
-        f_hi = fs * 0.5 * 0.95
-        freqs = np.logspace(math.log10(GRID_LO), math.log10(f_hi), GRID_POINTS)
-        cases = []
-        for name, ftype, fc, gain, width, mode, corner in CASES:
-            b, a = design(ftype, fc, gain, width, mode, fs, corner)
-            _, h = signal.freqz(b, a, worN=freqs, fs=fs)
-            cases.append({
-                "name": name, "type": ftype, "fc": fc, "gain_db": gain,
-                "width": width, "width_mode": mode, "shelf_corner": corner,
-                "coeffs": {"b0": b[0], "b1": b[1], "b2": b[2], "a1": a[1], "a2": a[2]},
-                "magnitude_db": [float(v) for v in 20.0 * np.log10(np.abs(h))],
-                "phase_deg": [float(v) for v in np.degrees(np.angle(h))],
-                "freqs": [float(v) for v in freqs],
-            })
-        payloads[fs] = cases
-    return payloads
-
-
-def main() -> None:
-    if "--check" in sys.argv:
-        raise SystemExit(check(compute()))
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    written = 0
-
     for fs in SAMPLE_RATES:
         f_hi = fs * 0.5 * 0.95
         freqs = np.logspace(math.log10(GRID_LO), math.log10(f_hi), GRID_POINTS)
@@ -315,30 +318,43 @@ def main() -> None:
         # Flat whitespace-separated text, so the C++ tests can read it with
         # ifstream >> and the repo needs no JSON dependency. %.17g round-trips a
         # double exactly.
+        lines = [
+            "# isotone reference data, generated by tools/gen_reference.py\n",
+            f"# scipy {__import__('scipy').__version__}\n",
+            "version 1\n",
+            f"sample_rate {fs:.17g}\n",
+            f"points {GRID_POINTS}\n",
+            f"cases {len(cases)}\n",
+            "freqs\n",
+            " ".join(f"{v:.17g}" for v in freqs) + "\n",
+        ]
+        for c in cases:
+            lines.append(f"case {c['name']} {c['type']} {c['fc']:.17g} {c['gain_db']:.17g} "
+                         f"{c['width']:.17g} {c['width_mode']} {int(c['shelf_corner'])}\n")
+            k = c["coeffs"]
+            lines.append(f"coeffs {k['b0']:.17g} {k['b1']:.17g} {k['b2']:.17g} "
+                         f"{k['a1']:.17g} {k['a2']:.17g}\n")
+            lines.append("magnitude_db\n")
+            lines.append(" ".join(f"{v:.17g}" for v in c["magnitude_db"]) + "\n")
+            lines.append("phase_deg\n")
+            lines.append(" ".join(f"{v:.17g}" for v in c["phase_deg"]) + "\n")
+        payloads[fs] = "".join(lines)
+    return payloads
+
+
+def main() -> None:
+    payloads = compute()
+    if "--check" in sys.argv:
+        raise SystemExit(check(payloads))
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for fs, text in payloads.items():
         path = OUT_DIR / f"response_{int(fs)}.txt"
         with path.open("w", encoding="utf-8", newline="\n") as fh:
-            fh.write("# isotone reference data, generated by tools/gen_reference.py\n")
-            fh.write(f"# scipy {__import__('scipy').__version__}\n")
-            fh.write("version 1\n")
-            fh.write(f"sample_rate {fs:.17g}\n")
-            fh.write(f"points {GRID_POINTS}\n")
-            fh.write(f"cases {len(cases)}\n")
-            fh.write("freqs\n")
-            fh.write(" ".join(f"{v:.17g}" for v in freqs) + "\n")
-            for c in cases:
-                fh.write(f"case {c['name']} {c['type']} {c['fc']:.17g} {c['gain_db']:.17g} "
-                         f"{c['width']:.17g} {c['width_mode']} {int(c['shelf_corner'])}\n")
-                k = c["coeffs"]
-                fh.write(f"coeffs {k['b0']:.17g} {k['b1']:.17g} {k['b2']:.17g} "
-                         f"{k['a1']:.17g} {k['a2']:.17g}\n")
-                fh.write("magnitude_db\n")
-                fh.write(" ".join(f"{v:.17g}" for v in c["magnitude_db"]) + "\n")
-                fh.write("phase_deg\n")
-                fh.write(" ".join(f"{v:.17g}" for v in c["phase_deg"]) + "\n")
-        written += 1
-        print(f"wrote {path.name}: {len(cases)} cases x {GRID_POINTS} points")
+            fh.write(text)
+        print(f"wrote {path.name}: {len(CASES)} cases x {GRID_POINTS} points")
 
-    print(f"{written} reference files in {OUT_DIR}")
+    print(f"{len(payloads)} reference files in {OUT_DIR}")
 
 
 if __name__ == "__main__":

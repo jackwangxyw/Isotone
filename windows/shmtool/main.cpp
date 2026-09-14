@@ -6,13 +6,17 @@
 // writes parameters while a measurement runs, and reads the ring back.
 //
 //   isotone-shm status  <endpoint>
-//   isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]
-//   isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]
+//   isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--channels N [--mask 0xMASK]]
+//   isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--channels N [--mask 0xMASK]]
 //   isotone-shm forget  <endpoint>
 //   isotone-shm capture <endpoint> <seconds> <out.wav>
 //
 // persist saves the state a device starts with when no UI is running
 // (persisted_state.h); forget deletes it, so the device starts flat.
+// write and persist parse channel names for the layout the engine published;
+// with no engine they need --channels (and --mask, else upstream's default mask
+// for that count), and exit 2 without it. The block records that layout, so the
+// engine moves the values to its speakers on another one.
 // <endpoint> is an endpoint GUID, with or without braces, or a full device ID
 // such as {0.0.0.00000000}.{guid}. SETTINGS is the speaker setup text of
 // isotone/speakers.h, quoted as one argument. Add --local to use the Local\
@@ -27,13 +31,14 @@
 #include <windows.h>
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -52,8 +57,10 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  isotone-shm status  <endpoint> [--local]\n"
-                 "  isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--local]\n"
-                 "  isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS] [--local]\n"
+                 "  isotone-shm write   <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]\n"
+                 "                      [--channels N [--mask 0xMASK]] [--local]\n"
+                 "  isotone-shm persist <endpoint> <config.txt | -> [--bypass] [--speakers SETTINGS]\n"
+                 "                      [--channels N [--mask 0xMASK]] [--local]\n"
                  "  isotone-shm forget  <endpoint> [--local]\n"
                  "  isotone-shm capture <endpoint> <seconds> <out.wav> [--local]\n");
     return 2;
@@ -88,24 +95,12 @@ std::string narrow(const std::wstring& w) {
     return s;
 }
 
-// The last brace-wrapped group, so a full device ID and a bare GUID both work.
-// Empty when what is left is not a GUID.
-std::wstring endpoint_guid(const std::string& arg) {
-    std::string s = arg;
-    const size_t open = s.rfind('{');
-    if (open != std::string::npos) {
-        const size_t close = s.find('}', open);
-        s = s.substr(open, close == std::string::npos ? std::string::npos : close - open + 1);
-    } else {
-        s = "{" + s + "}";
-    }
-    // {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
-    bool valid = s.size() == 38 && s.front() == '{' && s.back() == '}';
-    for (size_t i = 1; valid && i < 37; ++i) {
-        const bool dash = i == 9 || i == 14 || i == 19 || i == 24;
-        valid = dash ? s[i] == '-' : std::isxdigit(static_cast<unsigned char>(s[i])) != 0;
-    }
-    return valid ? std::wstring(s.begin(), s.end()) : std::wstring();
+// Arguments are kept as UTF-8 and widened again for file names.
+std::wstring widen(const std::string& s) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
 }
 
 const char* host_state_name(uint32_t state) {
@@ -181,7 +176,7 @@ bool read_config(const std::string& path, const char* verb, std::string* text) {
         *text = ss.str();
         return true;
     }
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(widen(path), std::ios::binary);
     if (!in) {
         std::printf("{\"%s\":false,\"reason\":%s}\n", verb, json_string("cannot read " + path).c_str());
         return false;
@@ -229,8 +224,28 @@ std::string unsupported_json(const isotone::ApoParseResult& parsed) {
     return unsupported + "]";
 }
 
+// Channel names resolve against the device's layout, which the host publishes
+// in the header once it has locked a format. Before that the caller must give
+// it: a guessed layout can put a band on a channel the device does not have.
+// Prints the failure as JSON with `verb` as the result key.
+bool resolve_layout(const isotone::ParamBlock* published, const std::optional<isotone::ChannelLayout>& given,
+                    const char* verb, isotone::ChannelLayout* layout) {
+    if (published != nullptr && published->hdr.channels != 0) {
+        layout->channels = published->hdr.channels;
+        layout->speaker_mask = published->hdr.speaker_mask;
+        return true;
+    }
+    if (given) {
+        *layout = *given;
+        return true;
+    }
+    std::printf("{\"%s\":false,\"reason\":%s}\n", verb,
+                json_string("no engine has published the device's layout; pass --channels N [--mask 0xMASK]").c_str());
+    return false;
+}
+
 int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
-              const isotone::SpeakerSetup& speakers) {
+              const isotone::SpeakerSetup& speakers, const std::optional<isotone::ChannelLayout>& given) {
     std::string text;
     if (!read_config(path, "written", &text)) {
         return 1;
@@ -241,12 +256,9 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
         return 1;
     }
 
-    // Channel names resolve against the device's layout, which the host
-    // publishes in the header.
     isotone::ChannelLayout layout;
-    if (mapping.params()->hdr.channels != 0) {
-        layout.channels = mapping.params()->hdr.channels;
-        layout.speaker_mask = mapping.params()->hdr.speaker_mask;
+    if (!resolve_layout(mapping.params(), given, "written", &layout)) {
+        return 2;
     }
     isotone::ApoParseResult parsed;
     if (!parse_for_block(text, layout, bypass, speakers, "written", &parsed)) {
@@ -270,19 +282,18 @@ int cmd_write(const std::wstring& name, const std::string& path, bool bypass,
 }
 
 int cmd_persist(const std::wstring& name, const std::wstring& file, const std::string& path, bool bypass,
-                const isotone::SpeakerSetup& speakers) {
+                const isotone::SpeakerSetup& speakers, const std::optional<isotone::ChannelLayout>& given) {
     std::string text;
     if (!read_config(path, "persisted", &text)) {
         return 1;
     }
-    // The device's layout if an engine has published it; 7.1 otherwise, and
-    // the output says which.
+    // The device's layout if an engine has published it, otherwise the one
+    // given, and the output says which.
     isotone::ChannelLayout layout;
     isotone::win::SharedMapping mapping;
     const bool published = mapping.open(name) == ERROR_SUCCESS && mapping.params()->hdr.channels != 0;
-    if (published) {
-        layout.channels = mapping.params()->hdr.channels;
-        layout.speaker_mask = mapping.params()->hdr.speaker_mask;
+    if (!resolve_layout(published ? mapping.params() : nullptr, given, "persisted", &layout)) {
+        return 2;
     }
     isotone::ApoParseResult parsed;
     if (!parse_for_block(text, layout, bypass, speakers, "persisted", &parsed)) {
@@ -317,7 +328,7 @@ int cmd_forget(const std::wstring& file) {
 
 bool write_wav(const std::string& path, const std::vector<float>& samples, uint32_t channels,
                uint32_t rate) {
-    std::ofstream out(path, std::ios::binary);
+    std::ofstream out(widen(path), std::ios::binary);
     if (!out) return false;
     const auto u32 = [&](uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
     const auto u16 = [&](uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); };
@@ -406,12 +417,19 @@ int cmd_capture(const std::wstring& name, double seconds, const std::string& pat
 
 }  // namespace
 
-int main(int argc, char** argv) {
+// wmain: arguments arrive as UTF-16, so paths outside the ANSI code page work.
+// They are kept as UTF-8, which is also what the JSON output carries.
+int wmain(int argc, wchar_t** wargv) {
+    std::vector<std::string> argv;
+    for (int i = 0; i < argc; ++i) argv.push_back(narrow(wargv[i]));
+
     std::vector<std::string> args;
     bool local = false, bypass = false;
     isotone::SpeakerSetup speakers;
+    std::optional<isotone::ChannelLayout> layout;
+    std::optional<uint32_t> mask;
     for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
+        const std::string& a = argv[i];
         if (a == "--local") local = true;
         else if (a == "--bypass") bypass = true;
         else if (a == "--speakers") {
@@ -421,12 +439,29 @@ int main(int argc, char** argv) {
                 return usage();
             }
         }
+        else if (a == "--channels" || a == "--mask") {
+            if (i + 1 == argc) return usage();
+            const std::string& value = argv[++i];
+            char* end = nullptr;
+            const unsigned long n = std::strtoul(value.c_str(), &end, a == "--channels" ? 10 : 16);
+            if (value.empty() || *end != '\0' || (a == "--channels" && (n == 0 || n > 32))) return usage();
+            if (a == "--channels") {
+                layout.emplace();
+                layout->channels = static_cast<uint32_t>(n);
+            } else {
+                mask = static_cast<uint32_t>(n);
+            }
+        }
         else args.push_back(a);
+    }
+    // As isotone-compat: the mask defaults to upstream's for the channel count.
+    if (layout) {
+        layout->speaker_mask = mask ? *mask : isotone::default_speaker_mask(layout->channels);
     }
     if (args.size() < 2) {
         return usage();
     }
-    const std::wstring guid = endpoint_guid(args[1]);
+    const std::wstring guid = isotone::win::canonical_endpoint_guid(widen(args[1]));
     if (guid.empty()) {
         return usage();
     }
@@ -436,11 +471,11 @@ int main(int argc, char** argv) {
         return cmd_status(name);
     }
     if (args[0] == "write" && args.size() == 3) {
-        return cmd_write(name, args[2], bypass, speakers);
+        return cmd_write(name, args[2], bypass, speakers, layout);
     }
     const std::wstring saved = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(local), guid);
     if (args[0] == "persist" && args.size() == 3) {
-        return cmd_persist(name, saved, args[2], bypass, speakers);
+        return cmd_persist(name, saved, args[2], bypass, speakers, layout);
     }
     if (args[0] == "forget" && args.size() == 2) {
         return cmd_forget(saved);

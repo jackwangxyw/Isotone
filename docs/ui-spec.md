@@ -58,7 +58,8 @@ Settings pages share one header with tabs: General, Appearance, Shortcuts, About
 ## Framework: Qt 6 Quick
 
 - QML for the UI, C++ for everything else. One process.
-- Links `isotone_core` and `isotone_transport` directly. The plan's `/bridge`
+- Links `isotone_core`, `isotone_transport`, `isotone_compat` and
+  `isotone_devices` directly. The plan's `/bridge`
   N-API addon, IPC layer and JSON serialisation are dropped.
 - Curves come from `magnitude_db` / `band_magnitude_db` in the core, never
   reimplemented in QML.
@@ -67,12 +68,32 @@ Settings pages share one header with tabs: General, Appearance, Shortcuts, About
   `windows/compat` (`CompatWriter`, Isotone.txt) and WASAPI loopback
   (`LoopbackCapture`). Each device's block is written for its current channel
   count, speaker mask and sample rate (`DeviceConfig`), and rewritten when the
-  device format changes: Equalizer APO skips the routing and output sections on
-  another channel count and the bands below the lowest rate they are stable at,
-  so a stale block does nothing rather than something wrong.
+  device format changes. Until then a stale block still plays safely: bands,
+  trims, delay, polarity and speaker mute follow speaker names, which Equalizer
+  APO resolves for the current layout; routing is skipped on another channel
+  count; bands are skipped below the lowest rate they are stable at. IsoAPO
+  does the same with a stale region or saved file: per-channel values move by
+  speaker role (`remap_channels`).
 - The EQ-by-ear tone is native audio (WASAPI render, as `windows/measure` does),
   not Web Audio.
-- Device operations shell out to `isotone-devicetool` elevated.
+- Endpoints, their current format (channels, rate, speaker mask), their engine
+  and change notifications come from `windows/devices` (`isotone_devices`):
+  `enumerate_render_endpoints`, `read_render_endpoint`, `DeviceWatcher`
+  (callbacks arrive on an MMDevice thread; queue them to the GUI thread), and
+  `probe_engine` for the status dot (blocks about 200 ms; run it off the GUI
+  thread). A device's format comes from there, not from the region header,
+  which exists only while a stream is open.
+- Endpoint identifiers: every API takes the braced GUID, the bare GUID or the
+  full device ID `IMMDevice::GetId` returns (`canonical_endpoint_guid`).
+- Device operations shell out to `isotone-devicetool` elevated, with
+  `--output <new file>` so the elevated process's JSON can be read back (the
+  UI waits for exit, then reads the file). Exit codes: 0 ok, 1 refused or
+  failed (`reason`), 2 bad arguments, 3 not elevated, 4 another run holds the
+  lock. `status` reports `isoapo.state` (`not_installed`, `installed`,
+  `alongside_equalizerapo`, `replaced_by_equalizerapo`, `detached`,
+  `unrecorded`, `interrupted`) and `isoapo.remedies`, the commands that fix
+  it; Repair, Uninstall and the replace choice follow those. Engine changes
+  raise no device notification: re-read the engine after devicetool exits.
 - Tray presence for device auto-switch (plan 7.6).
 
 Verify before building: the current Qt 6 LTS and that its open-source modules
@@ -146,7 +167,7 @@ small labels 11–12.
 **Top bar** (76 px): preset name + chevron, which opens the presets popover
 (switch, rename, duplicate, delete, new, save, import, export). Under the name
 only the output name, and only when the sidebar is collapsed. Right side: Preamp value + Auto (Auto sets
-preamp to −`composite_peak_db` with the device's speaker mask, so it covers routing and bass management); L / R /
+preamp to `auto_preamp_db` with the device's speaker mask, which covers routing and bass management and never boosts); L / R /
 L+R (stereo) or "Showing: All speakers" group picker (surround); Spectrum On /
 Off; EQ toggle. The spectrum is the processed output; there is no pre-EQ view.
 
@@ -180,7 +201,12 @@ mute, solo. Distance sets delay: (farthest − this) / 343 m/s. Test tone: pink
 noise, one speaker at a time, −30 dBFS RMS (the level home-theatre test discs
 use, calibrated to 75 dB C at the seat), played by the UI through WASAPI on that
 channel only, so it passes through the engine with the speaker's level, delay,
-polarity and bass management applied. Solo mutes the other speakers. Cards: Speaker
+polarity and bass management applied. While test tones are on, the UI writes
+the device's state with bypass on (bands and preamp off) and swaps and upmix
+off, so nothing else moves or re-routes the tone, and writes the real state back
+when they end. Solo mutes the other speakers, except the LFE when the soloed
+speaker is small, so its redirected bass still plays. Solo is never saved: the
+saved state always carries the mute mask without it. Cards: Speaker
 groups (All, Front L C R, Surround SL SR RL RR, Sub LFE, New group); Bass
 management (crossover, small speakers, LFE low-pass); Routing (upmix Off
 / All / No centre, swap front and rear, swap left and right, lip sync delay). No
@@ -208,7 +234,9 @@ in the engine; the UI must not break it.
 
 - **Band ids are unique within a state.** The processor matches bands to filter
   slots by `Band::id`: give a new band a fresh id, keep a band's id when it is
-  edited, moved or re-sorted. Reusing an id makes two bands share a slot.
+  edited, moved or re-sorted. Bands that share an id are matched to slots in
+  list order, so an edit can land on the other band's filter. Nothing in the
+  engine checks this.
 - **At most 64 bands** (`kParamMaxBands`). `to_param_block` returns false when
   it dropped bands; the UI must not create more (Add band disabled at 64). The
   compat backend has no limit, but a device can switch engines.
@@ -220,23 +248,58 @@ in the engine; the UI must not break it.
   to `persisted_state_path(persisted_state_dir(false), guid)`, as well as to the
   region. That file is what IsoAPO starts with when no UI is running: a file
   that exists is the state, flat included; no file is flat. When the engine is
-  idle (no region), write only the file. The first write creates
+  idle (no region), write only the file, then try to open the region again and
+  write it too if it now exists: IsoAPO reads the file before it creates the
+  region, so a stream that started in between would otherwise play the old
+  state. A block needs no `init_param_block` before `write_persisted_state`,
+  which stamps the header. The first write creates
   `%ProgramData%\IsoAPO\devices`; a file one Windows account writes cannot be
   replaced by another until the installer sets the directory's ACL (stage 6).
+- **A state knows its layout.** `EqState::layout_channels` and
+  `layout_speaker_mask` name the layout its band channels, trims, delays,
+  polarity, speaker mute and small speakers address (`parse_apo_config` sets
+  them). Set them whenever the UI builds per-channel values for a device. When
+  the device's layout changes, call `remap_channels` before showing or editing
+  speaker values; the curve functions and both engines already remap. SL and RL
+  (SR and RR) stand in for each other when a layout has only one pair; values
+  that land on one channel combine (masks as a union, trims and delays summed);
+  a band left with no channel is disabled and keeps its mask.
 - **Import parses for the device the preset is for.** Call `parse_apo_config`
-  with that device's layout (`hdr.channels` / `hdr.speaker_mask` from the region,
-  or `devicetool status`). Show `warnings` in the import dialog's skipped lines:
-  they include lines Equalizer APO would ignore (lower-case `on`, a frequency
-  without `Hz`), `Device:` sections and `If:` branches, which import regardless.
+  with that device's layout (channels and speaker mask from `windows/devices`). Show `warnings` in the import dialog's skipped lines:
+  every line the import does not apply is there (GraphicEQ, Include, Delay,
+  Copy, Convolution, VST, unknown commands), as are lines Equalizer APO would
+  ignore (lower-case `on`, a frequency without `Hz`), `Device:` sections and
+  `If:` branches, which import regardless. `Filter N: OFF` lines with a whole
+  filter import as disabled bands.
   Mute read from a file is mute only for the layout it was written for.
-- **Auto preamp** is −`composite_peak_db` with the device's speaker mask (above).
+- **Auto preamp** is `auto_preamp_db` with the device's channels and speaker
+  mask: −`composite_peak_db`, never above 0 dB, so it only cuts.
+- **The curve is each output's own path.** `magnitude_db` and `phase_deg` take
+  the device's channels and speaker mask and draw bands, preamp, trim, mute,
+  speaker mute (silence), and with bass management the small speaker's
+  high-pass and the LFE's low-pass. Cross-feeds (swaps, upmix, bass sent to the
+  LFE) are not drawn; delay is not in the phase.
+- **Speaker mute silences the speaker everywhere**, including the bass that
+  bass management would send from it to the LFE.
 - **Compat writes need the format.** `DeviceConfig::layout` and `sample_rate`
-  must be the device's; there is no safe default.
+  must be the device's; `apply` and `persist` refuse a config without them
+  (`ERROR_INVALID_PARAMETER`).
+- **Compat devices hear an edit when it is committed.** Every write to the
+  config directory makes every Equalizer APO device on the machine rebuild its
+  filters from rest (measured 2026-09-13): a delayed channel goes silent for the
+  delay, a high-Q bass band swells up to +10 dB for about 130 ms. So during a
+  drag or a held key the UI calls `CompatWriter::apply`, which writes nothing,
+  and calls `persist` once on release; discrete changes (a toggle, a typed
+  value) are `persist`. The curve still moves live. `persist`, `remove` and
+  `flush` can block up to 200 ms while Equalizer APO holds the file, so drive
+  `CompatWriter` from one worker thread. Call `flush()` at shutdown: its result
+  is the last edit's. Several writers (another UI, `isotone-compat`) share
+  `Isotone.txt.lock` in the config directory and keep each other's blocks.
 
 ## Engine support for the speaker controls
 
 Built (decisions.md, "Multichannel speaker features in the engine"): speaker
 delay, lip sync, polarity, mute, both swaps, upmix and bass management, carried
-in `EqState::speakers` and param block v4. Groups are channel masks on bands.
+in `EqState::speakers` and param block v5. Groups are channel masks on bands.
 Solo is the UI muting the other speakers. The per-speaker test tone is UI work
 (above); the engine needs nothing for it.

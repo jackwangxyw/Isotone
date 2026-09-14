@@ -28,9 +28,10 @@ namespace isotone::win {
 // devices' files. Empty if the known folder cannot be resolved.
 std::wstring persisted_state_dir(bool selftest);
 
-// "<dir>\{guid}.bin" with the GUID lower-cased and braced, whatever form it was
-// given in, so the APO (upper case) and the UI (lower case) name the same file.
-std::wstring persisted_state_path(const std::wstring& dir, const std::wstring& endpoint_guid);
+// "<dir>\{guid}.bin" with canonical_endpoint_guid's GUID (shared_mapping.h), so
+// the APO (braced, upper case) and the UI (a device ID, lower case) name the same
+// file. Empty when `endpoint` is not an endpoint GUID.
+std::wstring persisted_state_path(const std::wstring& dir, const std::wstring& endpoint);
 
 enum class PersistedRead {
     Absent,    // no file: never saved
@@ -42,7 +43,8 @@ enum class PersistedRead {
 // `out` are zeroed: they belong to the live region, not the file.
 PersistedRead read_persisted_state(const std::wstring& path, ParamBlock* out);
 
-// Writes the block's parameters (not its seqlock or host fields) atomically:
+// Writes the block's parameters (not its seqlock or host fields), under this
+// build's magic, version and size whatever `block` carries, atomically:
 // a temporary file beside it, then a replacing rename. Creates the directory
 // and its parent. Returns a Win32 error code.
 DWORD write_persisted_state(const std::wstring& path, const ParamBlock& block);

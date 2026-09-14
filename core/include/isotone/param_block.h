@@ -26,8 +26,14 @@ namespace isotone {
 inline constexpr uint32_t kParamMagic   = 0x544F5349u;  // 'ISOT' little-endian
 // Covers the whole shared region below, not only ParamBlock. 2: audio ring
 // header gained pending_index, epoch and writer. 3: mono removed. 4: speaker
-// setup.
-inline constexpr uint32_t kParamVersion = 4u;
+// setup. 5: the layout the per-channel fields were written for.
+//
+// The saved state files (windows/transport/persisted_state.h) hold a block with
+// this version, and a reader rejects any other. That is accepted only before the
+// first release, when no saved files exist in the field: from the first release
+// on, a reader must migrate an older version rather than reject it, or every
+// device a user set up starts flat after an update.
+inline constexpr uint32_t kParamVersion = 5u;
 inline constexpr uint32_t kParamMaxBands = 64u;
 
 enum class HostState : uint32_t {
@@ -92,6 +98,11 @@ struct ParamBlock {
     uint32_t      mute;
     uint32_t      band_count;
     float         preamp_db;
+    // EqState::layout_channels and layout_speaker_mask: written by the UI with
+    // the parameters, unlike the host's format in the header.
+    uint32_t      layout_channels;
+    uint32_t      layout_speaker_mask;
+    uint32_t      reserved[2];
     float         channel_gain_db[kMaxChannels];
     ParamSpeakers speakers;
     ParamBand     bands[kParamMaxBands];

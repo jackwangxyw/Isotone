@@ -7,8 +7,11 @@
 
 #include "doctest.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include "isotone/apo_config.h"
 #include "isotone/response.h"
@@ -65,8 +68,8 @@ TEST_CASE("an AutoEq export round-trips") {
 
     const std::vector<double> grid = log_grid(20.0, 20000.0, 256);
     std::vector<double> a(grid.size()), b(grid.size());
-    magnitude_db(r.state, 0, grid.data(), grid.size(), kFs, a.data());
-    magnitude_db(again.state, 0, grid.data(), grid.size(), kFs, b.data());
+    magnitude_db(r.state, 2, 0, 0, grid.data(), grid.size(), kFs, a.data());
+    magnitude_db(again.state, 2, 0, 0, grid.data(), grid.size(), kFs, b.data());
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-9));
@@ -371,17 +374,82 @@ TEST_CASE("Channel lines scope the bands that follow") {
     }
 }
 
-TEST_CASE("OFF and None filters are skipped") {
+TEST_CASE("an OFF filter with its parameters is a disabled band; OFF or None alone is skipped") {
+    // Upstream ignores every OFF line, so reading one as a disabled band plays
+    // the same; the exporter writes disabled bands this way.
     const char* text =
         "Filter 1: ON PK Fc 1000 Hz Gain 6 dB Q 1\n"
         "Filter 2: OFF PK Fc 2000 Hz Gain 6 dB Q 1\n"
         "Filter 3: ON None\n"
-        "Filter 4: ON PK Fc 3000 Hz Gain 6 dB Q 1\n";
+        "Filter 4: ON PK Fc 3000 Hz Gain 6 dB Q 1\n"
+        "Filter 5: OFF\n"
+        "Filter 6: OFF None\n"
+        "Filter 7: OFF PK\n";
     const ApoParseResult r = parse_apo_config(text);
     CHECK(r.warnings.empty());
-    REQUIRE(r.state.bands.size() == 2);
+    REQUIRE(r.state.bands.size() == 3);
     CHECK(r.state.bands[0].fc == doctest::Approx(1000.0));
-    CHECK(r.state.bands[1].fc == doctest::Approx(3000.0));
+    CHECK(r.state.bands[0].enabled);
+    CHECK(r.state.bands[1].fc == doctest::Approx(2000.0));
+    CHECK(r.state.bands[1].gain_db == doctest::Approx(6.0));
+    CHECK_FALSE(r.state.bands[1].enabled);
+    CHECK(r.state.bands[2].fc == doctest::Approx(3000.0));
+    CHECK(r.state.bands[2].enabled);
+
+    // An OFF line with parameters that do not make a filter is reported.
+    CHECK_FALSE(parse_apo_config("Filter 1: OFF PK Fc 2000 Hz Gain 6 dB\n").ok());
+}
+
+TEST_CASE("disabled bands survive export and import") {
+    EqState s;
+    const FilterType types[] = {
+        FilterType::Peaking,  FilterType::LowPass, FilterType::HighPass,  FilterType::BandPass,
+        FilterType::Notch,    FilterType::AllPass, FilterType::LowShelf, FilterType::HighShelf,
+    };
+    double fc = 100.0;
+    uint32_t id = 1;
+    for (FilterType t : types) {
+        for (WidthMode mode : {WidthMode::Q, WidthMode::BandwidthOct, WidthMode::SlopeDb}) {
+            const bool shelf = t == FilterType::LowShelf || t == FilterType::HighShelf;
+            // The forms the importer reads: bandwidth for all but shelves, a dB
+            // slope for shelves.
+            if ((mode == WidthMode::BandwidthOct && shelf) || (mode == WidthMode::SlopeDb && !shelf)) continue;
+            Band b;
+            b.id = id++;
+            b.type = t;
+            b.fc = fc;
+            b.gain_db = 4.0;
+            b.width = mode == WidthMode::SlopeDb ? 9.0 : 1.3;
+            b.width_mode = mode;
+            b.shelf_corner = shelf;
+            b.channels = (id % 2) != 0 ? kAllChannels : ChannelMask{2};
+            b.enabled = (id % 3) != 0;
+            s.bands.push_back(b);
+            fc *= 1.3;
+        }
+    }
+    const std::string text = format_apo_config(s);
+    CAPTURE(text);
+    const ApoParseResult r = parse_apo_config(text);
+    CHECK(r.warnings.empty());
+    REQUIRE(r.state.bands.size() == s.bands.size());
+    // The exporter groups bands by channel mask; compare by frequency.
+    for (const Band& want : s.bands) {
+        CAPTURE(want.id);
+        const auto it = std::find_if(r.state.bands.begin(), r.state.bands.end(),
+                                     [&](const Band& b) { return std::abs(b.fc - want.fc) < 1e-6; });
+        REQUIRE(it != r.state.bands.end());
+        CHECK(it->enabled == want.enabled);
+        CHECK(it->type == want.type);
+        CHECK(it->width_mode == want.width_mode);
+        CHECK(it->width == doctest::Approx(want.width));
+        CHECK(it->shelf_corner == want.shelf_corner);
+        CHECK(it->channels == want.channels);
+        if (want.type == FilterType::Peaking || want.type == FilterType::LowShelf ||
+            want.type == FilterType::HighShelf) {
+            CHECK(it->gain_db == doctest::Approx(want.gain_db));
+        }
+    }
 }
 
 TEST_CASE("comments and blank lines are ignored") {
@@ -409,6 +477,94 @@ TEST_CASE("unsupported directives are preserved rather than dropped") {
     REQUIRE(r.unsupported.size() == 4);
     CHECK(r.unsupported[0].rfind("Convolution:", 0) == 0);
     CHECK(r.unsupported[3].rfind("Copy:", 0) == 0);
+}
+
+TEST_CASE("every line the import does not apply is reported as a warning, once") {
+    // The UI lists the warnings as the import's skipped lines. An AutoEq
+    // GraphicEQ file imported as a flat preset with nothing reported.
+    const char* text =
+        "Preamp: -3 dB\n"                          // 1
+        "GraphicEQ: 25 -10; 40 -8\n"               // 2
+        "Include: other.txt\n"                     // 3
+        "Delay: 10 ms\n"                           // 4
+        "Copy: L=R R=L\n"                          // 5
+        "Convolution: room.wav\n"                  // 6
+        "VSTPlugin: Library plugin.dll\n"          // 7
+        "Loudness: on\n"                           // 8
+        "If: sampleRate == 44100\n"                // 9
+        "EndIf:\n"                                 // 10
+        "Filter 1: ON PK Fc 1000 Hz Gain 6 dB Q 1\n";
+    const ApoParseResult r = parse_apo_config(text);
+    CHECK(r.state.bands.size() == 1);
+    CHECK(r.state.preamp_db == doctest::Approx(-3.0));
+    CHECK(r.unsupported.size() == 9);
+    std::vector<size_t> lines;
+    for (const ApoParseMessage& w : r.warnings) lines.push_back(w.line);
+    CHECK(lines == std::vector<size_t>{2, 3, 4, 5, 6, 7, 8, 9, 10});
+    CHECK_FALSE(r.ok());
+}
+
+TEST_CASE("a filter line with a long run of whitespace reads as a short one, and quickly") {
+    // Visual C++'s std::regex threw error_complexity for 600 spaces between PK
+    // and Fc, which nothing caught; libstdc++ took 78 s for 50,000, backtracking
+    // through the run once per starting position (review 2026-09-13).
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t n : {600u, 10000u}) {
+        for (char c : {' ', '\t'}) {
+            const std::string ws(n, c);
+            const std::string text = "Filter 1: ON PK" + ws + "Fc 100" + ws + "Hz" + ws + "Gain -3 dB" + ws + "Q 1\n";
+            CAPTURE(n);
+            CAPTURE(static_cast<int>(c));
+            ApoParseResult r;
+            CHECK_NOTHROW(r = parse_apo_config(text));
+            CHECK(r.warnings.empty());
+            REQUIRE(r.state.bands.size() == 1);
+            CHECK(r.state.bands[0].fc == 100.0);
+            CHECK(r.state.bands[0].gain_db == -3.0);
+            CHECK(r.state.bands[0].width == 1.0);
+            // A line with no filter in it is still only a warning.
+            ApoParseResult none;
+            CHECK_NOTHROW(none = parse_apo_config("Filter 1: ON PK" + ws + "x\n"));
+            CHECK(none.state.bands.empty());
+            CHECK(none.warnings.size() == 1);
+        }
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    CAPTURE(seconds);
+    CHECK(seconds < 2.0);
+
+#if defined(NDEBUG)
+    SUBCASE("a line std::regex gives up on is skipped with a warning, as upstream skips it") {
+        // A million digits in Fc: Visual C++ throws error_stack, libstdc++ reads
+        // a number too large to be one. Either way the line is skipped. Optimised
+        // builds only: the debug Visual C++ library takes minutes to give up.
+        const std::string text = "Filter 1: ON PK Fc " + std::string(1000000, '1') + " Hz Gain -3 dB Q 1\n" +
+                                 "Filter 2: ON PK Fc 200 Hz Gain -3 dB Q 1\n";
+        ApoParseResult r;
+        CHECK_NOTHROW(r = parse_apo_config(text));
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].fc == 200.0);
+        REQUIRE(r.warnings.size() == 1);
+        CHECK(r.warnings[0].line == 1);
+    }
+#endif
+}
+
+TEST_CASE("a channel count larger than a stream can carry is bounded, with a warning") {
+    // WAVEFORMATEX counts channels in a 16-bit field. A region value of
+    // 0xFFFFFFFF asked for a name per channel: about 200 GB.
+    const ChannelLayout huge{1000000, 0};
+    CHECK(apo_channel_names(huge).size() == 65535);
+    CHECK(apo_channel_names({65535, 0}).size() == 65535);
+    const ApoParseResult r = parse_apo_config("Preamp: -3 dB\n", huge);
+    CHECK(r.state.preamp_db == -3.0);
+    CHECK(r.warnings.size() == 1);
+    EqState mute;
+    mute.mute = true;
+    ApoFormatOptions options;
+    options.layout = huge;
+    const std::string text = format_apo_config(mute, options);
+    CHECK(std::count(text.begin(), text.end(), '=') == 65535);
 }
 
 TEST_CASE("a Device line is emitted and can be scoped to one endpoint by GUID") {
@@ -504,8 +660,8 @@ TEST_CASE("every filter type survives a round trip through the text format") {
 
     const std::vector<double> grid = log_grid(20.0, 20000.0, 256);
     std::vector<double> a(grid.size()), b(grid.size());
-    magnitude_db(s, 0, grid.data(), grid.size(), kFs, a.data());
-    magnitude_db(r.state, 0, grid.data(), grid.size(), kFs, b.data());
+    magnitude_db(s, 2, 0, 0, grid.data(), grid.size(), kFs, a.data());
+    magnitude_db(r.state, 2, 0, 0, grid.data(), grid.size(), kFs, b.data());
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-9));
@@ -629,7 +785,8 @@ TEST_CASE("only a line starting with # is a comment, as upstream reads it") {
         "Filter 1: ON PK Fc 100 Hz # Gain 3 dB Q 1\n"
         "  # Filter 2: ON PK Fc 200 Hz Gain 3 dB Q 1\n"
         "#no colon either\n");
-    CHECK(r.warnings.empty());
+    REQUIRE(r.warnings.size() == 1);   // the Include, which is not applied
+    CHECK(r.warnings[0].line == 1);
     REQUIRE(r.unsupported.size() == 1);
     CHECK(r.unsupported[0] == "Include: EQ #2.txt");
     REQUIRE(r.state.bands.size() == 1);
@@ -661,4 +818,230 @@ TEST_CASE("conditional sections are not merged silently") {
         CHECK_FALSE(parse_apo_config("Device: Speakers\nPreamp: -6 dB\nDevice: Headphones\nPreamp: -3 dB\n").ok());
         CHECK(parse_apo_config("Device: all\nPreamp: -6 dB\n").ok());
     }
+}
+
+namespace {
+
+Band band_on(uint32_t id, double fc, ChannelMask channels) {
+    Band b;
+    b.id = id;
+    b.fc = fc;
+    b.gain_db = -6.0;
+    b.channels = channels;
+    return b;
+}
+
+ChannelMask bit(uint32_t channel) { return ChannelMask{1} << channel; }
+
+}  // namespace
+
+TEST_CASE("a parsed state records the layout its channel indexes are for") {
+    const ApoParseResult r = parse_apo_config("Channel: SL\nPreamp: -3 dB\n", {6, kSpeaker51Surround});
+    CHECK(r.state.layout_channels == 6);
+    CHECK(r.state.layout_speaker_mask == kSpeaker51Surround);
+    CHECK(r.state.channel_gain_db[4] == -3.0);
+    const ApoParseResult huge = parse_apo_config("", {1000000, 0});
+    CHECK(huge.state.layout_channels == kMaxApoChannels);
+}
+
+TEST_CASE("remap_channels moves every per-channel value to the same speaker on another layout") {
+    // 7.1 surround: L R C LFE RL RR SL SR.
+    EqState s;
+    s.layout_channels = 8;
+    s.layout_speaker_mask = 0x63F;
+    s.bands.push_back(band_on(1, 1000, bit(6)));            // SL
+    s.bands.push_back(band_on(2, 2000, bit(1) | bit(6)));   // R SL
+    s.bands.push_back(band_on(3, 3000, kAllChannels));
+    s.channel_gain_db[4] = -2.5;                            // RL
+    s.speakers.delay_ms[4] = 1.5;                           // RL
+    s.speakers.inverted = bit(7);                           // SR
+    s.speakers.muted = bit(2);                              // C
+    s.speakers.small_speakers = bit(0);                     // L
+
+    SUBCASE("5.1 surround: each lands on its speaker, and RL on SL, which stands in for it") {
+        EqState r = s;
+        remap_channels(&r, {6, kSpeaker51Surround});   // L R C LFE SL SR
+        REQUIRE(r.bands.size() == 3);
+        CHECK(r.bands[0].channels == bit(4));
+        CHECK(r.bands[0].enabled);
+        CHECK(r.bands[1].channels == (bit(1) | bit(4)));
+        CHECK(r.bands[2].channels == kAllChannels);
+        for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            CAPTURE(c);
+            CHECK(r.channel_gain_db[c] == (c == 4 ? -2.5 : 0.0));
+            CHECK(r.speakers.delay_ms[c] == (c == 4 ? 1.5 : 0.0));
+        }
+        CHECK(r.speakers.inverted == bit(5));
+        CHECK(r.speakers.muted == bit(2));
+        CHECK(r.speakers.small_speakers == bit(0));
+        CHECK(r.layout_channels == 6);
+        CHECK(r.layout_speaker_mask == kSpeaker51Surround);
+    }
+    SUBCASE("stereo: speakers it lacks are dropped, and a band only on them plays nowhere") {
+        EqState r = s;
+        remap_channels(&r, {2, 0x3});
+        REQUIRE(r.bands.size() == 3);
+        CHECK_FALSE(r.bands[0].enabled);
+        CHECK(r.bands[0].channels != kAllChannels);
+        CHECK(r.bands[1].enabled);
+        CHECK(r.bands[1].channels == bit(1));
+        CHECK(r.bands[2].enabled);
+        CHECK(r.bands[2].channels == kAllChannels);
+        for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            CAPTURE(c);
+            CHECK(r.channel_gain_db[c] == 0.0);
+            CHECK(r.speakers.delay_ms[c] == 0.0);
+        }
+        CHECK(r.speakers.inverted == 0);
+        CHECK(r.speakers.muted == 0);
+        CHECK(r.speakers.small_speakers == bit(0));
+        CHECK(r.layout_channels == 2);
+    }
+    SUBCASE("5.1 surround to 5.1 back: SL and SR become RL and RR") {
+        EqState r;
+        r.layout_channels = 6;
+        r.layout_speaker_mask = kSpeaker51Surround;
+        r.channel_gain_db[4] = -1.0;
+        r.speakers.muted = bit(5);
+        remap_channels(&r, {6, kSpeaker51Back});   // L R C LFE RL RR
+        CHECK(r.channel_gain_db[4] == -1.0);
+        CHECK(r.speakers.muted == bit(5));
+    }
+}
+
+TEST_CASE("remap_channels combines values that land on one channel as Equalizer APO's lines do") {
+    // 7.1 SL and RL both resolve to SL on 5.1 surround.
+    EqState s;
+    s.layout_channels = 8;
+    s.layout_speaker_mask = 0x63F;
+    s.channel_gain_db[4] = -2.0;
+    s.channel_gain_db[6] = -3.0;
+    s.speakers.delay_ms[4] = 1.0;
+    s.speakers.delay_ms[6] = 2.0;
+    s.speakers.inverted = bit(4) | bit(6);
+    s.speakers.muted = bit(6);
+    s.bands.push_back(band_on(1, 1000, bit(4) | bit(6)));
+    remap_channels(&s, {6, kSpeaker51Surround});
+    CHECK(s.channel_gain_db[4] == -5.0);
+    CHECK(s.speakers.delay_ms[4] == 3.0);
+    CHECK(s.speakers.inverted == bit(4));
+    CHECK(s.speakers.muted == bit(4));
+    CHECK(s.bands[0].channels == bit(4));
+}
+
+TEST_CASE("remap_channels keeps a numbered channel's index, as Equalizer APO names it by number") {
+    // 7.1.4 names its height channels 9 to 12; a layout that numbers the same
+    // positions keeps them, one with fewer channels drops them.
+    EqState s;
+    s.layout_channels = 12;
+    s.layout_speaker_mask = kSpeaker714;
+    s.bands.push_back(band_on(1, 1000, bit(10)));
+    s.bands.push_back(band_on(2, 2000, bit(10) | bit(7)));
+    EqState wider = s;
+    remap_channels(&wider, {12, 0x63F});
+    CHECK(wider.bands[0].channels == bit(10));
+    CHECK(wider.bands[0].enabled);
+    EqState narrower = s;
+    remap_channels(&narrower, {8, 0x63F});
+    CHECK_FALSE(narrower.bands[0].enabled);
+    CHECK(narrower.bands[1].channels == bit(7));
+
+    // A position upstream has no name for is numbered too: 7.1 wide's front left
+    // of centre is channel 7, which is SL's index on 7.1 surround.
+    EqState wide;
+    wide.layout_channels = 8;
+    wide.layout_speaker_mask = 0xFF;   // L R C LFE RL RR FLC FRC
+    wide.channel_gain_db[6] = -4.0;
+    remap_channels(&wide, {8, 0x63F});
+    CHECK(wide.channel_gain_db[6] == -4.0);
+}
+
+TEST_CASE("remap_channels leaves a state alone when its layout is unspecified or the same") {
+    EqState s;
+    s.bands.push_back(band_on(1, 1000, bit(6)));
+    s.channel_gain_db[6] = -3.0;
+    EqState unspecified = s;
+    remap_channels(&unspecified, {2, 0x3});
+    CHECK(unspecified.bands[0].enabled);
+    CHECK(unspecified.bands[0].channels == bit(6));
+    CHECK(unspecified.channel_gain_db[6] == -3.0);
+    CHECK(unspecified.layout_channels == 0);
+
+    // A mask of 0 is the default for its count.
+    EqState same = s;
+    same.layout_channels = 8;
+    same.layout_speaker_mask = 0;
+    remap_channels(&same, {8, 0x63F});
+    CHECK(same.bands[0].channels == bit(6));
+    CHECK(same.channel_gain_db[6] == -3.0);
+
+    EqState to_nothing = same;
+    remap_channels(&to_nothing, {0, 0});
+    CHECK(to_nothing.bands[0].channels == bit(6));
+    CHECK(to_nothing.layout_channels == 8);
+}
+
+TEST_CASE("remap_channels agrees with writing a state for one layout and reading it on another") {
+    // format_apo_config names channels for the layout it writes for, and
+    // parse_apo_config resolves the names as upstream does on the layout it
+    // reads for. The remap must land every band and trim where that does.
+    const ChannelLayout layouts[] = {{1, 0x4},   {2, 0x3},   {3, 0x7},   {4, 0x33},  {4, 0x107},
+                                     {6, 0x60F}, {6, 0x3F},  {8, 0x63F}, {8, 0xFF},  {12, kSpeaker714},
+                                     {3, 0},     {10, 0x63F}};
+    for (const ChannelLayout& from : layouts) {
+        EqState s;
+        s.layout_channels = from.channels;
+        s.layout_speaker_mask = from.speaker_mask;
+        for (uint32_t c = 0; c < std::min(from.channels, kMaxChannels); ++c) {
+            s.bands.push_back(band_on(c + 1, 100.0 * (c + 1), bit(c)));
+            s.channel_gain_db[c] = -(c + 1.0);
+        }
+        s.bands.push_back(band_on(100, 5000, bit(0) | bit(from.channels - 1)));
+        ApoFormatOptions options;
+        options.layout = from;
+        const std::string text = format_apo_config(s, options);
+        for (const ChannelLayout& to : layouts) {
+            CAPTURE(from.channels);
+            CAPTURE(from.speaker_mask);
+            CAPTURE(to.channels);
+            CAPTURE(to.speaker_mask);
+            const ApoParseResult parsed = parse_apo_config(text, to);
+            EqState r = s;
+            remap_channels(&r, to);
+            std::vector<Band> enabled;
+            for (const Band& b : r.bands) {
+                if (b.enabled) enabled.push_back(b);
+            }
+            // The parser keeps bands in the order the text groups them.
+            std::sort(enabled.begin(), enabled.end(), [](const Band& a, const Band& b) { return a.fc < b.fc; });
+            std::vector<Band> read = parsed.state.bands;
+            std::sort(read.begin(), read.end(), [](const Band& a, const Band& b) { return a.fc < b.fc; });
+            REQUIRE(read.size() == enabled.size());
+            for (size_t i = 0; i < enabled.size(); ++i) {
+                CAPTURE(i);
+                CHECK(read[i].fc == enabled[i].fc);
+                CHECK(read[i].channels == enabled[i].channels);
+            }
+            for (uint32_t c = 0; c < kMaxChannels; ++c) {
+                CAPTURE(c);
+                CHECK(parsed.state.channel_gain_db[c] == r.channel_gain_db[c]);
+            }
+        }
+    }
+}
+
+TEST_CASE("remap_channels works in place, so the audio thread can run it") {
+    // Every other working value is on the stack; the bands are edited where
+    // they are, so the vector keeps its storage.
+    EqState s;
+    s.layout_channels = 8;
+    s.layout_speaker_mask = 0x63F;
+    s.bands.reserve(64);
+    for (uint32_t i = 0; i < 64; ++i) s.bands.push_back(band_on(i + 1, 100.0 + i, bit(i % 8)));
+    const Band* data = s.bands.data();
+    const size_t capacity = s.bands.capacity();
+    remap_channels(&s, {6, kSpeaker51Surround});
+    CHECK(s.bands.data() == data);
+    CHECK(s.bands.capacity() == capacity);
+    CHECK(s.bands.size() == 64);
 }

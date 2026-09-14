@@ -1481,7 +1481,291 @@ the build of `4df7343`):
   now also retakes a window whose residual is above -40 dB re the fitted sine on
   any channel carrying the tone. The rerun passed, with no glitch to retake.
 - **Not measured:** whether writing `Isotone.txt.tmp` makes Equalizer APO reload
-  twice. Its trace log needs an HKLM setting.
+  twice. Its trace log needs an HKLM setting. (Measured in the next entry: it
+  does.)
+
+## 2026-09-13: Final backend review before stage 4
+
+Seven read-only reviewers: core DSP, config format and transport, IsoAPO,
+compat backend, devicetool, measurement tools and CI, and the seam the UI will
+use. The lead re-read every high and medium finding against the code before
+acting (two claims were partly wrong and are corrected below). Owner: fix
+everything that needs no decision, decide the rest, and "do whatever you need
+to get the best possible tests" for this session, live runs included. Every fix
+below has a test that fails without it and was mutation-checked (fix reverted,
+test fails, fix restored), unless listed as verified by reading.
+
+### Core
+- **A band's channel change no longer restarts it where it already played.**
+  Widening a 40 Hz Q 10 cut from L to L+R lifted L by 9 dB for 125 ms: the
+  crossfade cleared filter state on every channel. Channels in both masks keep
+  their state and play the new filter alone.
+- **The parser cannot throw.** A Filter line with about 600 spaces threw
+  `regex_error(error_complexity)` on MSVC 14.51 (upstream's older `<regex>`
+  resets its count at each position and does not); on GCC 50,000 spaces took
+  77 s. Whitespace runs are collapsed before matching (upstream's patterns only
+  use `\s+`/`\s*`, so no result changes) and a line whose match still throws is
+  skipped with a warning, as upstream's loader does.
+- **Import reports everything it does not apply.** GraphicEQ, Include, Delay,
+  Copy and unknown lines were in `unsupported` only, so an AutoEq GraphicEQ file
+  imported as flat with nothing reported. `Filter N: OFF` with a whole filter is
+  a disabled band, so export and import keep disabled bands.
+- **Band width is clamped** (Q 1e-4 to 1000, shelves Q 10, equivalent limits
+  for bandwidth and slope). A low-pass at Q 1e6 played +120 dB past the gain
+  limit; at Q 1e17 it was unstable.
+- A new band with a non-finite value plays what the curve draws instead of the
+  previous band in its slot. The curve applies the processor's clamps.
+  `composite_peak_db` designs each band once (6.0 to 3.0 ms for 64 bands, 512
+  points, 8 channels). The parser bounds a channel count at 65535.
+- `Copy:` is read as mute exactly where upstream reads every source as zero.
+  The reviewer said `L=+0` is DC; it is mute (upstream's split on `+` drops the
+  empty term). `L=-0`, `L=00` and a trailing tab are DC.
+- Weak tests replaced: the seqlock contention test checks 1000 reads taken
+  while the writer runs (the old one passed a broken seqlock 2 of 10 times); the
+  stage order test observes routing; the locale test asserts its probe and
+  restores the locale on every path.
+
+### IsoAPO and transport
+- **A child APO that refuses a format is dropped and IsoAPO runs alone**, as
+  upstream `EqualizerAPO.cpp:253-277` does. This reverses the earlier rule that a
+  child declining one probe is kept, which upstream does not have. Two
+  deviations: a child locked is unlocked before release, and a child is kept
+  while IsoAPO is locked.
+- **One endpoint identifier normaliser** (`canonical_endpoint_guid`): the region
+  name and the saved-state path accept a braced GUID, a bare GUID or the full
+  device ID. A bare GUID or `IMMDevice::GetId` string named a region that never
+  existed.
+- `write_persisted_state` stamps the header, so a block without
+  `init_param_block` no longer writes a file IsoAPO rejects.
+- A buffer longer than the negotiated maximum is processed in pieces; it passed
+  through unprocessed. The speaker mask comes from the output format, as
+  upstream's. A second unlock does not reach the child.
+- The header's format is published only by the instance that owns the ring, so
+  a 16 kHz communications stream cannot relabel a 48 kHz media spectrum.
+- Ring tokens carry a per-process nonce instead of the process id, so a claim
+  left by a crashed audiodg whose id is reused is taken over.
+- The ring pages are touched at lock: a full lap took 64 page faults on the audio
+  thread before, 0 after. `VirtualLock` was not used: the default minimum
+  working set (50 pages) is smaller than the ring.
+- `isotone-shm` takes `--channels`/`--mask` when no engine is running (it
+  assumed 7.1) and reads UTF-16 arguments.
+- Correction: `isoapo.cpp` and the stage 1b notes said upstream accepts
+  `APOInitSystemEffects2`; upstream accepts only `APOInitSystemEffects`
+  (`EqualizerAPO.cpp:106`). The self-test build differs from the shipped DLL in
+  four ways, not one: namespace, child record hive, saved-state directory, and
+  the -12 dB cold-start band.
+
+### Compat backend
+- **Concurrent writers keep each other's blocks.** Every writer used the same
+  `Isotone.txt.tmp` and nothing locked read, merge and replace: two writers
+  failed 598 of 600 rounds and silently lost a block in 2. The pre-UI review's
+  claim that each write keeps another writer's blocks was not true. Writers now
+  share `Isotone.txt.lock` (share mode 0; Equalizer APO's installer grants Users
+  full access to the directory) and use per-process temp names.
+- A write is skipped only when the disk already holds it, not when this writer
+  last sent the same text.
+- `Stage:` and an unclosed `If:` at the end of `config.txt` are read as
+  upstream reads them; attach appends `EndIf:` and `Stage: post-mix capture`
+  where needed, and refuses an include that only some instances reach.
+- The preamp is outside the `If: sampleRate >= X` band guard: at a lower rate
+  the -21 dB auto preamp vanished while upmix and the LFE sum still played.
+- A permanent access denial fails at once instead of retrying 200 ms per write.
+  `DeviceConfig` without a channel count or rate is refused. `isotone-compat`
+  reads UTF-16 arguments. The first packet's discontinuity flag in loopback
+  capture is not a glitch. `LoopbackCapture::start` has a timeout and reads are
+  safe during `stop` (the read race has no failing test; verified by reading).
+- The upstream model in `compat_tests` is ported from upstream's own filter
+  parsing, BiQuad design and channel naming, independent of `core/`; a 5% error
+  in core's peaking design and swapped SL/SR names now fail compat tests.
+
+### devicetool
+- **Replaced, then re-ticked in Equalizer APO's Device Selector**: install and
+  repair each sent the user to the other while both EQs ran, and the only exit
+  lost the vendor APO. `status` names the state (`replaced_by_equalizerapo`,
+  `alongside_equalizerapo`) with `remedies`, and
+  `install --replace-equalizerapo` takes the endpoint back from Equalizer APO's
+  record. Uninstall from `alongside_equalizerapo` keeps Equalizer APO working.
+- A vendor APO Equalizer APO hosted through upstream's GFX fallback is hosted.
+- The install checks require LOCAL SERVICE read and execute on the DLL.
+- **A journal** (`HKLM\SOFTWARE\IsoAPO\Pending\{guid}`) is written before the
+  first change and cleared last; a killed run reads as `interrupted` and the
+  next command undoes it. Kill checks at every write of install (22), uninstall
+  (9), repair (23) and take-back (9).
+- The dry run's ACL check tests `KEY_CREATE_SUB_KEY` only; it granted creation
+  to any read ACE. A record without an install mode takes the mode from the
+  record, the slot, or Equalizer APO's record, and repair otherwise refuses
+  without `--mode` (it would have moved CABLE Input from MFX to EFX). Uninstall
+  of a detached endpoint leaves a driver's slots alone. `rolled_back` is true
+  only when every rollback step succeeded.
+- **`--output <file>`** for elevated runs (created new, no reparse points).
+  Exit codes 0 ok, 1 refused, 2 bad arguments, 3 not elevated, 4 busy.
+  Inapplicable flags and junk around a GUID are refused. Mutating runs are
+  serialised by a mutex in a private namespace bounded by the Administrators SID
+  (a `Global\` name could be squatted by any user).
+- Multi-string reads go through the dry-run hook; upstream handle leaks and
+  `delete` on `new[]` fixed (marked in VENDORED.md; verified by reading, only
+  elevated runs reach them).
+
+### Measurement tools and CI
+- **A dead stream no longer reads as perfect silence.** A failed WASAPI call
+  returned quietly: -200 dB on every channel, 0 glitches, exit 0. Every stream
+  error is counted, each window records frames rendered and captured, and a
+  short or errored window is retaken and then fails the run (exit 3). The
+  earlier "exact zeros" mute results were taken with the old tool, so they do
+  not rule out a dead stream; the live runs below repeat the silence checks
+  with frame counts.
+- Render and capture formats are recorded and a channel-count mismatch is
+  refused. Phase is null when its reference carries no tone; `--phase-ref`
+  chooses the reference. An ambiguous endpoint fragment is refused. UTF-8 JSON.
+  The analysis moved to `measure.cpp` with `measure_tests` (fake WASAPI clients).
+- `gen_reference.py --check` fails on a case missing from either side.
+- **CI builds with warnings as errors** (`ISOTONE_WARNINGS_AS_ERRORS`); vendored
+  code and SDK headers are exempt. A fresh MSVC configure was Debug (CMake sets
+  the type inside `project()`), and a Debug `IsoAPO.dll` imports runtime DLLs no
+  redistributable installs; the default is now set before `project()`.
+- Packaging note (stage 6): `IsoAPO.dll` imports MSVCP140 and VCRUNTIME140 built
+  with toolset 14.51, and Microsoft requires a redistributable at least as new
+  as the newest build tools used. Equalizer APO's bundled 14.40 runtime does not
+  satisfy that; ship a new enough redistributable or link the CRT statically.
+
+### New: `windows/devices` (owner's decision 9)
+`isotone_devices`: render endpoints with their full ID, GUID, names, state and
+default roles; the current format from `PKEY_AudioEngine_DeviceFormat`; the
+engine per endpoint, classified exactly as `devicetool status` does
+(`isoapo.state`, `backend`); an `IMMNotificationClient` wrapper whose `close`
+guarantees no callback after it returns; and `probe_engine`, which tells
+running, idle, not installed and stalled apart from the region's heartbeat and
+active audio sessions. `devices_tests` compares every render endpoint with
+devicetool's JSON and skips visibly on a machine with no audio service.
+
+### Owner's decisions
+1. **The curve is each output's own path**: `magnitude_db`/`phase_deg` take the
+   stream's layout and draw speaker mute, the small speaker's high-pass and the
+   LFE low-pass; cross-feeds are not drawn. Matched against the processor within
+   0.001 dB and 0.01°.
+2. **Auto preamp only cuts**: `auto_preamp_db` = min(0, -`composite_peak_db`).
+3. **Per-channel values follow the speaker across layout changes.** Param block
+   v5 records the layout the state was written for; `remap_channels` moves band
+   channels, trims, delays, polarity, speaker mute and small speakers by speaker
+   role the way Equalizer APO resolves channel names (SL and RL stand in for each
+   other on a layout with one pair; values landing on one channel combine; a band
+   left with no channel is disabled). IsoAPO remaps at lock and on every block;
+   the curve functions remap; the compat backend writes delay, polarity and
+   speaker mute by name (a `Copy:` whose target and source both name a missing
+   channel writes a virtual channel, so no DC), with routing still guarded by
+   channel count. A v4 saved file reads as flat; no saved files existed. From
+   the first release a reader must migrate older versions.
+4. **Compat devices hear an edit when it is committed.** Measured on the cable
+   pair (CABLE Output's Equalizer APO): every change Equalizer APO notices in its
+   config directory (a write, a file created or deleted) rebuilds every Equalizer
+   APO device's filters from rest with a 10 ms crossfade.
+
+   | Case | Measured |
+   |---|---|
+   | no delay, 997 Hz | no dip over 0.05 dB |
+   | lip sync 100 ms | 90 to 110 ms of exact zeros per write, all channels |
+   | speaker delay 50 ms on one channel | that channel only, 40 ms |
+   | 40 Hz Q 10 -12 dB band | +10.5 dB, over 1 dB for 130 ms per write |
+   | 100 Hz Q 10 / Q 2 | +8.9 dB for 50 ms / +3.2 dB for 10 ms |
+   | 30 writes/s with delay or a bass band | silent, or never settles, for the whole drag |
+   | temp file inside the config directory | two reloads per write |
+   | temp moved in from outside, or in-place | one reload |
+
+   The owner's `peace.txt` (every device) also restarts its 100 Hz high-pass on
+   each reload (+5 dB for 7 ms). Owner chose "write less often"; the numbers
+   rule that out, so: `CompatWriter::apply` writes nothing, `persist` (on
+   release) writes once, and the time-based coalescer is gone. Temp files go to
+   `%LOCALAPPDATA%\Isotone\compat-tmp` when it is on the config directory's
+   volume, with the replaced file's DACL (auto-inherit kept) or the DACL a new
+   file in the directory would get. Live: one reload per write, content applied
+   (-5.992 dB for a -6 dB band), config directory restored byte for byte and
+   SDDL for SDDL.
+5. **A muted speaker contributes nothing anywhere**, including the bass that bass
+   management sends from it to the LFE (processor, `composite_peak_db` and the
+   compat routing lines).
+6. **Solo is never saved**, and soloing a small speaker keeps the LFE (UI rule).
+7. **Test tones** play with bypass on and swaps and upmix off (UI rule).
+8. **`IAudioSystemEffects2/3` deferred.** Rule: only if other software does it.
+   No APO host found implements or forwards them: upstream Equalizer APO 1.4.2
+   (SourceForge HEAD, full history), ViPER4Windows, UniteFx, the Equalizer APO
+   forks, Microsoft's samples (none host a child). Realtek's and Windows' CAPX
+   APOs on this machine expose all three interfaces but sit in the composite
+   lists `,13`-`,20`, which Windows chains itself; Equalizer APO's records here
+   host no vendor APO.
+9. **`windows/devices`**, above.
+10. Standard users can set endpoint effect slots (`BUILTIN\Users` has SetValue
+    on MMDevices): fine, by the earlier trust decision.
+
+**Not changed, noted:** compat routing on the same channel count with a
+different mask can address different speakers (IsoAPO resolves routing by role);
+a band the remap disables keeps its old mask; `format_apo_config` (export) does
+not remap; a render stream that stalls without an error is not detected by
+`isotone-measure`; `compat_tests` creates `%LOCALAPPDATA%\Isotone\compat-tmp`.
+
+**Measured live, compat backend and measurement tool** (CABLE Input to CABLE
+Output's Equalizer APO, 7.1, 48 kHz, reviewed binaries; `peace.txt` scoped away
+from CABLE Output for the run; expected values from `isotone::Processor` run on
+the same state and analysed by `isotone-measure`'s own analysis code):
+
+| Case | Result |
+|---|---|
+| flat block, 31 frequencies | within 0.0004 dB; frames captured and 0 stream errors on every window |
+| block for 96 kHz on the 48 kHz device | preamp applies (-9 dB), band above 24 kHz does not; 0.00005 dB |
+| state for 5.1 written to the 7.1 device | SL band and trim on SL, SR inverted, C exact zeros; 0.00005 dB, 0.000° |
+| muted small FL with bass management, 40 and 60 Hz | FL and LFE exact zeros with frames captured; unmuted, LFE within 0.00004 dB |
+| speaker mute on channel 0 | phase reference moves to channel 1; channel 0's phase is null |
+| writes every 100 ms during a window | retaken 3 times, `failed_windows` names it, exit 3; clean afterwards |
+| attach after `Stage: pre-mix`, `If: 1 == 1`, `If: 1 == 0` | a plain include is hidden where upstream says; attach's block applies (-6 dB) in all three; detach restores byte for byte |
+| `CompatWriter::apply` 20 times, then `persist` | 0 directory events and 0 dips for the applies, one dip at the persist |
+| negative control | each of 12 captures matched only its own state (or a physically identical one) |
+
+The config directory (72 entries) matched the snapshot by hash and SDDL after
+every batch.
+
+**Noted from the live run, not changed:** the CLI sets a state's layout and the
+device's together (`--channels/--mask`), so a state for another layout was
+written through the library; attach adds a blank line after a file that already
+ends in a newline; attach's `EndIf:` also reaches devices a narrower `Device:`
+line excluded, where upstream would log "EndIf without If!" and carry on;
+`isotone-measure` records only the kept attempt's glitches, not why a retaken
+attempt failed.
+
+**Tests:** `core_tests` 199 cases (MSVC 19.51 and GCC 16.1, warnings as errors),
+`compat_tests`, `measure_tests`, `devices_tests`, the APO self test, the
+transport check and the reference check all pass.
+
+**Measured live, IsoAPO** after the owner staged this review's DLL (SHA-256
+EE9AECEE…8567): CABLE Input to CABLE Output, 7.1, 48 kHz, `peace.txt` scoped
+away from CABLE Output; expected values from `isotone::Processor` on the same
+state, remapped from its parse layout; the ring capture as a second view of
+IsoAPO's own output.
+
+| Case | Result |
+|---|---|
+| cold start | region v5, 48000 / 8 / 0x63F, running, heartbeat moving, flat within 0.0001 dB; `probe_engine` running while streaming, idle 1.6 s after it stops |
+| saved state read by audiodg | a persisted -6 dB band plays -6.0000 dB; after `forget`, flat |
+| 5.1 state saved, played on 7.1 (remap at lock) | every value on its speaker role: 0.00008 dB, 0.0003°; C exact zeros; ring against core 1e-6 dB |
+| another 5.1 state written while playing | 0.00012 dB, 0.0012°; ring against core exact |
+| muted small FL with bass management | FL and LFE exact zeros in ring and capture; unmuted, LFE within 0.00008 dB |
+| 7 routing and bass management cases, delay, polarity, trims | worst 0.0003 dB, 0.003°; ring against core exact; each capture matched only its own case |
+| phase reference and a window during writes every 100 ms | reference moves, channel 0's phase null; exit 3 with `failed_windows`, clean afterwards |
+| 300 ms lip sync tail, global mute | tail plays out, then exact zeros; mute exact zeros on 8 channels with 37,000 frames per window |
+| -12 dB 40 Hz Q 10 band on L widened to L+R while playing | L's peak constant within 0.0000 dB (ring), 0.0005 dB (capture); before the fix +9 dB |
+| a second stream and a 16 kHz communications stream beside the first | header format and ring writer unchanged, ring written |
+
+The capture side of the cable adds about 18 LSB rms of noise that the ring does
+not carry, so cells below about -60 dBFS (LFE at 1 kHz under bass management)
+missed 0.001 dB on the capture by up to 3.6 LSB; the ring matched the core
+exactly at each of them. A true communications-mode instance cannot be forced:
+CABLE Input's mode lists hold only the default mode.
+
+**Unexplained, not IsoAPO:** with a stream whose buffers are flagged silent,
+one cable capture in four held a single stale sample of an earlier tone on all
+8 channels; a ring capture over the same moment held none. It comes from after
+IsoAPO (the engine or VB-Cable).
+
+The Equalizer APO config dir matched its snapshot after every batch;
+`%ProgramData%\IsoAPO\devices` is empty; no region is held.
 
 ---
 
@@ -1491,12 +1775,12 @@ the build of `4df7343`):
 
 | Stage | State | Evidence |
 |---|---|---|
-| 0. Repo, CI, decisions log | complete | CI workflow builds MSVC + GCC, runs tests and the APO self test |
+| 0. Repo, CI, decisions log | complete | CI workflow builds MSVC + GCC with warnings as errors, runs tests and the APO self test |
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 177 cases green on MSVC 19.51 and GCC 16.1.0 after the pre-UI review |
-| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; `compat_tests` 19 cases |
+| 2. Core | complete | 199 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
+| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
@@ -1527,9 +1811,10 @@ tools/gen_reference.py independent scipy implementation that generates it
 tools/check_shm_transport.py  cross-process transport check, runs in CI
 windows/transport/     the named shared mapping and the per-endpoint saved state
 windows/apo/           IsoAPO.dll, IsoAPO-selftest.dll, the self test
-windows/measure/       isotone-measure: endpoint list, stepped-sine measurement
+windows/measure/       isotone-measure: endpoint list, stepped-sine measurement; measure_tests
 windows/shmtool/       isotone-shm: status / write / persist / forget / capture
 windows/devicetool/    isotone-devicetool, with upstream's registration code vendored
+windows/devices/       isotone_devices: endpoints, format, engine, notifications; devices_tests
 windows/compat/        isotone-compat: the Equalizer APO backend (Isotone.txt)
 docs/decisions.md      this file
 docs/ui-spec.md        the stage 4 build brief
@@ -1547,8 +1832,10 @@ points IntelliSense at `build/compile_commands.json`.
 
 **Stage 4** is the UI in Qt 6 Quick, designed and not coded. Start with
 `docs/ui-spec.md`, "Start here". It does not wait on stage 3's remaining items:
-the core, transport and devicetool it needs exist, and the multichannel controls
-can be built UI-first.
+the core, transport, compat, devices library and devicetool it needs exist, and
+the multichannel controls can be built UI-first. The backend review before it is
+the entry "Final backend review before stage 4"; the UI's contracts are in
+`ui-spec.md`.
 
 **Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec.
 **Stage 6** (packaging) is not started.
@@ -1560,11 +1847,12 @@ can be built UI-first.
 longer runs on CABLE Input (its pre-mix class there had been applying
 `peace.txt`). CABLE Output, the capture side, still has Equalizer APO. Every
 other endpoint is untouched. Nothing the owner listens to routes through the
-cable. The staged DLL is the one staged for the mute snap measurement
-(2026-09-13), before the pre-UI review. With it, a stream opened on CABLE
-Input with no region already held gets the old default, a -12 dB band at 1 kHz;
-the reviewed DLL starts flat unless `%ProgramData%\IsoAPO\devices` has a file
-for the endpoint.
+cable. The staged `C:\Program Files\Isotone\IsoAPO.dll` is the final backend
+review's build (SHA-256 EE9AECEE…8567, param block v5); the one before it is
+beside it as `IsoAPO.previous.dll`. `%ProgramData%\IsoAPO\devices` holds no
+saved state. CABLE Input's
+install record predates `Isotone.InstallMode`; `status` derives MFX from the
+slot, and a repair after a detach needs `--mode mfx`.
 
 **CABLE Input and CABLE Output are 7.1** (8 channels, 24-bit, 48 kHz, `0x63F`),
 set for the multichannel measurement; they were 2 channels, 24-bit, `0x3`.

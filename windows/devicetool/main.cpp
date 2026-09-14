@@ -11,10 +11,14 @@
 //   isotone-devicetool uninstall <endpoint> [--dry-run]
 //   isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]
 //   isotone-devicetool test      <endpoint>
+//   isotone-devicetool roundtrip <endpoint> [...]
+// Every command also takes --output <absolute path>.
 //
 // <endpoint> is an endpoint GUID, with or without braces, or a full device ID
-// such as {0.0.0.00000000}.{guid}. One JSON object on stdout. Exit 0 on
-// success, 1 on failure or refusal, 2 on bad arguments.
+// such as {0.0.0.00000000}.{guid}. One JSON object on stdout, or in the
+// --output file. Exit 0 on success, 1 on failure or refusal, 2 on bad
+// arguments, 3 when the command needs an elevated process, 4 when another
+// devicetool run held the machine lock for too long.
 //
 // --dry-run runs upstream's install and uninstall logic unchanged with every
 // registry write intercepted (RegistryDryRun), prints the writes, and needs no
@@ -27,11 +31,18 @@
 
 #include <mmdeviceapi.h>
 #include <objbase.h>
+#include <sddl.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <userenv.h>
 
+#include <fcntl.h>
+#include <io.h>
+
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <exception>
 #include <map>
 #include <memory>
 #include <functional>
@@ -48,6 +59,7 @@ using isotone::devicetool::OperationLog;
 using isotone::devicetool::RegistryOperation;
 using isotone::devicetool::ScopedDryRun;
 using isotone::devicetool::ScopedLog;
+using isotone::devicetool::SimulatedKill;
 
 namespace {
 
@@ -94,6 +106,14 @@ const SlotName kModeSlots[] = {
 
 // ---------------------------------------------------------------------------
 // JSON
+
+std::wstring wide(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
 
 std::string utf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -145,13 +165,25 @@ std::string operations_json(const std::vector<RegistryOperation>& ops) {
     return out + "]";
 }
 
+constexpr int kExitFailed = 1;
+constexpr int kExitBadArguments = 2;
+constexpr int kExitNotElevated = 3;
+constexpr int kExitBusy = 4;
+
 int fail(const std::string& command, const std::string& reason, const std::string& extra = "") {
     std::printf("{\"command\":%s,\"ok\":false,\"reason\":%s%s}\n", quote(command).c_str(),
                 quote(reason).c_str(), extra.c_str());
-    return 1;
+    return kExitFailed;
 }
 
-int usage() {
+// A failure the caller tells apart by its exit code and `error` field, not its text.
+int fail_with(int exit_code, const char* error, const std::string& command, const std::string& reason) {
+    std::printf("{\"command\":%s,\"ok\":false,\"error\":\"%s\",\"reason\":%s}\n",
+                command.empty() ? "null" : quote(command).c_str(), error, quote(reason).c_str());
+    return exit_code;
+}
+
+int usage(const std::string& command, const std::string& reason) {
     std::fprintf(stderr,
                  "usage:\n"
                  "  isotone-devicetool list\n"
@@ -161,10 +193,12 @@ int usage() {
                  "  isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]\n"
                  "  isotone-devicetool test      <endpoint>\n"
                  "  isotone-devicetool roundtrip <endpoint> [--mode mfx|efx|gfx] [--replace-equalizerapo\n"
-                 "                               [--simulate-equalizerapo PRE,POST[,unhosted|unregistered][,deleted]]]\n"
+                 "                               [--simulate-equalizerapo PRE,POST[,unhosted|unregistered][,deleted|fallback]]]\n"
+                 "Every command takes --output <absolute path>: the JSON goes to that new file.\n"
+                 "<endpoint>: {guid}, guid, {0.0.0.00000000}.{guid} (render) or {0.0.1.00000000}.{guid} (capture).\n"
                  "Without --mode: the mode of Equalizer APO's post-mix slot where it is on the endpoint,\n"
                  "otherwise the mode upstream's install would pick.\n");
-    return 2;
+    return fail_with(kExitBadArguments, "bad_arguments", command, reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,26 +291,36 @@ struct Endpoint {
 };
 
 // 2 = malformed argument, 1 = well-formed but no such endpoint, 0 = found.
+// Accepted: {guid}, guid, and the full device IDs {0.0.0.00000000}.{guid}
+// (render only) and {0.0.1.00000000}.{guid} (capture only). Nothing else
+// around the GUID.
 int resolve_endpoint(const std::string& arg, Endpoint* out) {
     std::string s = arg;
-    const size_t open = s.rfind('{');
-    if (open != std::string::npos) {
-        const size_t close = s.find('}', open);
-        if (close == std::string::npos) return 2;
-        s = s.substr(open, close - open + 1);
-    } else {
-        s = "{" + s + "}";
+    int flow = -1;   // -1 either, 0 render, 1 capture
+    const std::string render_prefix = "{0.0.0.00000000}.", capture_prefix = "{0.0.1.00000000}.";
+    if (s.rfind(render_prefix, 0) == 0) {
+        flow = 0;
+        s = s.substr(render_prefix.size());
+    } else if (s.rfind(capture_prefix, 0) == 0) {
+        flow = 1;
+        s = s.substr(capture_prefix.size());
+    }
+    if (s.size() == 36) s = "{" + s + "}";
+    if (s.size() != 38 || s.front() != '{' || s.back() != '}') return 2;
+    for (size_t i = 1; i < 37; ++i) {
+        const bool dash = i == 9 || i == 14 || i == 19 || i == 24;
+        if (dash ? s[i] != '-' : !std::isxdigit(static_cast<unsigned char>(s[i]))) return 2;
     }
     std::wstring w(s.begin(), s.end());
     GUID guid;
-    if (s.size() != 38 || FAILED(CLSIDFromString(w.c_str(), &guid))) return 2;
+    if (FAILED(CLSIDFromString(w.c_str(), &guid))) return 2;
     for (wchar_t& c : w) c = static_cast<wchar_t>(towlower(c));
 
     const std::wstring render = std::wstring(kMMDevices) + L"\\Render\\" + w;
     const std::wstring capture = std::wstring(kMMDevices) + L"\\Capture\\" + w;
-    if (RegistryHelper::keyExists(render)) {
+    if (flow != 1 && RegistryHelper::keyExists(render)) {
         *out = {w, false, render};
-    } else if (RegistryHelper::keyExists(capture)) {
+    } else if (flow != 0 && RegistryHelper::keyExists(capture)) {
         *out = {w, true, capture};
     } else {
         return 1;
@@ -479,8 +523,27 @@ struct Registration {
     std::wstring dll;
     bool dll_exists = false;
     bool dll_under_user_profile = false;
+    // LOCAL SERVICE may read and execute the DLL; empty when that could not be
+    // determined (no DLL, or the access check failed).
+    std::optional<bool> dll_local_service_can_load;
     std::string json;
 };
+
+// Whether LOCAL SERVICE (S-1-5-19), the account audiodg hosts APOs under, may
+// read and execute `path`, by an access check against the file's security
+// descriptor for that account and the groups Authz gives it. A DLL moved into
+// Program Files keeps its profile ACL, and one on another drive can carry any
+// ACL; either way audiodg's load fails and the whole endpoint returns
+// E_ACCESSDENIED.
+std::optional<bool> local_service_can_load(const std::wstring& path) {
+    try {
+        const ACCESS_MASK granted = RegistryHelper::getFileAccessForUser(path, SECURITY_LOCAL_SERVICE_RID);
+        const ACCESS_MASK needed = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+        return (granted & needed) == needed;
+    } catch (RegistryException&) {
+        return std::nullopt;
+    }
+}
 
 Registration read_registration() {
     Registration r;
@@ -502,11 +565,14 @@ Registration read_registration() {
             if (root.back() != L'\\') root += L'\\';
         }
         r.dll_under_user_profile = lower.rfind(root, 0) == 0;
+        if (r.dll_exists) r.dll_local_service_can_load = local_service_can_load(r.dll);
     }
     r.json = std::string("{\"clsid\":") + quote(clsid) + ",\"apo_registered\":" +
              boolean(r.apo_registered) + ",\"dll\":" + (r.dll.empty() ? "null" : quote(r.dll)) +
              ",\"dll_exists\":" + boolean(r.dll_exists) +
-             ",\"dll_under_user_profile\":" + boolean(r.dll_under_user_profile) + "}";
+             ",\"dll_under_user_profile\":" + boolean(r.dll_under_user_profile) +
+             ",\"dll_local_service_can_load\":" +
+             (r.dll_local_service_can_load ? boolean(*r.dll_local_service_can_load) : "null") + "}";
     return r;
 }
 
@@ -553,6 +619,25 @@ int cmd_list() {
     return 0;
 }
 
+struct KnownMode {
+    std::optional<DeviceAPOInfo::InstallMode> mode;
+    const char* source = nullptr;   // "record", "effect_slot", "equalizerapo_record"
+};
+
+// IsoAPO's state on an endpoint, as status reports it, with the commands that
+// move it on.
+struct IsoState {
+    const char* name;
+    std::vector<std::string> remedies;
+};
+
+KnownMode install_mode_of(const Endpoint& e);
+IsoState isoapo_state(const Endpoint& e);
+bool equalizerapo_over_isoapo(const Endpoint& e);
+std::string interrupted_command(const Endpoint& e);
+std::optional<DeviceAPOInfo::InstallMode> recorded_mode(const Endpoint& e);
+DeviceAPOInfo::InstallMode default_mode(DeviceAPOInfo& info, const Endpoint& e);
+
 int cmd_status(const Endpoint& e) {
     std::vector<std::string> warnings;
     Slots slots = read_slots(e);
@@ -581,16 +666,30 @@ int cmd_status(const Endpoint& e) {
 
     const Record iso = read_record(kIsoChildApos, e.guid);
     const Record eapo = read_record(kEapoChildApos, e.guid);
-    const bool detached = iso.exists && !slots.isoapo;
-    const bool unrecorded = slots.isoapo && !iso.exists;
+    const IsoState state = isoapo_state(e);
+    const std::string state_name = state.name;
+    const bool detached = state_name == "detached";
+    const bool unrecorded = state_name == "unrecorded";
+    const bool over = equalizerapo_over_isoapo(e);
+    const KnownMode known = install_mode_of(e);
+    const std::string interrupted = interrupted_command(e);
     const char* backend = slots.isoapo && slots.equalizerapo ? "conflict"
                           : slots.isoapo                    ? "native"
                           : slots.equalizerapo              ? "equalizerapo"
                                                             : "none";
-    if (slots.isoapo && slots.equalizerapo)
-        warnings.push_back("IsoAPO and Equalizer APO are both on this endpoint");
-    if (detached)
+    if (!interrupted.empty())
+        warnings.push_back("a devicetool " + interrupted + " on this endpoint was interrupted; the next install, uninstall or repair first puts the endpoint back as it was before it");
+    if (state_name == "alongside_equalizerapo")
+        warnings.push_back(over ? "Equalizer APO was installed on this endpoint after IsoAPO, and both are in effect slots; install --replace-equalizerapo removes Equalizer APO, uninstall removes IsoAPO"
+                                : "IsoAPO and Equalizer APO are both on this endpoint");
+    if (state_name == "replaced_by_equalizerapo")
+        warnings.push_back("Equalizer APO's Device Selector took IsoAPO's slot on this endpoint; install --replace-equalizerapo puts IsoAPO back, uninstall keeps Equalizer APO");
+    if (detached && slots.equalizerapo)
+        warnings.push_back("IsoAPO has an install record but is in no effect slot, and Equalizer APO is on the endpoint; install --replace-equalizerapo replaces it, uninstall keeps it");
+    else if (detached && known.mode)
         warnings.push_back("IsoAPO has an install record but is in no effect slot: detached, probably by a driver update; run repair");
+    else if (detached)
+        warnings.push_back("IsoAPO has an install record but is in no effect slot: detached, probably by a driver update; the record predates Isotone.InstallMode, so run repair with --mode");
     if (unrecorded)
         warnings.push_back("IsoAPO is in an effect slot with no install record (installed by the retired install.ps1); restore FxProperties from that script's .reg backup, then install with devicetool");
     if (!load_error.empty() && load_error != "not_present")
@@ -612,23 +711,32 @@ int cmd_status(const Endpoint& e) {
     } catch (RegistryException&) {
     }
 
-    std::string recommended = "null";
-    if (load_error.empty() && !info.isInstalled())
+    std::string recommended = "null", default_install = "null";
+    if (load_error.empty() && !info.isInstalled()) {
         recommended = quote(mode_name(info.getCurrentInstallState().installMode));
+        if (!e.input) default_install = quote(mode_name(default_mode(info, e)));
+    }
+    const std::optional<DeviceAPOInfo::InstallMode> recorded = recorded_mode(e);
+    const std::string install_mode =
+        std::string("{\"recorded\":") + (recorded ? quote(mode_name(*recorded)) : "null") +
+        ",\"effective\":" + (known.mode ? quote(mode_name(*known.mode)) : "null") +
+        ",\"source\":" + (known.source ? quote(std::string(known.source)) : "null") + "}";
 
     std::printf(
         "{\"command\":\"status\",\"ok\":true,\"guid\":%s,\"id\":%s,\"flow\":\"%s\",\"device\":%s,"
         "\"backend\":\"%s\",\"effect_slots\":%s,\"effect_lists\":%s,\"processing_modes\":%s,"
-        "\"isoapo\":{\"in_slots\":%s,\"record\":%s,\"detached\":%s,\"unrecorded\":%s,\"registration\":%s},"
+        "\"isoapo\":{\"state\":%s,\"remedies\":%s,\"in_slots\":%s,\"record\":%s,\"install_mode\":%s,"
+        "\"detached\":%s,\"unrecorded\":%s,\"equalizerapo_over_isoapo\":%s,\"interrupted_command\":%s,\"registration\":%s},"
         "\"equalizerapo\":{\"in_slots\":%s,\"installed\":%s,\"config_path\":%s,\"uninstaller\":%s,\"record\":%s},"
-        "\"upstream_recommended_mode\":%s,\"protected_audiodg_disabled\":%s,\"warnings\":%s}\n",
+        "\"default_install_mode\":%s,\"upstream_recommended_mode\":%s,\"protected_audiodg_disabled\":%s,\"warnings\":%s}\n",
         quote(e.guid).c_str(), quote(device_id(e)).c_str(), e.input ? "capture" : "render",
         device.c_str(), backend, slots.json.c_str(), slots.lists_json.c_str(), modes.c_str(),
-        boolean(slots.isoapo),
-        iso.json.c_str(), boolean(detached), boolean(unrecorded), reg.json.c_str(),
+        quote(state_name).c_str(), string_array(state.remedies).c_str(), boolean(slots.isoapo),
+        iso.json.c_str(), install_mode.c_str(), boolean(detached), boolean(unrecorded), boolean(over),
+        interrupted.empty() ? "null" : quote(interrupted).c_str(), reg.json.c_str(),
         boolean(slots.equalizerapo), boolean(eapo_installed),
         have_config ? quote(config_path).c_str() : "null", have_uninstaller ? quote(uninstaller).c_str() : "null",
-        eapo.json.c_str(), recommended.c_str(),
+        eapo.json.c_str(), default_install.c_str(), recommended.c_str(),
         boolean(protected_audiodg_disabled), string_array(warnings).c_str());
     return 0;
 }
@@ -677,6 +785,44 @@ bool apo_registered(const std::wstring& clsid) {
 
 std::wstring iso_record_key(const Endpoint& e) { return std::wstring(kIsoChildApos) + L"\\" + e.guid; }
 std::wstring eapo_record_key(const Endpoint& e) { return std::wstring(kEapoChildApos) + L"\\" + e.guid; }
+
+bool is_isoapo(const std::wstring& clsid) {
+    return std::string(classify(clsid)).rfind("isoapo", 0) == 0;
+}
+
+// Equalizer APO's Device Selector ticked this endpoint after IsoAPO was
+// installed on it. Upstream's load maps only Equalizer APO's own classes to
+// !VALUE, so its install records IsoAPO's class as the original of the slot it
+// took (and as its child when "use original APO" is on). IsoAPO's record is
+// then the only one that says what the device had before either EQ.
+bool equalizerapo_over_isoapo(const Endpoint& e) {
+    const std::wstring record = eapo_record_key(e);
+    if (!RegistryHelper::keyExists(record)) return false;
+    std::wstring v;
+    for (const SlotName& slot : kEffectSlots) {
+        if (try_read_string(record, slot.value, &v) && is_isoapo(v)) return true;
+    }
+    for (const wchar_t* child : {L"PreMixChild", L"PostMixChild"}) {
+        if (try_read_string(record, child, &v) && is_isoapo(v)) return true;
+    }
+    return false;
+}
+
+// The slot each install mode writes the post-mix class to, and the slots it
+// deletes (upstream DeviceAPOInfo::install).
+const char* post_slot_label(DeviceAPOInfo::InstallMode mode) {
+    return mode == DeviceAPOInfo::INSTALL_LFX_GFX ? "GFX" : mode == DeviceAPOInfo::INSTALL_SFX_MFX ? "MFX" : "EFX";
+}
+bool mode_deletes(DeviceAPOInfo::InstallMode mode, const std::string& label) {
+    return mode == DeviceAPOInfo::INSTALL_LFX_GFX ? (label == "SFX" || label == "MFX" || label == "EFX")
+                                                  : (label == "LFX" || label == "GFX");
+}
+std::optional<DeviceAPOInfo::InstallMode> mode_of_post_slot(const std::string& label) {
+    if (label == "GFX") return DeviceAPOInfo::INSTALL_LFX_GFX;
+    if (label == "MFX") return DeviceAPOInfo::INSTALL_SFX_MFX;
+    if (label == "EFX") return DeviceAPOInfo::INSTALL_SFX_EFX;
+    return std::nullopt;
+}
 
 // ---------------------------------------------------------------------------
 // What upstream's install changes outside the effect slots and its uninstall
@@ -770,6 +916,7 @@ struct Replacement {
     int restored = 0;             // slots given back the APO Equalizer APO was running there
     std::wstring child;           // what IsoAPO took over from Equalizer APO's post-mix instance
     bool record_taken_over = false;
+    bool took_back = false;       // Equalizer APO had been installed over IsoAPO; its install was undone
 };
 
 // Choosing IsoAPO removes Equalizer APO (the owner's decision), so its install
@@ -817,15 +964,18 @@ bool take_over_equalizerapo_record(const Endpoint& e) {
 
 // With --replace-equalizerapo, after upstream's install. Equalizer APO's classes
 // leave the effect slots, so the endpoint has one EQ, and everything Equalizer
-// APO was running keeps running exactly once:
-//  - a slot IsoAPO did not take gets back the APO Equalizer APO was hosting
-//    there (Equalizer APO's record: the slot's original value, and the same
-//    CLSID as its PreMixChild or PostMixChild), or is emptied;
-//  - the slot IsoAPO took: if Equalizer APO was there hosting an APO, IsoAPO
-//    hosts it now.
-// Only APOs Equalizer APO was actually hosting count, so an APO the user had
-// switched off in Equalizer APO ("use original APO" unticked) stays off, and a
-// stale record for slots Equalizer APO no longer holds does nothing. Upstream's
+// APO was running keeps running exactly once, where it ran: inside the
+// Equalizer APO instance that hosted it.
+//  - a slot IsoAPO did not take, holding Equalizer APO's pre-mix or post-mix
+//    class, gets that instance's child (PreMixChild or PostMixChild), or is
+//    emptied;
+//  - the slot IsoAPO took, if it held Equalizer APO's post-mix class: IsoAPO
+//    hosts that instance's child now.
+// The child is what the instance ran, whichever slot's original it came from:
+// upstream's getOriginalAPOPostMix falls back to the GFX original (MFX for
+// LFX_GFX) when the instance's own slot and SFX were empty, and Equalizer APO's
+// install has deleted that slot. An APO the user had switched off in Equalizer
+// APO ("use original APO" unticked) is no child and stays off. Upstream's
 // install has already recorded every slot's value, and uninstall writes each
 // back.
 Replacement remove_equalizerapo(const Endpoint& e) {
@@ -835,32 +985,30 @@ Replacement remove_equalizerapo(const Endpoint& e) {
     std::wstring eapo_pre, eapo_post;
     try_read_string(eapo_record, L"PreMixChild", &eapo_pre);
     try_read_string(eapo_record, L"PostMixChild", &eapo_post);
-    const auto hosted = [&](const std::wstring& clsid) {
-        return is_other_apo(clsid) && (same_clsid(clsid, eapo_pre) || same_clsid(clsid, eapo_post));
-    };
 
     Replacement r;
     for (const SlotName& slot : kEffectSlots) {
         std::wstring clsid;
         if (!try_read_string(fx, slot.value, &clsid)) continue;
-        std::wstring original;
-        try_read_string(eapo_record, slot.value, &original);
-        if (is_equalizerapo(clsid)) {
-            if (hosted(original)) {
-                RegistryHelper::writeValue(fx, slot.value, original);
+        const std::string kind = classify(clsid);
+        if (kind == "equalizerapo_pre_mix" || kind == "equalizerapo_post_mix") {
+            const std::wstring& child = kind == "equalizerapo_pre_mix" ? eapo_pre : eapo_post;
+            if (is_other_apo(child)) {
+                RegistryHelper::writeValue(fx, slot.value, child);
                 ++r.restored;
             } else {
                 RegistryHelper::deleteValue(fx, slot.value);
                 ++r.removed;
             }
-        } else if (std::string(classify(clsid)) == "isoapo_post_mix") {
+        } else if (kind == "isoapo_post_mix") {
             std::wstring replaced;
             try_read_string(iso_record, slot.value, &replaced);
             std::wstring current_child;
             try_read_string(iso_record, L"PostMixChild", &current_child);
-            if (is_equalizerapo(replaced) && hosted(original) && current_child.empty()) {
-                RegistryHelper::writeValue(iso_record, L"PostMixChild", original);
-                r.child = original;
+            if (std::string(classify(replaced)) == "equalizerapo_post_mix" && is_other_apo(eapo_post) &&
+                current_child.empty()) {
+                RegistryHelper::writeValue(iso_record, L"PostMixChild", eapo_post);
+                r.child = eapo_post;
             }
         }
     }
@@ -906,10 +1054,40 @@ std::optional<DeviceAPOInfo::InstallMode> recorded_mode(const Endpoint& e) {
     return mode;
 }
 
-// A vendor APO Equalizer APO hosts in a slot `mode` deletes: upstream's install
-// for SFX_MFX or SFX_EFX deletes LFX and GFX, and for LFX_GFX deletes SFX, MFX
-// and EFX. Replacing Equalizer APO with such a mode would drop the vendor APO
-// without a trace. Empty when there is none.
+// The mode IsoAPO's install on this endpoint used: recorded since the pre-UI
+// review; for an older record, the slot IsoAPO's post-mix class is in now, or
+// the slot Equalizer APO's record says it took from IsoAPO. Otherwise unknown,
+// and nothing guesses: an install mode decides which slots are deleted, so a
+// guess could move IsoAPO to a slot never measured on the device.
+KnownMode install_mode_of(const Endpoint& e) {
+    if (const auto recorded = recorded_mode(e)) return {recorded, "record"};
+    const std::wstring fx = e.key + L"\\FxProperties";
+    std::optional<DeviceAPOInfo::InstallMode> found;
+    int slots = 0;
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring clsid;
+        if (try_read_string(fx, slot.value, &clsid) && std::string(classify(clsid)) == "isoapo_post_mix") {
+            found = mode_of_post_slot(slot.label);
+            ++slots;
+        }
+    }
+    if (slots == 1 && found) return {found, "effect_slot"};
+    if (slots > 1) return {};
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring original;
+        if (try_read_string(eapo_record_key(e), slot.value, &original) &&
+            std::string(classify(original)) == "isoapo_post_mix") {
+            if (const auto m = mode_of_post_slot(slot.label)) return {m, "equalizerapo_record"};
+        }
+    }
+    return {};
+}
+
+// A vendor APO an Equalizer APO instance hosts, where that instance sits in a
+// slot `mode` deletes: upstream's install for SFX_MFX or SFX_EFX deletes LFX
+// and GFX, and for LFX_GFX deletes SFX, MFX and EFX. Replacing Equalizer APO
+// with such a mode would drop the vendor APO without a trace. Empty when there
+// is none.
 std::wstring hosted_apo_in_deleted_slot(const Endpoint& e, DeviceAPOInfo::InstallMode mode) {
     const std::wstring fx = e.key + L"\\FxProperties";
     const std::wstring eapo_record = eapo_record_key(e);
@@ -917,15 +1095,11 @@ std::wstring hosted_apo_in_deleted_slot(const Endpoint& e, DeviceAPOInfo::Instal
     try_read_string(eapo_record, L"PreMixChild", &pre);
     try_read_string(eapo_record, L"PostMixChild", &post);
     for (const SlotName& slot : kEffectSlots) {
-        const std::string label = slot.label;
-        const bool deleted = mode == DeviceAPOInfo::INSTALL_LFX_GFX ? (label == "SFX" || label == "MFX" || label == "EFX")
-                                                                    : (label == "LFX" || label == "GFX");
-        std::wstring clsid, original;
-        if (!deleted || !try_read_string(fx, slot.value, &clsid) || !is_equalizerapo(clsid)) continue;
-        if (try_read_string(eapo_record, slot.value, &original) && is_other_apo(original) &&
-            (same_clsid(original, pre) || same_clsid(original, post))) {
-            return original;
-        }
+        std::wstring clsid;
+        if (!mode_deletes(mode, slot.label) || !try_read_string(fx, slot.value, &clsid)) continue;
+        const std::string kind = classify(clsid);
+        if (kind == "equalizerapo_pre_mix" && is_other_apo(pre)) return pre;
+        if (kind == "equalizerapo_post_mix" && is_other_apo(post)) return post;
     }
     return L"";
 }
@@ -947,18 +1121,24 @@ Replacement install_isoapo(DeviceAPOInfo& info, const Endpoint& e, DeviceAPOInfo
 struct Uninstalled {
     bool fx_properties_missing = false;
     bool detached = false;
+    bool under_equalizerapo = false;
     int equalizerapo_dropped = 0;
 };
 
 // What upstream's DeviceAPOInfo::uninstall writes, taken from the install record
 // alone. Upstream's load refuses an endpoint that is not present (a USB DAC or
 // headset removed for good), so its uninstall cannot run there, but the slots
-// and the record are still in the registry. Throws RegistryException.
+// and the record are still in the registry. On a detached endpoint (IsoAPO in
+// no slot) the slots are the driver's since the record was written, and
+// upstream's uninstall would write back only what it reads there now, so only
+// the record goes. Throws RegistryException.
 void uninstall_from_record(const Endpoint& e) {
     const std::wstring fx = e.key + L"\\FxProperties";
     const std::wstring record = iso_record_key(e);
     std::wstring first;
-    if (try_read_string(record, kEffectSlots[0].value, &first) && first == APOGUID_NOKEY) {
+    if (!read_slots(e).isoapo) {
+        // Detached: leave the slots.
+    } else if (try_read_string(record, kEffectSlots[0].value, &first) && first == APOGUID_NOKEY) {
         if (RegistryHelper::keyExists(fx)) RegistryHelper::deleteKey(fx);
     } else {
         for (const SlotName& slot : kEffectSlots) {
@@ -976,11 +1156,86 @@ void uninstall_from_record(const Endpoint& e) {
         RegistryHelper::deleteKey(kIsoChildApos);
 }
 
+const char* mode_slot_label(const std::wstring& mode_value_name) {
+    for (const SlotName& m : kModeSlots) {
+        if (_wcsicmp(m.value, mode_value_name.c_str()) == 0) return m.label;
+    }
+    return "";
+}
+
+// Uninstall where Equalizer APO was installed over IsoAPO. Equalizer APO was not
+// asked to go, so it stays and keeps working; IsoAPO leaves every slot; and
+// Equalizer APO's record is corrected so that its own uninstall later restores
+// the device as it was before either EQ:
+//  - a slot original naming IsoAPO becomes what IsoAPO's record says was there;
+//  - a slot IsoAPO's install deleted, which Equalizer APO therefore recorded
+//    empty, gets IsoAPO's original back;
+//  - a child naming IsoAPO becomes the APO IsoAPO hosted (or none).
+// A slot IsoAPO still holds gets its original back directly. The disable-
+// enhancements flag stays deleted (Equalizer APO's install force-enables
+// enhancements too), and a processing-mode list stays where Equalizer APO's
+// class is, since its install adds one only when none was there.
+// Throws RegistryException.
+void uninstall_under_equalizerapo(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    const std::wstring iso_record = iso_record_key(e);
+    const std::wstring eapo_record = eapo_record_key(e);
+    const KnownMode known = install_mode_of(e);
+    const Extras extras = recorded_extras(e);
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring before_isoapo, eapo_original, current;
+        const bool have_iso = try_read_string(iso_record, slot.value, &before_isoapo);
+        const std::wstring before_both = have_iso && is_other_apo(before_isoapo) ? before_isoapo : APOGUID_NOVALUE;
+        if (try_read_string(eapo_record, slot.value, &eapo_original)) {
+            if (is_isoapo(eapo_original)) {
+                RegistryHelper::writeValue(eapo_record, slot.value, before_both);
+            } else if (eapo_original == APOGUID_NOVALUE && is_other_apo(before_both) && known.mode &&
+                       mode_deletes(*known.mode, slot.label)) {
+                RegistryHelper::writeValue(eapo_record, slot.value, before_both);
+            }
+        }
+        if (try_read_string(fx, slot.value, &current) && is_isoapo(current)) {
+            if (is_other_apo(before_both)) RegistryHelper::writeValue(fx, slot.value, before_both);
+            else RegistryHelper::deleteValue(fx, slot.value);
+        }
+    }
+    std::wstring hosted, child;
+    try_read_string(iso_record, L"PostMixChild", &hosted);
+    for (const wchar_t* name : {L"PreMixChild", L"PostMixChild"}) {
+        if (try_read_string(eapo_record, name, &child) && is_isoapo(child)) {
+            RegistryHelper::writeValue(eapo_record, name,
+                                       std::wstring(name) == L"PostMixChild" && is_other_apo(hosted) ? hosted : L"");
+        }
+    }
+    if (RegistryHelper::keyExists(fx)) {
+        for (const std::wstring& m : extras.modes_absent) {
+            std::wstring clsid;
+            bool eapo_there = false;
+            for (const SlotName& slot : kEffectSlots) {
+                if (std::string(slot.label) == mode_slot_label(m) && try_read_string(fx, slot.value, &clsid))
+                    eapo_there = is_equalizerapo(clsid);
+            }
+            if (!eapo_there && RegistryHelper::valueExists(fx, m)) RegistryHelper::deleteValue(fx, m);
+        }
+    }
+    if (RegistryHelper::keyExists(iso_record)) RegistryHelper::deleteKey(iso_record);
+    if (RegistryHelper::keyExists(kIsoChildApos) && RegistryHelper::keyEmpty(kIsoChildApos))
+        RegistryHelper::deleteKey(kIsoChildApos);
+}
+
 // Throws RegistryException.
 Uninstalled uninstall_isoapo(const Endpoint& e) {
     Uninstalled u;
     const std::wstring fx = e.key + L"\\FxProperties";
     const std::wstring record = iso_record_key(e);
+    if (equalizerapo_over_isoapo(e)) {
+        u.under_equalizerapo = true;
+        u.detached = !read_slots(e).isoapo;
+        u.fx_properties_missing = !RegistryHelper::keyExists(fx);
+        uninstall_under_equalizerapo(e);
+        u.equalizerapo_dropped = drop_unregistered_equalizerapo(e);
+        return u;
+    }
     if (!RegistryHelper::keyExists(fx)) {
         // A driver change removed FxProperties: there is nothing to restore, and
         // upstream's uninstall would fail deleting a key that is not there.
@@ -1003,6 +1258,50 @@ Uninstalled uninstall_isoapo(const Endpoint& e) {
     if (!u.detached) restore_extras(e, extras);
     u.equalizerapo_dropped = drop_unregistered_equalizerapo(e);
     return u;
+}
+
+// --replace-equalizerapo where Equalizer APO was installed over IsoAPO: undo
+// Equalizer APO's install as its own uninstall would, writing each slot's
+// recorded original back, with IsoAPO's class in the one slot `mode` puts it
+// in. Every slot then holds what it held while IsoAPO was installed alone, so
+// IsoAPO hosts what it hosted then (its record is untouched), and IsoAPO's
+// record, which saw the device before either EQ, stays right for uninstall.
+// Equalizer APO's record goes. Throws RegistryException.
+Replacement take_back_from_equalizerapo(const Endpoint& e, DeviceAPOInfo::InstallMode mode) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    const std::wstring eapo_record = eapo_record_key(e);
+    const std::wstring isoapo = RegistryHelper::getGuidString(ISOAPO_POST_MIX_GUID);
+    Replacement r;
+    r.took_back = true;
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring original, current;
+        const bool has = try_read_string(fx, slot.value, &current);
+        if (!try_read_string(eapo_record, slot.value, &original)) {
+            // No original recorded: leave the slot, unless Equalizer APO is in it.
+            if (!has || !is_equalizerapo(current)) continue;
+            original = APOGUID_NOVALUE;
+        }
+        std::wstring target;   // empty: no value
+        if (is_isoapo(original)) {
+            if (std::string(slot.label) == post_slot_label(mode)) target = isoapo;
+        } else if (is_other_apo(original)) {
+            target = original;
+        }
+        if (target.empty()) {
+            if (has) {
+                RegistryHelper::deleteValue(fx, slot.value);
+                ++r.removed;
+            }
+        } else if (!has || current != target) {
+            RegistryHelper::writeValue(fx, slot.value, target);
+            if (target != isoapo) ++r.restored;
+        }
+    }
+    RegistryHelper::deleteKey(eapo_record);
+    if (RegistryHelper::keyExists(kEapoChildApos) && RegistryHelper::keyEmpty(kEapoChildApos))
+        RegistryHelper::deleteKey(kEapoChildApos);
+    r.record_taken_over = true;
+    return r;
 }
 
 // The install mode to use when --mode is not given. Where Equalizer APO is on
@@ -1055,7 +1354,9 @@ std::string install_checks_json(const Registration& reg, std::vector<std::string
     return "[" + check("post-mix CLSID registered under AudioEngine\\AudioProcessingObjects", reg.apo_registered) +
            "," + check("CLSID InprocServer32 names a DLL that exists", reg.dll_exists) + "," +
            check("DLL is not under a user profile (audiodg runs as LocalService)",
-                 !reg.dll.empty() && !reg.dll_under_user_profile) + "]";
+                 !reg.dll.empty() && !reg.dll_under_user_profile) + "," +
+           check("LOCAL SERVICE can read and execute the DLL (audiodg runs as LocalService)",
+                 reg.dll_local_service_can_load.value_or(false)) + "]";
 }
 
 // Every key and value an install, uninstall or repair can touch, as it was, so
@@ -1100,7 +1401,7 @@ Snapshot snapshot_endpoint(const Endpoint& e) {
             if (RegistryHelper::keyExists(k)) {
                 v.type = value_type(k, name, &v.present);
                 if (v.present && v.type == REG_SZ) v.text = RegistryHelper::readValue(k, name);
-                else if (v.present && v.type == REG_MULTI_SZ) v.multi = RegistryHelper::readMultiValue(k, name);
+                else if (v.present && v.type == REG_MULTI_SZ) v.multi = RegistryHelper::readMultiValue(k, name);   // through the dry run's hook
                 else if (v.present && v.type == REG_DWORD) v.dword = read_dword(k, name);
             }
         } catch (RegistryException&) {
@@ -1125,23 +1426,30 @@ Snapshot snapshot_endpoint(const Endpoint& e) {
     return s;
 }
 
-// Best effort: every key and value goes back even if one of them cannot.
-void roll_back(const Snapshot& s) {
-    const auto attempt = [](const auto& step) {
-        try {
-            step();
-        } catch (RegistryException&) {
-        }
+std::string error_text(const std::function<void()>& step);
+
+struct RollbackFailure {
+    std::string step;
+    std::string error;
+};
+
+// Best effort: every key and value goes back even if one of them cannot. Returns
+// the steps that failed; none means the endpoint is as the snapshot was.
+std::vector<RollbackFailure> roll_back(const Snapshot& s) {
+    std::vector<RollbackFailure> failures;
+    const auto attempt = [&](const std::wstring& what, const std::function<void()>& step) {
+        const std::string error = error_text(step);
+        if (!error.empty()) failures.push_back({utf8(what), error});
     };
     // Keys removed since come back (parents first), with their values; keys
     // made since go (children first, and a shared parent only once empty).
     for (const Snapshot::Key& k : s.keys) {
-        attempt([&] {
+        attempt(L"create key " + k.key, [&] {
             if (k.existed && !RegistryHelper::keyExists(k.key)) RegistryHelper::createKey(k.key);
         });
     }
     for (const Snapshot::Value& v : s.values) {
-        attempt([&] {
+        attempt(L"restore value " + v.key + L"\\" + v.name, [&] {
             if (!RegistryHelper::keyExists(v.key)) return;
             if (!v.present) {
                 if (RegistryHelper::valueExists(v.key, v.name)) RegistryHelper::deleteValue(v.key, v.name);
@@ -1155,134 +1463,445 @@ void roll_back(const Snapshot& s) {
         });
     }
     for (auto k = s.keys.rbegin(); k != s.keys.rend(); ++k) {
-        attempt([&] {
+        attempt(L"delete key " + k->key, [&] {
             if (!k->existed && RegistryHelper::keyExists(k->key) && (k->whole || RegistryHelper::keyEmpty(k->key))) {
                 RegistryHelper::deleteKey(k->key);
             }
         });
     }
+    return failures;
 }
 
-// Runs `command` with its writes logged; if it throws, rolls the endpoint back to
-// `before` and reports both sets of operations. Returns the error, or empty.
-std::string with_rollback(const Snapshot& before, OperationLog* log, std::string* rollback_json,
-                          const std::function<void()>& command) {
+// Runs `step`; returns what it threw as text, or empty if it returned. Catches
+// everything, so no failure leaves a command without its JSON or its rollback.
+std::string error_text(const std::function<void()>& step) {
+    std::string message;
     try {
-        ScopedLog scope(log);
-        command();
+        step();
         return "";
     } catch (RegistryException& ex) {
-        OperationLog undo;
-        {
-            ScopedLog scope(&undo);
-            roll_back(before);
-        }
-        *rollback_json = ",\"rolled_back\":true,\"rollback_operations\":" + operations_json(undo.operations());
-        const std::string message = utf8(ex.getMessage());
-        return message.empty() ? "registry error" : message;
+        message = utf8(ex.getMessage());
+    } catch (DeviceException& ex) {
+        message = utf8(ex.getMessage());
+    } catch (std::exception& ex) {
+        message = ex.what();
+    } catch (...) {
+        message = "unknown exception";
     }
+    return message.empty() ? "registry error" : message;
+}
+
+std::string rollback_failures_json(const std::vector<RollbackFailure>& failures) {
+    std::string out = "[";
+    for (size_t i = 0; i < failures.size(); ++i) {
+        out += std::string(i ? "," : "") + "{\"step\":" + quote(failures[i].step) + ",\"error\":" +
+               quote(failures[i].error) + "}";
+    }
+    return out + "]";
+}
+
+// ---------------------------------------------------------------------------
+// The journal: an interrupted command must not look like a driver update.
+//
+// Before its first write to an endpoint, a command records the snapshot of
+// everything it can touch under HKLM\SOFTWARE\IsoAPO\Pending\{guid}; its last
+// write deletes that key. A key still there means the command was cut short
+// (killed, power lost), and the next command that changes the endpoint first
+// puts it back from the snapshot. Without it, a kill after upstream's install
+// wrote the record but before it wrote IsoAPO's slot reads as detached, and
+// repair would reinstall over slots the install had already deleted.
+
+const wchar_t* const kPending = APP_REGPATH L"\\Pending";
+
+std::wstring journal_key(const Endpoint& e) { return std::wstring(kPending) + L"\\" + e.guid; }
+
+std::wstring escape_field(const std::wstring& s) {
+    std::wstring out;
+    for (wchar_t c : s) {
+        if (c == L'\\') out += L"\\\\";
+        else if (c == L'\t') out += L"\\t";
+        else if (c == L'\n') out += L"\\n";
+        else out += c;
+    }
+    return out;
+}
+
+std::wstring unescape_field(const std::wstring& s) {
+    std::wstring out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == L'\\' && i + 1 < s.size()) {
+            const wchar_t n = s[++i];
+            out += n == L't' ? L'\t' : n == L'n' ? L'\n' : n;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// One line per key ("K", existed, whole, path) and value ("V", key, name,
+// present, type, text, dword, then one field per REG_MULTI_SZ item).
+std::wstring serialize(const Snapshot& s) {
+    std::wstring out;
+    for (const Snapshot::Key& k : s.keys) {
+        out += L"K\t" + std::to_wstring(k.existed) + L"\t" + std::to_wstring(k.whole) + L"\t" + escape_field(k.key) + L"\n";
+    }
+    for (const Snapshot::Value& v : s.values) {
+        out += L"V\t" + escape_field(v.key) + L"\t" + escape_field(v.name) + L"\t" + std::to_wstring(v.present) + L"\t" +
+               std::to_wstring(v.type) + L"\t" + escape_field(v.text) + L"\t" + std::to_wstring(v.dword);
+        for (const std::wstring& item : v.multi) out += L"\t" + escape_field(item);
+        out += L"\n";
+    }
+    return out;
+}
+
+bool deserialize(const std::wstring& text, Snapshot* out) {
+    Snapshot s;
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find(L'\n', start);
+        if (end == std::wstring::npos) return false;
+        std::vector<std::wstring> f;
+        size_t p = start;
+        for (;;) {
+            const size_t tab = text.find(L'\t', p);
+            if (tab == std::wstring::npos || tab > end) {
+                f.push_back(unescape_field(text.substr(p, end - p)));
+                break;
+            }
+            f.push_back(unescape_field(text.substr(p, tab - p)));
+            p = tab + 1;
+        }
+        start = end + 1;
+        if (f[0] == L"K" && f.size() == 4) {
+            s.keys.push_back({f[3], f[1] == L"1", f[2] == L"1"});
+        } else if (f[0] == L"V" && f.size() >= 7) {
+            Snapshot::Value v;
+            v.key = f[1];
+            v.name = f[2];
+            v.present = f[3] == L"1";
+            v.type = std::wcstoul(f[4].c_str(), nullptr, 10);
+            v.text = f[5];
+            v.dword = std::wcstoul(f[6].c_str(), nullptr, 10);
+            v.multi.assign(f.begin() + 7, f.end());
+            s.values.push_back(v);
+        } else {
+            return false;
+        }
+    }
+    *out = s;
+    return true;
+}
+
+// Throws RegistryException.
+void write_journal(const Endpoint& e, const char* command, const Snapshot& before) {
+    const std::wstring key = journal_key(e);
+    RegistryHelper::createKey(kPending);
+    RegistryHelper::createKey(key);
+    RegistryHelper::writeValue(key, L"Snapshot", serialize(before));
+    // Last: a journal without it was cut off before the command wrote anything else.
+    RegistryHelper::writeValue(key, L"Command", wide(command));
+}
+
+// Throws RegistryException.
+void clear_journal(const Endpoint& e) {
+    const std::wstring key = journal_key(e);
+    if (RegistryHelper::keyExists(key)) RegistryHelper::deleteKey(key);
+    if (RegistryHelper::keyExists(kPending) && RegistryHelper::keyEmpty(kPending)) RegistryHelper::deleteKey(kPending);
+}
+
+// The command a journal left for this endpoint says was interrupted, or empty.
+std::string interrupted_command(const Endpoint& e) {
+    std::wstring command;
+    if (!RegistryHelper::keyExists(journal_key(e))) return "";
+    return try_read_string(journal_key(e), L"Command", &command) ? utf8(command) : "(journal incomplete)";
+}
+
+// Puts back an endpoint a command was interrupted on, from its journal. Returns
+// the command undone, or empty when there was none. Throws RegistryException if
+// the journal cannot be read or a step of the undo fails; the journal then
+// stays, for the next run to try again.
+std::string recover_interrupted(const Endpoint& e) {
+    const std::wstring key = journal_key(e);
+    if (!RegistryHelper::keyExists(key)) {
+        // A run cut off between creating the parent and the journal left it empty.
+        if (RegistryHelper::keyExists(kPending) && RegistryHelper::keyEmpty(kPending)) RegistryHelper::deleteKey(kPending);
+        return "";
+    }
+    std::wstring command, text;
+    if (!try_read_string(key, L"Command", &command)) {
+        clear_journal(e);   // cut off while being written: nothing else was
+        return "";
+    }
+    Snapshot before;
+    if (!try_read_string(key, L"Snapshot", &text) || !deserialize(text, &before))
+        throw RegistryException(L"the journal of an interrupted " + command + L" at " + key + L" cannot be read");
+    const std::vector<RollbackFailure> failures = roll_back(before);
+    if (!failures.empty()) {
+        throw RegistryException(L"undoing the interrupted " + command + L" failed at " + wide(failures[0].step) +
+                                L": " + wide(failures[0].error));
+    }
+    clear_journal(e);
+    return utf8(command);
+}
+
+// `command` between a journal written from `before` and the journal's removal.
+void journaled(const Endpoint& e, const char* name, const Snapshot& before, const std::function<void()>& command) {
+    write_journal(e, name, before);
+    command();
+    clear_journal(e);
+}
+
+// Runs `command`, journaled, with its writes logged; if it throws, rolls the
+// endpoint back to `before` and reports both sets of operations and any rollback
+// step that failed. Returns the error, or empty.
+std::string with_rollback(const Endpoint& e, const Snapshot& before, OperationLog* log, std::string* rollback_json,
+                          const char* name, const std::function<void()>& command) {
+    std::string error;
+    {
+        ScopedLog scope(log);
+        error = error_text([&] { journaled(e, name, before, command); });
+    }
+    if (error.empty()) return "";
+    OperationLog undo;
+    std::vector<RollbackFailure> failures;
+    {
+        ScopedLog scope(&undo);
+        failures = roll_back(before);
+        // The journal stays when the endpoint could not be put back, so the next
+        // run tries again.
+        if (failures.empty()) {
+            const std::string cleared = error_text([&] { clear_journal(e); });
+            if (!cleared.empty()) failures.push_back({"clear journal " + utf8(journal_key(e)), cleared});
+        }
+    }
+    *rollback_json = std::string(",\"rolled_back\":") + boolean(failures.empty()) +
+                     ",\"rollback_failed\":" + rollback_failures_json(failures) +
+                     ",\"rollback_operations\":" + operations_json(undo.operations());
+    return error;
+}
+
+// ---------------------------------------------------------------------------
+// What each command does in each state an endpoint can be in.
+
+
+IsoState isoapo_state(const Endpoint& e) {
+    const Slots slots = read_slots(e);
+    const bool record = read_record(kIsoChildApos, e.guid).exists;
+    if (RegistryHelper::keyExists(journal_key(e))) return {"interrupted", {"repair"}};
+    if (slots.isoapo && !record) return {"unrecorded", {}};
+    if (slots.isoapo && slots.equalizerapo)
+        return {"alongside_equalizerapo", {"install --replace-equalizerapo", "uninstall"}};
+    if (slots.isoapo) {
+        if (isoapo_replaced_equalizerapo(e)) return {"installed", {"install --replace-equalizerapo"}};
+        return {"installed", {}};
+    }
+    if (!record) return {"not_installed", {}};
+    if (equalizerapo_over_isoapo(e))
+        return {"replaced_by_equalizerapo", {"install --replace-equalizerapo", "uninstall"}};
+    if (slots.equalizerapo) return {"detached", {"install --replace-equalizerapo", "uninstall"}};
+    if (install_mode_of(e).mode) return {"detached", {"repair", "uninstall"}};
+    return {"detached", {"repair --mode", "uninstall"}};
+}
+
+enum class InstallAction { Install, AlreadyInstalled, ReplaceOnly, TakeBack, ReattachReplacing, Refuse };
+struct InstallPlan {
+    InstallAction action = InstallAction::Refuse;
+    std::string refusal;
+};
+
+// What install does on this endpoint, from the state IsoAPO and Equalizer APO
+// are in. Every state has a way forward: none refuses one flag while the
+// command it names refuses back.
+InstallPlan plan_install(const Endpoint& e, bool replace_eapo) {
+    const Slots slots = read_slots(e);
+    const bool record = read_record(kIsoChildApos, e.guid).exists;
+    const bool over = equalizerapo_over_isoapo(e);
+    if (slots.isoapo && record) {
+        if (replace_eapo && over) return {InstallAction::TakeBack, ""};
+        // Also when an earlier replacement left Equalizer APO's record behind.
+        if (replace_eapo && (slots.equalizerapo || isoapo_replaced_equalizerapo(e))) return {InstallAction::ReplaceOnly, ""};
+        return {InstallAction::AlreadyInstalled, ""};
+    }
+    if (slots.isoapo)
+        return {InstallAction::Refuse, "IsoAPO is in an effect slot with no install record (installed by the retired install.ps1); restore the endpoint's FxProperties from that script's .reg backup first"};
+    if (record && over) {
+        if (replace_eapo) return {InstallAction::TakeBack, ""};
+        return {InstallAction::Refuse, "Equalizer APO was installed over IsoAPO on this endpoint; pass --replace-equalizerapo to go back to IsoAPO, or uninstall to keep Equalizer APO"};
+    }
+    if (record && slots.equalizerapo) {
+        if (replace_eapo) return {InstallAction::ReattachReplacing, ""};
+        return {InstallAction::Refuse, "IsoAPO is detached and Equalizer APO is on this endpoint; pass --replace-equalizerapo to replace it, or uninstall to keep Equalizer APO"};
+    }
+    if (record) return {InstallAction::Refuse, "an install record exists but IsoAPO is in no slot (detached); run repair"};
+    if (slots.equalizerapo && !replace_eapo)
+        return {InstallAction::Refuse, "Equalizer APO is installed on this endpoint; a device may be on one backend only (pass --replace-equalizerapo to replace it)"};
+    return {InstallAction::Install, ""};
+}
+
+struct RepairPlan {
+    bool skip = true;
+    std::optional<DeviceAPOInfo::InstallMode> mode;   // set when repair reattaches
+    std::string refusal;
+};
+
+// What repair does on one endpoint: nothing unless IsoAPO is detached; refuses
+// where Equalizer APO is on the endpoint (the one-backend rule), and where the
+// slot IsoAPO had cannot be known and no --mode is given.
+RepairPlan plan_repair(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> mode) {
+    RepairPlan p;
+    if (!read_record(kIsoChildApos, e.guid).exists || read_slots(e).isoapo) return p;
+    p.skip = false;
+    if (equalizerapo_over_isoapo(e)) {
+        p.refusal = "Equalizer APO was installed over IsoAPO on this endpoint; run install --replace-equalizerapo to go back to IsoAPO, or uninstall to keep Equalizer APO";
+    } else if (read_slots(e).equalizerapo) {
+        // Equalizer APO came back (a driver reinstall, or its Device Selector
+        // after a driver update), and putting IsoAPO next to it would run two EQs.
+        p.refusal = "Equalizer APO is on this endpoint again; run install --replace-equalizerapo to replace it, or uninstall to keep Equalizer APO";
+    } else if (mode) {
+        p.mode = mode;
+    } else if (const KnownMode known = install_mode_of(e); known.mode) {
+        p.mode = known.mode;
+    } else {
+        p.refusal = "the install record predates Isotone.InstallMode, so the slot IsoAPO had cannot be told; pass --mode mfx, efx or gfx";
+    }
+    return p;
 }
 
 std::string replacement_json(const Replacement& r) {
     return std::string("\"equalizerapo_slots_removed\":") + std::to_string(r.removed) +
            ",\"equalizerapo_slots_restored_to_original\":" + std::to_string(r.restored) +
            ",\"child_from_equalizerapo\":" + (r.child.empty() ? "null" : quote(r.child)) +
-           ",\"equalizerapo_record_taken_over\":" + boolean(r.record_taken_over);
+           ",\"equalizerapo_record_taken_over\":" + boolean(r.record_taken_over) +
+           ",\"took_back_from_equalizerapo\":" + boolean(r.took_back);
+}
+
+// A dry run routes every read and write of the command through `dry`; a real run
+// logs its writes to `log`. The command's own code is the same either way.
+struct CommandScope {
+    DryRunRegistry dry;
+    OperationLog log;
+    bool dry_run;
+    std::optional<ScopedDryRun> dry_scope;
+    std::optional<ScopedLog> log_scope;
+    explicit CommandScope(bool dry) : dry_run(dry) {
+        if (dry_run) dry_scope.emplace(&this->dry);
+        else log_scope.emplace(&log);
+    }
+    const std::vector<RegistryOperation>& operations() const { return dry_run ? dry.operations() : log.operations(); }
+    std::string operations_field() const { return ",\"operations\":" + operations_json(operations()); }
+    // Runs `command` journaled: in a dry run as it is, for real rolled back on
+    // failure. Returns the error, or empty.
+    std::string run(const Endpoint& e, const char* name, std::string* rollback_json,
+                    const std::function<void()>& command) {
+        const Snapshot before = snapshot_endpoint(e);
+        if (dry_run) return error_text([&] { journaled(e, name, before, command); });
+        return with_rollback(e, before, &log, rollback_json, name, command);
+    }
+};
+
+// Whether any operation changed the endpoint's own keys (its FxProperties, or
+// the ownership and ACL of its key), as opposed to only the install records.
+bool endpoint_changed(const Endpoint& e, const std::vector<RegistryOperation>& ops) {
+    std::wstring prefix = e.key;
+    for (wchar_t& c : prefix) c = static_cast<wchar_t>(towlower(c));
+    return std::any_of(ops.begin(), ops.end(), [&](const RegistryOperation& o) {
+        std::wstring key = o.key;
+        for (wchar_t& c : key) c = static_cast<wchar_t>(towlower(c));
+        return key.rfind(prefix, 0) == 0;
+    });
+}
+
+// Detached: forget the stale record, then install again against the APOs the
+// driver now declares, in `mode`. Throws RegistryException.
+Replacement reattach(const Endpoint& e, DeviceAPOInfo::InstallMode mode, bool replace_eapo) {
+    uninstall_isoapo(e);
+    DeviceAPOInfo info;
+    if (!info.load(e.guid)) throw RegistryException(L"endpoint is not present");
+    return install_isoapo(info, e, mode, replace_eapo);
 }
 
 int cmd_install(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> mode, bool replace_eapo, bool dry_run) {
-    if (!dry_run && !is_elevated()) return fail("install", "needs an elevated process; use --dry-run to preview");
     if (e.input) return fail("install", "capture endpoints are not supported: IsoAPO is an output EQ");
 
+    CommandScope scope(dry_run);
+    std::string undone;
+    if (const std::string error = error_text([&] { undone = recover_interrupted(e); }); !error.empty())
+        return fail("install", error, scope.operations_field());
+
     DeviceAPOInfo info;
-    try {
-        if (!info.load(e.guid)) return fail("install", "endpoint is not present");
-    } catch (RegistryException& ex) {
-        return fail("install", utf8(ex.getMessage()));
+    if (const std::string error = error_text([&] {
+            if (!info.load(e.guid)) throw RegistryException(L"endpoint is not present");
+        });
+        !error.empty()) {
+        return fail("install", error, scope.operations_field());
+    }
+
+    const IsoState state = isoapo_state(e);
+    const InstallPlan plan = plan_install(e, replace_eapo);
+    if (plan.action == InstallAction::Refuse)
+        return fail("install", plan.refusal, ",\"state\":" + quote(std::string(state.name)) + scope.operations_field());
+
+    // IsoAPO stays in the slot it has; --mode cannot move it.
+    const bool keeps_slot = plan.action == InstallAction::AlreadyInstalled ||
+                            plan.action == InstallAction::ReplaceOnly || plan.action == InstallAction::TakeBack;
+    const KnownMode known = install_mode_of(e);
+    std::optional<DeviceAPOInfo::InstallMode> chosen;
+    if (keeps_slot) {
+        if (known.mode && mode && *mode != *known.mode)
+            return fail("install", std::string("IsoAPO is in ") + post_slot_label(*known.mode) +
+                                       " on this endpoint; --mode cannot move it (uninstall, then install)");
+        chosen = known.mode ? known.mode : mode;
+        if (plan.action == InstallAction::TakeBack && !chosen)
+            return fail("install", "the slot IsoAPO had on this endpoint cannot be told from its records; pass --mode mfx, efx or gfx");
+    } else {
+        chosen = mode ? *mode : default_mode(info, e);
     }
 
     const Slots slots = read_slots(e);
-    const Record record = read_record(kIsoChildApos, e.guid);
     const std::wstring backups = backup_directory();
-    if (slots.isoapo && record.exists) {
-        // Also when an earlier replacement left Equalizer APO's record behind.
-        if (!(replace_eapo && (slots.equalizerapo || isoapo_replaced_equalizerapo(e)))) {
-            std::printf("{\"command\":\"install\",\"ok\":true,\"dry_run\":%s,\"already_installed\":true,\"operations\":[]}\n",
-                        boolean(dry_run));
-            return 0;
-        }
-        // Installed before Equalizer APO was to be replaced: do only that.
-        DryRunRegistry dry;
-        OperationLog log;
-        Replacement replaced;
-        if (dry_run) {
-            try {
-                ScopedDryRun scope(&dry);
-                replaced = remove_equalizerapo(e);
-            } catch (RegistryException& ex) {
-                return fail("install", utf8(ex.getMessage()), ",\"operations\":" + operations_json(dry.operations()));
-            }
-        } else {
-            std::string rollback;
-            const std::string error =
-                with_rollback(snapshot_endpoint(e), &log, &rollback, [&] { replaced = remove_equalizerapo(e); });
-            if (!error.empty()) {
-                return fail("install", error, rollback + ",\"operations\":" + operations_json(log.operations()));
-            }
-        }
-        std::printf("{\"command\":\"install\",\"ok\":true,\"dry_run\":%s,\"already_installed\":true,%s,\"operations\":%s}\n",
-                    boolean(dry_run), replacement_json(replaced).c_str(),
-                    operations_json(dry_run ? dry.operations() : log.operations()).c_str());
-        return 0;
-    }
-    if (slots.isoapo)
-        return fail("install", "IsoAPO is in an effect slot with no install record (installed by the retired install.ps1); restore the endpoint's FxProperties from that script's .reg backup first");
-    if (record.exists)
-        return fail("install", "an install record exists but IsoAPO is in no slot (detached); run repair");
-    if (slots.equalizerapo && !replace_eapo)
-        return fail("install", "Equalizer APO is installed on this endpoint; a device may be on one backend only (pass --replace-equalizerapo to replace it)");
-
-    const Registration reg = read_registration();
+    const bool writes_slot = plan.action == InstallAction::Install || plan.action == InstallAction::TakeBack ||
+                             plan.action == InstallAction::ReattachReplacing;
+    const bool runs_upstream_install = plan.action == InstallAction::Install || plan.action == InstallAction::ReattachReplacing;
     std::vector<std::string> failed;
-    const std::string checks = install_checks_json(reg, &failed);
-    if (!dry_run && !failed.empty()) return fail("install", "registration checks failed", ",\"checks\":" + checks);
-
-    const DeviceAPOInfo::InstallMode chosen = mode ? *mode : default_mode(info, e);
-    if (replace_eapo) {
-        const std::wstring lost = hosted_apo_in_deleted_slot(e, chosen);
+    std::string checks = "[]";
+    if (writes_slot) {
+        checks = install_checks_json(read_registration(), &failed);
+        if (!dry_run && !failed.empty()) return fail("install", "registration checks failed", ",\"checks\":" + checks);
+    }
+    if (runs_upstream_install && replace_eapo) {
+        const std::wstring lost = hosted_apo_in_deleted_slot(e, *chosen);
         if (!lost.empty())
             return fail("install", "this mode deletes the slot where Equalizer APO hosts " + utf8(lost) +
                                        ", which would be lost; install without --mode, in the slots Equalizer APO uses");
     }
-    select_post_mix_only(&info, chosen);
-    const DeviceAPOInfo::InstallState selected = info.getSelectedInstallState();
-    const std::wstring child = selected.useOriginalAPOPostMix ? info.getOriginalAPOPostMix() : L"";
 
     std::vector<std::string> warnings;
-    if (!child.empty())
-        warnings.push_back("IsoAPO hosts " + utf8(child) + ", the APO this install replaces, and runs it before its own processing");
+    if (plan.action == InstallAction::Install) {
+        select_post_mix_only(&info, *chosen);
+        const std::wstring original = info.getSelectedInstallState().useOriginalAPOPostMix ? info.getOriginalAPOPostMix() : L"";
+        if (!original.empty())
+            warnings.push_back("IsoAPO hosts " + utf8(original) + ", the APO this install replaces, and runs it before its own processing");
+    }
     warnings.insert(warnings.end(), slots.warnings.begin(), slots.warnings.end());
 
-    DryRunRegistry dry;
-    OperationLog log;
     Replacement replaced;
-    if (dry_run) {
-        try {
-            ScopedDryRun scope(&dry);
-            replaced = install_isoapo(info, e, chosen, replace_eapo);
-        } catch (RegistryException& ex) {
-            return fail("install", utf8(ex.getMessage()), ",\"operations\":" + operations_json(dry.operations()));
-        }
-    } else {
-        if (!use_backup_directory(backups)) return fail("install", "cannot use backup directory " + utf8(backups));
+    if (plan.action != InstallAction::AlreadyInstalled) {
+        if (!dry_run && runs_upstream_install && !use_backup_directory(backups))
+            return fail("install", "cannot use backup directory " + utf8(backups));
         // Leave the endpoint as it was on failure, not half installed with a
         // record that makes every later command refuse.
         std::string rollback;
-        const std::string error = with_rollback(snapshot_endpoint(e), &log, &rollback,
-                                                [&] { replaced = install_isoapo(info, e, chosen, replace_eapo); });
-        if (!error.empty()) {
-            return fail("install", error, rollback + ",\"operations\":" + operations_json(log.operations()));
-        }
+        const std::string error = scope.run(e, "install", &rollback, [&] {
+            switch (plan.action) {
+                case InstallAction::ReplaceOnly: replaced = remove_equalizerapo(e); break;
+                case InstallAction::TakeBack: replaced = take_back_from_equalizerapo(e, *chosen); break;
+                case InstallAction::ReattachReplacing: replaced = reattach(e, *chosen, true); break;
+                case InstallAction::Install: replaced = install_isoapo(info, e, *chosen, replace_eapo); break;
+                default: break;
+            }
+        });
+        if (!error.empty()) return fail("install", error, rollback + scope.operations_field());
     }
 
     std::string verified = "null", eapo_left = "null";
@@ -1291,73 +1910,61 @@ int cmd_install(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> mod
         verified = boolean(after.isoapo);
         eapo_left = boolean(after.equalizerapo);
     }
+    std::wstring child;
+    try_read_string(iso_record_key(e), L"PostMixChild", &child);
 
     // A dry run whose registration checks fail shows what would be written, but
     // is not ok: the real install would refuse.
     const bool ok = failed.empty();
-    std::printf("{\"command\":\"install\",\"ok\":%s,\"dry_run\":%s,%s\"mode\":%s,\"child\":%s,"
-                "\"backup_directory\":%s,\"checks\":%s,%s,\"operations\":%s,"
+    std::printf("{\"command\":\"install\",\"ok\":%s,\"dry_run\":%s,%s\"already_installed\":%s,\"state_before\":%s,"
+                "\"undid_interrupted\":%s,\"mode\":%s,\"child\":%s,"
+                "\"backup_directory\":%s,\"checks\":%s,%s,\"fx_properties_changed\":%s,\"operations\":%s,"
                 "\"verified_in_slot\":%s,\"equalizerapo_still_in_slots\":%s,\"warnings\":%s}\n",
                 boolean(ok), boolean(dry_run), ok ? "" : "\"reason\":\"registration checks failed; a real install would refuse\",",
-                quote(mode_name(chosen)).c_str(),
+                boolean(plan.action == InstallAction::AlreadyInstalled || plan.action == InstallAction::ReplaceOnly),
+                quote(std::string(state.name)).c_str(), undone.empty() ? "null" : quote(undone).c_str(),
+                chosen ? quote(mode_name(*chosen)).c_str() : "null",
                 child.empty() ? "null" : quote(child).c_str(), quote(backups).c_str(), checks.c_str(),
-                replacement_json(replaced).c_str(),
-                operations_json(dry_run ? dry.operations() : log.operations()).c_str(),
+                replacement_json(replaced).c_str(), boolean(endpoint_changed(e, scope.operations())),
+                operations_json(scope.operations()).c_str(),
                 verified.c_str(), eapo_left.c_str(), string_array(warnings).c_str());
-    return ok ? 0 : 1;
+    return ok ? 0 : kExitFailed;
 }
 
 int cmd_uninstall(const Endpoint& e, bool dry_run) {
-    if (!dry_run && !is_elevated()) return fail("uninstall", "needs an elevated process; use --dry-run to preview");
+    CommandScope scope(dry_run);
+    std::string undone;
+    if (const std::string error = error_text([&] { undone = recover_interrupted(e); }); !error.empty())
+        return fail("uninstall", error, scope.operations_field());
 
     const Slots slots = read_slots(e);
     const Record record = read_record(kIsoChildApos, e.guid);
+    const IsoState state = isoapo_state(e);
     if (!record.exists) {
         if (slots.isoapo)
             return fail("uninstall", "IsoAPO is in an effect slot but has no install record (the retired install.ps1 installed it), so the original values are unknown here; restore FxProperties from that script's .reg backup");
-        std::printf("{\"command\":\"uninstall\",\"ok\":true,\"dry_run\":%s,\"not_installed\":true,\"operations\":[]}\n",
-                    boolean(dry_run));
+        std::printf("{\"command\":\"uninstall\",\"ok\":true,\"dry_run\":%s,\"not_installed\":true,\"undid_interrupted\":%s,"
+                    "\"fx_properties_changed\":%s,\"operations\":%s}\n",
+                    boolean(dry_run), undone.empty() ? "null" : quote(undone).c_str(),
+                    boolean(endpoint_changed(e, scope.operations())), operations_json(scope.operations()).c_str());
         return 0;
     }
 
-    DryRunRegistry dry;
-    OperationLog log;
     Uninstalled u;
-    if (dry_run) {
-        try {
-            ScopedDryRun scope(&dry);
-            u = uninstall_isoapo(e);
-        } catch (RegistryException& ex) {
-            return fail("uninstall", utf8(ex.getMessage()), ",\"operations\":" + operations_json(dry.operations()));
-        }
-    } else {
-        std::string rollback;
-        const std::string error = with_rollback(snapshot_endpoint(e), &log, &rollback, [&] { u = uninstall_isoapo(e); });
-        if (!error.empty()) {
-            return fail("uninstall", error, rollback + ",\"operations\":" + operations_json(log.operations()));
-        }
-    }
-    std::printf("{\"command\":\"uninstall\",\"ok\":true,\"dry_run\":%s,\"record\":%s,\"fx_properties_missing\":%s,"
-                "\"detached\":%s,\"unregistered_equalizerapo_slots\":%d,\"operations\":%s}\n",
-                boolean(dry_run), record.json.c_str(), boolean(u.fx_properties_missing), boolean(u.detached),
-                u.equalizerapo_dropped,
-                operations_json(dry_run ? dry.operations() : log.operations()).c_str());
+    std::string rollback;
+    const std::string error = scope.run(e, "uninstall", &rollback, [&] { u = uninstall_isoapo(e); });
+    if (!error.empty()) return fail("uninstall", error, rollback + scope.operations_field());
+    std::printf("{\"command\":\"uninstall\",\"ok\":true,\"dry_run\":%s,\"state_before\":%s,\"undid_interrupted\":%s,"
+                "\"record\":%s,\"fx_properties_missing\":%s,\"detached\":%s,\"equalizerapo_kept\":%s,"
+                "\"unregistered_equalizerapo_slots\":%d,\"fx_properties_changed\":%s,\"operations\":%s}\n",
+                boolean(dry_run), quote(std::string(state.name)).c_str(), undone.empty() ? "null" : quote(undone).c_str(),
+                record.json.c_str(), boolean(u.fx_properties_missing), boolean(u.detached),
+                boolean(u.under_equalizerapo), u.equalizerapo_dropped,
+                boolean(endpoint_changed(e, scope.operations())), operations_json(scope.operations()).c_str());
     return 0;
 }
 
-// Detached: forget the stale record, then install again against the APOs the
-// driver now declares. Throws RegistryException.
-void reattach(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> mode) {
-    const std::optional<DeviceAPOInfo::InstallMode> recorded = recorded_mode(e);
-    uninstall_isoapo(e);
-    DeviceAPOInfo info;
-    if (!info.load(e.guid)) throw RegistryException(L"endpoint is not present");
-    install_isoapo(info, e, mode ? *mode : recorded ? *recorded : default_mode(info, e), false);
-}
-
 int cmd_repair(std::optional<DeviceAPOInfo::InstallMode> mode, bool dry_run) {
-    if (!dry_run && !is_elevated()) return fail("repair", "needs an elevated process; use --dry-run to preview");
-
     std::vector<std::wstring> guids;
     try {
         guids = RegistryHelper::enumSubKeys(std::wstring(kMMDevices) + L"\\Render");
@@ -1369,46 +1976,37 @@ int cmd_repair(std::optional<DeviceAPOInfo::InstallMode> mode, bool dry_run) {
     if (!dry_run && !use_backup_directory(backups)) return fail("repair", "cannot use backup directory " + utf8(backups));
 
     std::string devices = "[";
-    bool first = true, all_ok = true;
+    bool first = true, all_ok = true, changed = false;
     for (const std::wstring& g : guids) {
         Endpoint e{g, false, std::wstring(kMMDevices) + L"\\Render\\" + g};
-        const Record record = read_record(kIsoChildApos, g);
-        const Slots slots = read_slots(e);
-        if (!record.exists || slots.isoapo) continue;
-
-        DryRunRegistry dry;
-        OperationLog log;
-        std::string error, rollback;
-        if (slots.equalizerapo) {
-            // The one-backend rule install applies: Equalizer APO came back (its
-            // Device Selector, or a driver reinstall), and putting IsoAPO next to
-            // it would run two EQs.
-            error = "Equalizer APO is on this endpoint again; run install --replace-equalizerapo to replace it";
-            all_ok = false;
-        } else if (dry_run) {
-            try {
-                ScopedDryRun scope(&dry);
-                reattach(e, mode);
-            } catch (RegistryException& ex) {
-                error = utf8(ex.getMessage());
-                all_ok = false;
+        CommandScope scope(dry_run);
+        std::string undone, rollback;
+        std::string error = error_text([&] { undone = recover_interrupted(e); });
+        RepairPlan plan;
+        if (error.empty()) plan = plan_repair(e, mode);
+        if (error.empty() && plan.skip && undone.empty()) continue;
+        if (error.empty() && !plan.skip) {
+            if (!plan.refusal.empty()) {
+                error = plan.refusal;
+            } else {
+                // A repair whose install fails after its uninstall succeeded would
+                // leave no IsoAPO and no record, and later repairs would skip the
+                // endpoint: put the detached install back as it was instead.
+                error = scope.run(e, "repair", &rollback, [&] { reattach(e, *plan.mode, false); });
             }
-        } else {
-            // A repair whose install fails after its uninstall succeeded would
-            // leave no IsoAPO and no record, and later repairs would skip the
-            // endpoint: put the detached install back as it was instead.
-            error = with_rollback(snapshot_endpoint(e), &log, &rollback, [&] { reattach(e, mode); });
-            all_ok &= error.empty();
         }
-        devices += std::string(first ? "" : ",") + "{\"guid\":" + quote(g) + ",\"ok\":" +
-                   boolean(error.empty()) + (error.empty() ? "" : ",\"error\":" + quote(error)) + rollback +
-                   ",\"operations\":" + operations_json(dry_run ? dry.operations() : log.operations()) + "}";
+        all_ok &= error.empty();
+        changed |= endpoint_changed(e, scope.operations());
+        devices += std::string(first ? "" : ",") + "{\"guid\":" + quote(g) + ",\"ok\":" + boolean(error.empty()) +
+                   ",\"mode\":" + (plan.mode ? quote(mode_name(*plan.mode)) : "null") +
+                   ",\"undid_interrupted\":" + (undone.empty() ? "null" : quote(undone)) +
+                   (error.empty() ? "" : ",\"error\":" + quote(error)) + rollback + scope.operations_field() + "}";
         first = false;
     }
-    std::printf("{\"command\":\"repair\",\"ok\":%s,\"dry_run\":%s,\"mode\":%s,\"repaired\":%s]}\n",
-                boolean(all_ok), boolean(dry_run), mode ? quote(mode_name(*mode)).c_str() : "\"upstream\"",
+    std::printf("{\"command\":\"repair\",\"ok\":%s,\"dry_run\":%s,\"mode\":%s,\"fx_properties_changed\":%s,\"repaired\":%s]}\n",
+                boolean(all_ok), boolean(dry_run), mode ? quote(mode_name(*mode)).c_str() : "null", boolean(changed),
                 devices.c_str());
-    return all_ok ? 0 : 1;
+    return all_ok ? 0 : kExitFailed;
 }
 
 struct Simulation {
@@ -1418,7 +2016,430 @@ struct Simulation {
     // Equalizer APO's record also names vendor APOs in the slots it does not
     // hold, as its install writes when its mode deletes slots that had APOs.
     bool deleted_slots = false;
+    // Equalizer APO's record names the vendor APOs only in the slots upstream's
+    // getOriginalAPOPreMix/PostMix fall back to (LFX and GFX under SFX modes,
+    // SFX and MFX under LFX_GFX), which its install deleted; its own slots were
+    // empty.
+    bool fallback = false;
 };
+
+// ---------------------------------------------------------------------------
+// Simulations for roundtrip. Each runs inside a dry run the caller installed.
+
+std::vector<std::wstring> slot_values_of(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    std::vector<std::wstring> v;
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring value = L"(absent)";
+        try {
+            if (RegistryHelper::keyExists(fx) && RegistryHelper::valueExists(fx, slot.value))
+                value = RegistryHelper::readValue(fx, slot.value);
+        } catch (RegistryException&) {
+            value = L"(unreadable)";
+        }
+        v.push_back(value);
+    }
+    return v;
+}
+
+std::string records_of(const Endpoint& e) {
+    return read_record(kIsoChildApos, e.guid).json + read_record(kEapoChildApos, e.guid).json;
+}
+
+// How many times `vendor` runs on the endpoint: in an effect slot itself, and as
+// the child of each IsoAPO or Equalizer APO instance in a slot (an Equalizer APO
+// hosting IsoAPO runs IsoAPO's child too).
+int vendor_runs(const Endpoint& e, const std::wstring& vendor) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    std::wstring iso_child, eapo_pre, eapo_post;
+    try_read_string(iso_record_key(e), L"PostMixChild", &iso_child);
+    try_read_string(eapo_record_key(e), L"PreMixChild", &eapo_pre);
+    try_read_string(eapo_record_key(e), L"PostMixChild", &eapo_post);
+    int runs = 0;
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring clsid;
+        if (!try_read_string(fx, slot.value, &clsid)) continue;
+        const std::string kind = classify(clsid);
+        if (same_clsid(clsid, vendor)) ++runs;
+        if (kind == "isoapo_post_mix" && same_clsid(iso_child, vendor)) ++runs;
+        for (const auto& [eapo_kind, child] : {std::pair{"equalizerapo_pre_mix", eapo_pre}, std::pair{"equalizerapo_post_mix", eapo_post}}) {
+            if (kind != eapo_kind) continue;
+            if (same_clsid(child, vendor)) ++runs;
+            if (is_isoapo(child) && same_clsid(iso_child, vendor)) ++runs;
+        }
+    }
+    return runs;
+}
+
+// Equalizer APO's Device Selector ticking the endpoint, as upstream writes it at
+// the vendored commit: DeviceAPOInfo::load (only Equalizer APO's own classes
+// become !VALUE; anything else, IsoAPO included, is recorded as the original),
+// getOriginalAPOPreMix/PostMix with their fallbacks, and install in `mode` with
+// both classes and "use original APO" on or off, under Equalizer APO's GUIDs and
+// record path.
+void simulate_equalizerapo_install(const Endpoint& e, DeviceAPOInfo::InstallMode mode, bool hosted) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    const std::wstring record = eapo_record_key(e);
+    const bool had_fx = RegistryHelper::keyExists(fx);
+    std::wstring o[5];
+    for (int i = 0; i < 5; ++i) {
+        std::wstring v;
+        o[i] = !had_fx ? APOGUID_NOKEY
+               : try_read_string(fx, kEffectSlots[i].value, &v) && !is_equalizerapo(v) ? v
+                                                                                     : APOGUID_NOVALUE;
+    }
+    const auto original = [&](bool pre_mix) {
+        std::wstring g;
+        if (mode == DeviceAPOInfo::INSTALL_LFX_GFX) {
+            g = pre_mix ? o[0] : o[1];
+            if (o[0] == APOGUID_NOVALUE && o[1] == APOGUID_NOVALUE) g = pre_mix ? o[2] : o[3];
+        } else if (mode == DeviceAPOInfo::INSTALL_SFX_MFX) {
+            g = pre_mix ? o[2] : o[3];
+            if (o[2] == APOGUID_NOVALUE && o[3] == APOGUID_NOVALUE) g = pre_mix ? o[0] : o[1];
+        } else {
+            g = pre_mix ? o[2] : o[4];
+            if (o[2] == APOGUID_NOVALUE && o[4] == APOGUID_NOVALUE) g = pre_mix ? o[0] : o[1];
+        }
+        return g == APOGUID_NOKEY || g == APOGUID_NOVALUE ? std::wstring() : g;
+    };
+    RegistryHelper::createKey(kEapoChildApos);
+    RegistryHelper::createKey(record);
+    if (!had_fx) RegistryHelper::createKey(fx);
+    for (int i = 0; i < 5; ++i) RegistryHelper::writeValue(record, kEffectSlots[i].value, o[i]);
+    RegistryHelper::writeValue(record, L"PreMixChild", hosted ? original(true) : L"");
+    RegistryHelper::writeValue(record, L"PostMixChild", hosted ? original(false) : L"");
+    RegistryHelper::writeValue(record, L"AllowSilentBufferModification", L"false");
+    if (RegistryHelper::valueExists(record, L"DisableAutomaticAdjustment"))
+        RegistryHelper::deleteValue(record, L"DisableAutomaticAdjustment");
+    RegistryHelper::writeValue(record, L"Version", L"2");
+    const std::wstring pre = RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID);
+    const std::wstring post = RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID);
+    const auto remove = [&](int i) {
+        if (RegistryHelper::valueExists(fx, kEffectSlots[i].value)) RegistryHelper::deleteValue(fx, kEffectSlots[i].value);
+    };
+    const auto put = [&](int i, const std::wstring& clsid, int mode_list) {
+        RegistryHelper::writeValue(fx, kEffectSlots[i].value, clsid);
+        if (mode_list >= 0 && !RegistryHelper::valueExists(fx, kModeSlots[mode_list].value))
+            RegistryHelper::writeMultiValue(fx, kModeSlots[mode_list].value, L"{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}");
+    };
+    if (mode == DeviceAPOInfo::INSTALL_LFX_GFX) {
+        put(0, pre, -1);
+        put(1, post, -1);
+        remove(2);
+        remove(3);
+        remove(4);
+    } else {
+        remove(0);
+        remove(1);
+        put(2, pre, 0);
+        if (mode == DeviceAPOInfo::INSTALL_SFX_MFX) put(3, post, 1);
+        else put(4, post, 2);
+    }
+    if (RegistryHelper::valueExists(fx, kDisableEnhancements)) RegistryHelper::deleteValue(fx, kDisableEnhancements);
+}
+
+// Equalizer APO's own uninstall (DeviceAPOInfo::uninstall with its record).
+void simulate_equalizerapo_uninstall(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    const std::wstring record = eapo_record_key(e);
+    if (!RegistryHelper::keyExists(record)) return;
+    std::wstring first;
+    if (try_read_string(record, kEffectSlots[0].value, &first) && first == APOGUID_NOKEY) {
+        if (RegistryHelper::keyExists(fx)) RegistryHelper::deleteKey(fx);
+    } else {
+        for (const SlotName& slot : kEffectSlots) {
+            std::wstring original;
+            if (!try_read_string(record, slot.value, &original)) continue;
+            if (original == APOGUID_NOVALUE) {
+                if (RegistryHelper::valueExists(fx, slot.value)) RegistryHelper::deleteValue(fx, slot.value);
+            } else if (!original.empty()) {
+                RegistryHelper::writeValue(fx, slot.value, original);
+            }
+        }
+    }
+    RegistryHelper::deleteKey(record);
+    if (RegistryHelper::keyExists(kEapoChildApos) && RegistryHelper::keyEmpty(kEapoChildApos))
+        RegistryHelper::deleteKey(kEapoChildApos);
+}
+
+// Collects the names of the expectations that failed.
+struct Expectations {
+    std::vector<std::string> failed;
+    void operator()(bool ok, const std::string& what) {
+        if (!ok) failed.push_back(what);
+    }
+    bool ok() const { return failed.empty(); }
+};
+
+// Equalizer APO's Device Selector ticks the endpoint while IsoAPO is installed on
+// it (`installed`, a dry run holding that state). From there:
+//  - install --replace-equalizerapo must leave the slots and IsoAPO's child as
+//    IsoAPO's install left them, Equalizer APO's record gone, and uninstall must
+//    then give back `device` (the slots before either EQ);
+//  - uninstall must keep Equalizer APO in its slots with a record that names no
+//    IsoAPO, and Equalizer APO's own uninstall must then give back `device`.
+// `vendor`, when set, is the APO IsoAPO hosts: it must run once after the
+// replacement, and after the uninstall as often as Equalizer APO was hosting
+// IsoAPO (or once, where IsoAPO kept its slot and the vendor goes back there).
+std::string check_retick(const Endpoint& e, const DryRunRegistry& installed, const std::vector<std::wstring>& device,
+                         DeviceAPOInfo::InstallMode isoapo_mode, DeviceAPOInfo::InstallMode eapo_mode, bool hosted,
+                         const std::wstring& vendor, bool* ok) {
+    Expectations expect;
+    DryRunRegistry state = installed;
+    ScopedDryRun scope(&state);
+    std::string state_name;
+    const std::string error = error_text([&] {
+        const std::vector<std::wstring> as_installed = slot_values_of(e);
+        std::wstring child;
+        try_read_string(iso_record_key(e), L"PostMixChild", &child);
+        const std::string iso_record = read_record(kIsoChildApos, e.guid).json;
+        simulate_equalizerapo_install(e, eapo_mode, hosted);
+
+        const bool in_slot = read_slots(e).isoapo;
+        std::wstring eapo_child;
+        try_read_string(eapo_record_key(e), L"PostMixChild", &eapo_child);
+        state_name = isoapo_state(e).name;
+        expect(state_name == (in_slot ? "alongside_equalizerapo" : "replaced_by_equalizerapo"), "state");
+        expect(plan_install(e, true).action == InstallAction::TakeBack, "install --replace-equalizerapo takes back");
+        expect(plan_install(e, false).action == (in_slot ? InstallAction::AlreadyInstalled : InstallAction::Refuse),
+               "install without the flag");
+        expect(plan_repair(e, std::nullopt).skip == in_slot, "repair skips only an installed IsoAPO");
+        if (!in_slot) expect(!plan_repair(e, std::nullopt).refusal.empty(), "repair refuses");
+        const KnownMode known = install_mode_of(e);
+        expect(known.mode && *known.mode == isoapo_mode, "install mode known");
+
+        {
+            DryRunRegistry replaced = state;
+            ScopedDryRun replaced_scope(&replaced);
+            take_back_from_equalizerapo(e, known.mode ? *known.mode : isoapo_mode);
+            std::wstring child_after;
+            try_read_string(iso_record_key(e), L"PostMixChild", &child_after);
+            expect(slot_values_of(e) == as_installed, "replace: slots as IsoAPO's install left them");
+            expect(child_after == child, "replace: IsoAPO hosts what it hosted");
+            expect(!RegistryHelper::keyExists(eapo_record_key(e)), "replace: Equalizer APO's record gone");
+            expect(read_record(kIsoChildApos, e.guid).json == iso_record, "replace: IsoAPO's record unchanged");
+            expect(isoapo_state(e).name == std::string("installed"), "replace: state installed");
+            if (!vendor.empty()) expect(vendor_runs(e, vendor) == 1, "replace: vendor runs once");
+            uninstall_isoapo(e);
+            expect(slot_values_of(e) == device, "replace, uninstall: the device as before either EQ");
+            expect(!RegistryHelper::keyExists(iso_record_key(e)) && !RegistryHelper::keyExists(eapo_record_key(e)),
+                   "replace, uninstall: no record left");
+            if (!vendor.empty()) expect(vendor_runs(e, vendor) == 1, "replace, uninstall: vendor runs once");
+        }
+        {
+            DryRunRegistry removed = state;
+            ScopedDryRun removed_scope(&removed);
+            const std::vector<std::wstring> with_eapo = slot_values_of(e);
+            uninstall_isoapo(e);
+            const std::vector<std::wstring> after = slot_values_of(e);
+            const std::wstring fx = e.key + L"\\FxProperties";
+            bool eapo_kept = true, isoapo_gone = true, lists_kept = true;
+            for (size_t i = 0; i < after.size(); ++i) {
+                if (is_equalizerapo(with_eapo[i])) {
+                    eapo_kept &= after[i] == with_eapo[i];
+                    for (const SlotName& m : kModeSlots) {
+                        if (std::string(m.label) == kEffectSlots[i].label) lists_kept &= RegistryHelper::valueExists(fx, m.value);
+                    }
+                }
+                isoapo_gone &= !is_isoapo(after[i]);
+            }
+            expect(eapo_kept, "uninstall: Equalizer APO stays in its slots");
+            expect(lists_kept, "uninstall: processing-mode lists stay where Equalizer APO is");
+            expect(isoapo_gone, "uninstall: IsoAPO in no slot");
+            expect(!RegistryHelper::keyExists(iso_record_key(e)), "uninstall: IsoAPO's record gone");
+            expect(RegistryHelper::keyExists(eapo_record_key(e)) && !equalizerapo_over_isoapo(e),
+                   "uninstall: Equalizer APO's record names no IsoAPO");
+            if (!vendor.empty())
+                expect(vendor_runs(e, vendor) == (in_slot || is_isoapo(eapo_child) ? 1 : 0),
+                       "uninstall: vendor runs as Equalizer APO hosted IsoAPO");
+            simulate_equalizerapo_uninstall(e);
+            expect(slot_values_of(e) == device, "uninstall, Equalizer APO's uninstall: the device as before either EQ");
+        }
+    });
+    expect(error.empty(), "threw: " + error);
+    *ok = expect.ok();
+    return std::string("{\"equalizerapo_mode\":") + quote(mode_name(eapo_mode)) + ",\"hosted\":" + boolean(hosted) +
+           ",\"vendor\":" + (vendor.empty() ? "null" : quote(vendor)) + ",\"state\":" + quote(state_name) +
+           ",\"ok\":" + boolean(*ok) + ",\"failed\":" + string_array(expect.failed) + "}";
+}
+
+// Kills `command` at each of its writes in turn, each in its own copy of `start`.
+// After each kill the next command's recovery must give back the endpoint and
+// both records exactly as they were before `command`, and leave no journal.
+std::string check_kills(const Endpoint& e, const DryRunRegistry& start, const char* name,
+                        const std::function<void()>& command, bool* ok) {
+    size_t writes = 0;
+    std::string error, completed_records;
+    Snapshot completed;
+    {
+        DryRunRegistry full = start;
+        ScopedDryRun scope(&full);
+        const size_t before = full.operations().size();
+        error = error_text([&] { journaled(e, name, snapshot_endpoint(e), command); });
+        writes = full.operations().size() - before;
+        completed = snapshot_endpoint(e);
+        completed_records = records_of(e);
+    }
+    size_t recovered = 0;
+    std::vector<std::string> failed;
+    for (size_t k = 0; error.empty() && k < writes; ++k) {
+        DryRunRegistry run = start;
+        ScopedDryRun scope(&run);
+        const Snapshot before = snapshot_endpoint(e);
+        const std::string records = records_of(e);
+        run.kill_at(run.operations().size() + k);
+        bool killed = false;
+        try {
+            journaled(e, name, before, command);
+        } catch (SimulatedKill&) {
+            killed = true;
+        }
+        run.kill_at(static_cast<size_t>(-1));
+        // The journal is complete after its first four writes, and its removal
+        // is the command's last write but one (the parent key follows): killed
+        // after that, the command had finished, and finished is what must stay.
+        const bool finished = k >= 4 && !RegistryHelper::keyExists(journal_key(e));
+        const bool shows_interrupted = k < 4 || finished || isoapo_state(e).name == std::string("interrupted");
+        const std::string recovery = error_text([&] { recover_interrupted(e); });
+        const bool back = killed && shows_interrupted && recovery.empty() &&
+                          (finished ? snapshot_endpoint(e) == completed && records_of(e) == completed_records
+                                    : snapshot_endpoint(e) == before && records_of(e) == records) &&
+                          !RegistryHelper::keyExists(kPending);
+        if (back) ++recovered;
+        else failed.push_back("write " + std::to_string(k) + (recovery.empty() ? "" : ": " + recovery));
+    }
+    *ok = error.empty() && writes > 0 && recovered == writes;
+    return std::string("{\"command\":") + quote(std::string(name)) + ",\"kill_points\":" + std::to_string(writes) +
+           ",\"recovered\":" + std::to_string(recovered) + ",\"ok\":" + boolean(*ok) +
+           (error.empty() ? "" : ",\"error\":" + quote(error)) + ",\"failed\":" + string_array(failed) + "}";
+}
+
+// A device with no Equalizer APO on it (its own uninstall run, or its classes
+// deleted where it left no record), with `vendor` in the slot `mode` writes
+// IsoAPO to and `deleted_vendor` in a slot `mode` deletes, when given, and
+// optionally no processing-mode lists (every endpoint on the test machine has
+// all three, so what install records as absent is otherwise never exercised).
+void prepare_device(const Endpoint& e, DeviceAPOInfo::InstallMode mode, const std::wstring& vendor,
+                    const std::wstring& deleted_vendor, bool without_mode_lists) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    simulate_equalizerapo_uninstall(e);
+    for (const SlotName& slot : kEffectSlots) {
+        std::wstring clsid;
+        if (try_read_string(fx, slot.value, &clsid) && is_equalizerapo(clsid)) RegistryHelper::deleteValue(fx, slot.value);
+    }
+    if (!RegistryHelper::keyExists(fx)) return;
+    for (const SlotName& m : kModeSlots) {
+        if (without_mode_lists && RegistryHelper::valueExists(fx, m.value)) RegistryHelper::deleteValue(fx, m.value);
+    }
+    for (const SlotName& slot : kEffectSlots) {
+        if (!vendor.empty() && std::string(slot.label) == post_slot_label(mode)) RegistryHelper::writeValue(fx, slot.value, vendor);
+    }
+    const char* deleted_label = mode == DeviceAPOInfo::INSTALL_LFX_GFX ? "SFX" : "LFX";
+    for (const SlotName& slot : kEffectSlots) {
+        if (!deleted_vendor.empty() && std::string(slot.label) == deleted_label)
+            RegistryHelper::writeValue(fx, slot.value, deleted_vendor);
+    }
+}
+
+// Microsoft's WM audio APOs, registered on every Windows install this was run on,
+// stand in for vendor APOs.
+// A vendor APO for a simulation: one of two WM audio GFX APOs, whichever is in
+// no slot of the endpoint already, so each run counts only the one placed.
+std::wstring simulated_vendor(const Endpoint& e) {
+    const std::vector<std::wstring> slots = slot_values_of(e);
+    for (const wchar_t* candidate : {L"{13AB3EBD-137E-4903-9D89-60BE8277FD17}", L"{637C490D-EEE3-4C0A-973F-371958802DA2}"}) {
+        if (std::none_of(slots.begin(), slots.end(), [&](const std::wstring& v) { return same_clsid(v, candidate); }))
+            return candidate;
+    }
+    return L"";
+}
+const wchar_t* const kSimulatedDeletedVendor = L"{C9453E73-8C5C-4463-9984-AF8BAB2F5447}";   // WM audio LFX APO
+
+const DeviceAPOInfo::InstallMode kModes[] = {DeviceAPOInfo::INSTALL_LFX_GFX, DeviceAPOInfo::INSTALL_SFX_MFX,
+                                             DeviceAPOInfo::INSTALL_SFX_EFX};
+
+// Every Device Selector re-tick case against `installed`: three Equalizer APO
+// modes, "use original APO" on and off.
+std::string retick_matrix(const Endpoint& e, const DryRunRegistry& installed, const std::vector<std::wstring>& device,
+                          DeviceAPOInfo::InstallMode isoapo_mode, const std::wstring& vendor, bool* ok) {
+    std::string out;
+    *ok = true;
+    for (DeviceAPOInfo::InstallMode eapo_mode : kModes) {
+        for (bool hosted : {true, false}) {
+            bool case_ok = false;
+            out += std::string(out.empty() ? "" : ",") +
+                   check_retick(e, installed, device, isoapo_mode, eapo_mode, hosted, vendor, &case_ok);
+            *ok &= case_ok;
+        }
+    }
+    return out;
+}
+
+// Roundtrip on an endpoint IsoAPO is already installed on (CABLE Input on the
+// owner's machine): everything that can be checked from the install as it is.
+int cmd_roundtrip_installed(const Endpoint& e) {
+    // Every check below runs in dry runs of its own; this one catches anything
+    // written outside them.
+    DryRunRegistry outer;
+    ScopedDryRun outer_scope(&outer);
+    Expectations expect;
+    std::string retick, kills, legacy;
+    const std::string error = error_text([&] {
+        DryRunRegistry installed;
+        std::vector<std::wstring> device;
+        std::wstring child;
+        KnownMode known;
+        std::optional<DeviceAPOInfo::InstallMode> recorded;
+        {
+            ScopedDryRun scope(&installed);
+            expect(isoapo_state(e).name == std::string("installed"), "state installed");
+            known = install_mode_of(e);
+            recorded = recorded_mode(e);
+            try_read_string(iso_record_key(e), L"PostMixChild", &child);
+        }
+        expect(known.mode.has_value(), "install mode known");
+        {
+            DryRunRegistry removed = installed;
+            ScopedDryRun scope(&removed);
+            uninstall_isoapo(e);
+            device = slot_values_of(e);
+            expect(!read_slots(e).isoapo && !RegistryHelper::keyExists(iso_record_key(e)), "uninstall removes IsoAPO and its record");
+        }
+        if (known.mode) {
+            bool ok = false;
+            retick = retick_matrix(e, installed, device, *known.mode, is_other_apo(child) ? child : L"", &ok);
+            expect(ok, "Device Selector re-tick cases");
+
+            // A driver update detaches IsoAPO: repair must put it back where it
+            // was, or refuse without --mode when the record cannot say where.
+            DryRunRegistry detached = installed;
+            ScopedDryRun scope(&detached);
+            for (const SlotName& slot : kEffectSlots) {
+                std::wstring clsid;
+                if (try_read_string(e.key + L"\\FxProperties", slot.value, &clsid) && is_isoapo(clsid))
+                    RegistryHelper::deleteValue(e.key + L"\\FxProperties", slot.value);
+            }
+            const RepairPlan plain = plan_repair(e, std::nullopt);
+            const RepairPlan with_mode = plan_repair(e, known.mode);
+            expect(recorded ? (plain.mode == recorded) : !plain.refusal.empty(),
+                   recorded ? "repair reuses the recorded mode" : "repair refuses a legacy record without --mode");
+            expect(with_mode.mode == known.mode && with_mode.refusal.empty(), "repair with --mode");
+            expect(std::string(isoapo_state(e).name) == "detached", "detached state");
+            legacy = std::string("{\"recorded_mode\":") + (recorded ? quote(mode_name(*recorded)) : "null") +
+                     ",\"repair_without_mode\":" + (plain.refusal.empty() ? quote(mode_name(*plain.mode)) : quote(plain.refusal)) + "}";
+
+            bool kill_ok = false;
+            kills = check_kills(e, installed, "uninstall", [&] { uninstall_isoapo(e); }, &kill_ok);
+            expect(kill_ok, "kills during uninstall");
+        }
+    });
+    expect(error.empty(), "threw: " + error);
+    std::printf("{\"command\":\"roundtrip\",\"ok\":%s,\"already_installed\":true,\"failed\":%s,\"legacy_repair\":%s,"
+                "\"device_selector_retick\":[%s],\"kills\":[%s]}\n",
+                boolean(expect.ok()), string_array(expect.failed).c_str(), legacy.empty() ? "null" : legacy.c_str(),
+                retick.c_str(), kills.c_str());
+    return expect.ok() ? 0 : kExitFailed;
+}
 
 // Always a dry run, against one DryRunRegistry, checking that uninstall
 // restores what install changed, twice: directly after an install, and after
@@ -1476,6 +2497,11 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
         return out + "}";
     };
 
+    if (read_slots(e).isoapo && read_record(kIsoChildApos, e.guid).exists) {
+        if (mode || replace_eapo) return fail("roundtrip", "IsoAPO is installed on this endpoint; roundtrip checks the install as it is and takes no --mode or --replace-equalizerapo");
+        return cmd_roundtrip_installed(e);
+    }
+
     DryRunRegistry dry;
     ScopedDryRun scope(&dry);
     const std::wstring eapo_record = eapo_record_key(e);
@@ -1489,12 +2515,25 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
             RegistryHelper::createKey(eapo_record);
             RegistryHelper::writeValue(eapo_record, L"PreMixChild", sim->hosted ? sim->pre : L"");
             RegistryHelper::writeValue(eapo_record, L"PostMixChild", sim->hosted ? sim->post : L"");
+            bool eapo_in_lfx_gfx = false;
             for (const SlotName& slot : kEffectSlots) {
                 std::wstring clsid;
+                const std::string label = slot.label;
+                if ((label == "LFX" || label == "GFX") && try_read_string(fx, slot.value, &clsid) && is_equalizerapo(clsid))
+                    eapo_in_lfx_gfx = true;
+            }
+            for (const SlotName& slot : kEffectSlots) {
+                std::wstring clsid;
+                const std::string label = slot.label;
                 const bool occupied = try_read_string(fx, slot.value, &clsid);
-                if (occupied ? !is_equalizerapo(clsid) : !sim->deleted_slots) continue;
-                const bool pre_slot = std::string(slot.label) == "LFX" || std::string(slot.label) == "SFX";
+                const bool pre_slot = label == "LFX" || label == "SFX";
                 const std::wstring& vendor = pre_slot ? sim->pre : sim->post;
+                if (sim->fallback) {
+                    const bool fallback_slot = eapo_in_lfx_gfx ? (label == "SFX" || label == "MFX") : (label == "LFX" || label == "GFX");
+                    if (fallback_slot && !occupied && !vendor.empty()) RegistryHelper::writeValue(eapo_record, slot.value, vendor);
+                    continue;
+                }
+                if (occupied ? !is_equalizerapo(clsid) : !sim->deleted_slots) continue;
                 if (!vendor.empty()) RegistryHelper::writeValue(eapo_record, slot.value, vendor);
             }
         } catch (RegistryException& ex) {
@@ -1590,7 +2629,13 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
         third.load(e.guid);
         detach_seen = !third.isInstalled() && RegistryHelper::keyExists(iso_record);
 
-        reattach(e, mode);
+        // Repair's own reattach, in the mode it would pick. Without
+        // --replace-equalizerapo on an endpoint Equalizer APO is on, the repair
+        // command refuses (the one-backend rule, checked separately); the
+        // reattach itself is still checked here.
+        const std::optional<DeviceAPOInfo::InstallMode> repair_mode = mode ? mode : install_mode_of(e).mode;
+        if (!repair_mode) throw RegistryException(L"repair cannot tell the install mode");
+        reattach(e, *repair_mode, false);
         repaired = slot_values();
 
         uninstall_isoapo(e);
@@ -1668,6 +2713,220 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
         }
     }
 
+    // The states after install: Equalizer APO's Device Selector ticking the
+    // endpoint again, a driver update, legacy records, interrupted runs, failed
+    // rollbacks, missing keys and mode lists. Each in dry runs of its own, from a
+    // device prepared without Equalizer APO (with a vendor APO in IsoAPO's slot
+    // and another in a slot the mode deletes, or with none).
+    Expectations more;
+    std::string retick_json, kills_json;
+    const std::string more_error = error_text([&] {
+        const std::wstring fx_key = e.key + L"\\FxProperties";
+        const auto restore_driver_slot = [&](const std::vector<std::wstring>& device) {
+            // A driver update: IsoAPO's slot back to what the driver declares.
+            for (size_t i = 0; i < device.size(); ++i) {
+                std::wstring clsid;
+                if (!try_read_string(fx_key, kEffectSlots[i].value, &clsid) || !is_isoapo(clsid)) continue;
+                if (device[i] == L"(absent)") RegistryHelper::deleteValue(fx_key, kEffectSlots[i].value);
+                else RegistryHelper::writeValue(fx_key, kEffectSlots[i].value, device[i]);
+            }
+        };
+        const auto install_here = [&](bool replacing) {
+            DeviceAPOInfo info;
+            if (!info.load(e.guid)) throw RegistryException(L"endpoint is not present");
+            install_isoapo(info, e, chosen, replacing);
+        };
+        const std::wstring simulated = simulated_vendor(e);
+        for (const std::wstring& vendor : {std::wstring(), simulated}) {
+            DryRunRegistry prepared, installed;
+            std::vector<std::wstring> device;
+            {
+                ScopedDryRun s(&prepared);
+                prepare_device(e, chosen, vendor, vendor.empty() ? L"" : kSimulatedDeletedVendor, !vendor.empty());
+                device = slot_values_of(e);
+            }
+            installed = prepared;
+            {
+                ScopedDryRun s(&installed);
+                install_here(false);
+                std::wstring child;
+                try_read_string(iso_record_key(e), L"PostMixChild", &child);
+                more(child == vendor, "the prepared install hosts the APO in its slot");
+            }
+            bool ok = false;
+            retick_json += std::string(retick_json.empty() ? "" : ",") +
+                           retick_matrix(e, installed, device, chosen, vendor, &ok);
+            more(ok, vendor.empty() ? "Device Selector re-tick cases" : "Device Selector re-tick cases, IsoAPO hosting a vendor APO");
+            if (vendor.empty()) {
+                // A detached install on an endpoint Equalizer APO was then
+                // installed on: install --replace-equalizerapo reattaches with
+                // the replacement, where it used to send the user to repair and
+                // repair sent them back.
+                DryRunRegistry d = installed;
+                ScopedDryRun s(&d);
+                restore_driver_slot(device);
+                simulate_equalizerapo_install(e, chosen, true);
+                more(plan_install(e, true).action == InstallAction::ReattachReplacing, "detached under Equalizer APO: install --replace-equalizerapo reattaches");
+                more(plan_install(e, false).action == InstallAction::Refuse && !plan_repair(e, std::nullopt).refusal.empty(),
+                     "detached under Equalizer APO: install without the flag and repair refuse");
+                reattach(e, chosen, true);
+                more(read_slots(e).isoapo && !read_slots(e).equalizerapo, "detached under Equalizer APO: replaced");
+                uninstall_isoapo(e);
+                more(slot_values_of(e) == device, "detached under Equalizer APO: uninstall gives back the device");
+
+                // A legacy record (no Isotone.InstallMode) on a detached endpoint:
+                // repair must refuse without --mode, not pick upstream's slot.
+                DryRunRegistry l = installed;
+                ScopedDryRun ls(&l);
+                RegistryHelper::deleteValue(iso_record_key(e), kRecordInstallMode);
+                more(install_mode_of(e).mode == chosen, "legacy record: mode from the slot while installed");
+                restore_driver_slot(device);
+                more(!plan_repair(e, std::nullopt).refusal.empty(), "legacy record: repair refuses without --mode");
+                more(plan_repair(e, chosen).mode == chosen, "legacy record: repair with --mode");
+                const IsoState legacy_state = isoapo_state(e);
+                more(std::find(legacy_state.remedies.begin(), legacy_state.remedies.end(), "repair --mode") !=
+                         legacy_state.remedies.end(), "legacy record: status asks for --mode");
+
+                // A driver update, then uninstall from the record alone (the
+                // endpoint gone): the driver's slots stay.
+                DryRunRegistry g = installed;
+                ScopedDryRun gs(&g);
+                for (size_t i = 0; i < std::size(kEffectSlots); ++i) {
+                    std::wstring clsid;
+                    if (try_read_string(fx_key, kEffectSlots[i].value, &clsid) && is_isoapo(clsid))
+                        RegistryHelper::writeValue(fx_key, kEffectSlots[i].value, simulated);
+                }
+                const std::vector<std::wstring> driver_slots = slot_values_of(e);
+                uninstall_from_record(e);
+                more(slot_values_of(e) == driver_slots && !RegistryHelper::keyExists(iso_record_key(e)),
+                     "detached, record-only uninstall leaves the driver's slots");
+                continue;
+            }
+
+            // Kills at every write of each command, from the states it runs in.
+            bool k1 = false, k2 = false, k3 = false, k4 = false, k5 = false;
+            kills_json += check_kills(e, prepared, "install", [&] { install_here(false); }, &k1);
+            kills_json += "," + check_kills(e, installed, "uninstall", [&] { uninstall_isoapo(e); }, &k2);
+            DryRunRegistry detached_state = installed;
+            {
+                ScopedDryRun s(&detached_state);
+                restore_driver_slot(device);
+            }
+            kills_json += "," + check_kills(e, detached_state, "repair", [&] { reattach(e, chosen, false); }, &k3);
+            DryRunRegistry under = installed;
+            {
+                ScopedDryRun s(&under);
+                simulate_equalizerapo_install(e, chosen, true);
+            }
+            kills_json += "," + check_kills(e, under, "install", [&] { take_back_from_equalizerapo(e, chosen); }, &k4);
+            kills_json += "," + check_kills(e, under, "uninstall", [&] { uninstall_isoapo(e); }, &k5);
+            more(k1 && k2 && k3 && k4 && k5, "every kill recovered");
+            if (replace_eapo && read_slots(e).equalizerapo) {
+                bool k6 = false;
+                kills_json += "," + check_kills(e, DryRunRegistry(), "install", [&] { install_here(true); }, &k6);
+                more(k6, "every kill of a replacing install recovered");
+            }
+
+            // A rollback step that fails is reported, and so is a failure that is
+            // not a RegistryException.
+            {
+                DryRunRegistry f = prepared;
+                ScopedDryRun s(&f);
+                const Snapshot before = snapshot_endpoint(e);
+                const size_t at = f.operations().size() + 4;   // the first write after the journal's four
+                f.fail_at(at);
+                f.fail_at(at);   // and the rollback's first write, which takes the same index
+                OperationLog log;
+                std::string rollback;
+                const std::string failed = with_rollback(e, before, &log, &rollback, "install", [&] { install_here(false); });
+                more(!failed.empty() && rollback.find("\"rolled_back\":false") != std::string::npos &&
+                         rollback.find("\"rollback_failed\":[{") != std::string::npos &&
+                         RegistryHelper::keyExists(journal_key(e)),
+                     "a failed rollback step is reported and the journal kept");
+            }
+            {
+                DryRunRegistry f = prepared;
+                ScopedDryRun s(&f);
+                const Snapshot before = snapshot_endpoint(e);
+                OperationLog log;
+                std::string rollback, failed;
+                try {
+                    failed = with_rollback(e, before, &log, &rollback, "install", [&] {
+                        install_here(false);
+                        throw std::runtime_error("injected");
+                    });
+                } catch (...) {
+                    failed = "escaped";
+                }
+                more(failed == "injected" && rollback.find("\"rolled_back\":true") != std::string::npos &&
+                         snapshot_endpoint(e) == before && !RegistryHelper::keyExists(kPending),
+                     "a non-registry exception is rolled back");
+            }
+        }
+
+        // FxProperties missing: the endpoint key refuses Administrators subkey
+        // creation, so upstream's install takes ownership first.
+        {
+            DryRunRegistry m;
+            ScopedDryRun s(&m);
+            if (RegistryHelper::keyExists(fx_key)) RegistryHelper::deleteKey(fx_key);
+            install_here(false);
+            bool took = false, granted = false;
+            for (const RegistryOperation& o : m.operations()) {
+                took |= o.operation == L"take ownership for Administrators" && _wcsicmp(o.key.c_str(), e.key.c_str()) == 0;
+                granted |= o.operation == L"grant Administrators KEY_ALL_ACCESS" && _wcsicmp(o.key.c_str(), e.key.c_str()) == 0;
+            }
+            more(took && granted, "missing FxProperties: the dry run shows upstream taking ownership");
+        }
+
+        // Processing-mode lists: absent before install, their creation is rolled
+        // back; a driver's lists that differ from the registry's are put back
+        // exactly, read through the dry run.
+        {
+            DryRunRegistry a;
+            ScopedDryRun s(&a);
+            for (const SlotName& m : kModeSlots) {
+                if (RegistryHelper::valueExists(fx_key, m.value)) RegistryHelper::deleteValue(fx_key, m.value);
+            }
+            const Snapshot before = snapshot_endpoint(e);
+            install_here(false);
+            const Snapshot installed_state = snapshot_endpoint(e);
+            bool created = false;
+            for (const SlotName& m : kModeSlots) created |= RegistryHelper::valueExists(fx_key, m.value);
+            DryRunRegistry u = a;
+            {
+                ScopedDryRun us(&u);
+                uninstall_isoapo(e);
+                bool none = true;
+                for (const SlotName& m : kModeSlots) none &= !RegistryHelper::valueExists(fx_key, m.value);
+                more(none, "absent mode lists: uninstall removes the ones install created");
+            }
+            more(roll_back(before).empty(), "absent mode lists: rollback steps");
+            bool none = true;
+            for (const SlotName& m : kModeSlots) none &= !RegistryHelper::valueExists(fx_key, m.value);
+            // LFX_GFX writes no mode list.
+            more(created == (chosen != DeviceAPOInfo::INSTALL_LFX_GFX) && none && snapshot_endpoint(e) == before &&
+                     installed_state != before,
+                 "absent mode lists: rollback of the install removes them");
+        }
+        {
+            DryRunRegistry b;
+            ScopedDryRun s(&b);
+            const std::vector<std::wstring> lists = {L"{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}", L"{9E90EA20-B493-4FD1-A1A8-7E1361A956CF}"};
+            for (const SlotName& m : kModeSlots) RegistryHelper::writeMultiValue(fx_key, m.value, lists);
+            const Snapshot before = snapshot_endpoint(e);
+            for (const SlotName& m : kModeSlots) RegistryHelper::deleteValue(fx_key, m.value);
+            roll_back(before);
+            bool exact = true;
+            for (const SlotName& m : kModeSlots) {
+                std::vector<std::wstring> read;
+                exact &= b.readMultiValue(fx_key, m.value, &read) && read == lists;
+            }
+            more(exact, "mode lists: rollback restores their exact contents");
+        }
+    });
+    more(more_error.empty(), "threw: " + more_error);
+
     const bool unregistered = sim && sim->eapo_unregistered;
     const bool restored = unregistered
                               ? expected_after == after_direct && extras_before == extras_after_direct
@@ -1704,7 +2963,7 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                                           std::find(installed.begin(), installed.end(), post) - installed.begin())) &&
                     (!replace_eapo || !holds_eapo(installed)) && handed_over && no_dangling_eapo &&
                     record_taken_over && survives_missing_fx_properties && record_only_uninstall_restores &&
-                    rollback_restores;
+                    rollback_restores && more.ok();
     std::printf("{\"command\":\"roundtrip\",\"ok\":%s,\"mode\":%s,\"replace_equalizerapo\":%s,"
                 "\"simulated\":%s,\"isoapo_child_after_install\":%s,\"vendor_placements\":%s,\"handed_over\":%s,"
                 "\"before\":%s,\"after_install\":%s,\"after_uninstall\":%s,"
@@ -1713,7 +2972,8 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                 "\"equalizerapo_record_taken_over\":%s,\"extras_before\":%s,\"extras_after_uninstall\":%s,"
                 "\"extras_after_simulated_driver_update\":%s,\"extras_after_repair_and_uninstall\":%s,"
                 "\"survives_missing_fx_properties\":%s,\"record_only_uninstall_restores\":%s,"
-                "\"rollback_restores\":%s,\"no_dangling_equalizerapo\":%s,\"operations\":%s}\n",
+                "\"rollback_restores\":%s,\"no_dangling_equalizerapo\":%s,\"failed\":%s,\"device_selector_retick\":[%s],"
+                "\"kills\":[%s],\"operations\":%s}\n",
                 boolean(ok), quote(mode_name(chosen)).c_str(), boolean(replace_eapo),
                 sim ? (sim->eapo_unregistered ? "\"hosted, then Equalizer APO uninstalled\""
                            : sim->hosted          ? "\"hosted\""
@@ -1726,7 +2986,8 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                 boolean(record_taken_over), extras_json(extras_before).c_str(), extras_json(extras_after_direct).c_str(),
                 extras_json(extras_after_update).c_str(), extras_json(extras_after).c_str(),
                 boolean(survives_missing_fx_properties), boolean(record_only_uninstall_restores),
-                boolean(rollback_restores), boolean(no_dangling_eapo), operations_json(dry.operations()).c_str());
+                boolean(rollback_restores), boolean(no_dangling_eapo), string_array(more.failed).c_str(),
+                retick_json.c_str(), kills_json.c_str(), operations_json(dry.operations()).c_str());
     return ok ? 0 : 1;
 }
 
@@ -1747,45 +3008,214 @@ int cmd_test(const Endpoint& e) {
     return 0;
 }
 
-}  // namespace
+// --output: the JSON goes to a file the caller names and reads once the process
+// has exited. An elevated run started with ShellExecuteEx "runas" cannot have
+// its stdout redirected to its unelevated caller. The caller chose the path, so
+// the file is created new (never an existing file, and so never a link or hard
+// link someone planted), and must end up exactly at the path given: a junction
+// or symbolic link on the way would let the caller steer an elevated process
+// into creating a file where the caller may not. A file that fails the check is
+// deleted again. Returns empty, or why the path cannot be used.
+std::string redirect_output(const std::wstring& path) {
+    if (PathIsRelativeW(path.c_str())) return "--output needs an absolute path";
+    if (path.size() > 2 && path.find(L':', 2) != std::wstring::npos) return "--output may not name an alternate data stream";
+    DWORD n = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    std::wstring full(n, L'\0');
+    n = GetFullPathNameW(path.c_str(), n, full.data(), nullptr);
+    full.resize(n);
+    const size_t slash = full.rfind(L'\\');
+    if (n == 0 || slash == std::wstring::npos || slash + 1 == full.size()) return "--output does not name a file";
+    const std::wstring parent = full.substr(0, slash + 1), name = full.substr(slash + 1);
+    // The long form of the directory, so an 8.3 name is not taken for a link.
+    n = GetLongPathNameW(parent.c_str(), nullptr, 0);
+    if (n == 0) return "the --output directory does not exist";
+    std::wstring long_parent(n, L'\0');
+    n = GetLongPathNameW(parent.c_str(), long_parent.data(), n);
+    long_parent.resize(n);
+    if (long_parent.empty() || long_parent.back() != L'\\') long_parent += L'\\';
+    const std::wstring expected = long_parent + name;
 
-// wmain: arguments arrive as UTF-16 and are turned into UTF-8, so a non-ASCII
-// argument cannot put invalid UTF-8 into the JSON output.
-int wmain(int argc, wchar_t** wargv) {
+    const HANDLE file = CreateFileW(full.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS
+                   ? "the --output file already exists"
+                   : "cannot create the --output file (error " + std::to_string(error) + ")";
+    }
+    std::wstring final_path(32768, L'\0');
+    const DWORD length = GetFinalPathNameByHandleW(file, final_path.data(), static_cast<DWORD>(final_path.size()),
+                                                   FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    final_path.resize(length < final_path.size() ? length : 0);
+    if (final_path.rfind(L"\\\\?\\UNC\\", 0) == 0) final_path = L"\\\\" + final_path.substr(8);
+    else if (final_path.rfind(L"\\\\?\\", 0) == 0) final_path = final_path.substr(4);
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool one_link = GetFileInformationByHandle(file, &info) && info.nNumberOfLinks == 1;
+    if (final_path.empty() || _wcsicmp(final_path.c_str(), expected.c_str()) != 0 || !one_link) {
+        FILE_DISPOSITION_INFO dispose{TRUE};
+        SetFileInformationByHandle(file, FileDispositionInfo, &dispose, sizeof(dispose));
+        CloseHandle(file);
+        return "the --output path goes through a link or reparse point; name a plain path";
+    }
+    const int fd = _open_osfhandle(static_cast<intptr_t>(reinterpret_cast<INT_PTR>(file)), _O_WRONLY | _O_TEXT);
+    if (fd < 0) {
+        CloseHandle(file);
+        return "cannot use the --output file";
+    }
+    std::fflush(stdout);
+    const bool redirected = _dup2(fd, _fileno(stdout)) == 0;
+    _close(fd);
+    return redirected ? "" : "cannot use the --output file";
+}
+
+// Serialises the registry-changing commands of every elevated devicetool run on
+// the machine: two runs interleaving snapshots, writes and rollbacks on one
+// endpoint could each put back a state the other had half written.
+//
+// The mutex is in a private namespace whose boundary requires the
+// Administrators SID, rather than under Global\: any logged-on user can create
+// a Global\ name first and hold it, blocking every install, while only a process
+// whose token has Administrators enabled (an elevated run) can create or open
+// this namespace. The namespace and the mutex grant only Administrators and
+// SYSTEM. Each run keeps its namespace handle until it exits, so the namespace,
+// and the mutex in it, stay findable while any run is alive.
+class MachineLock {
+public:
+    // Empty once held, or why not; *busy when another run held it for `timeout_ms`.
+    std::string acquire(DWORD timeout_ms, bool* busy, const std::wstring& boundary_sid = L"S-1-5-32-544") {
+        *busy = false;
+        PSID sid = nullptr;
+        if (!ConvertStringSidToSidW(boundary_sid.c_str(), &sid)) return "lock: bad boundary SID";
+        boundary_ = CreateBoundaryDescriptorW(L"Isotone", 0);
+        const bool added = boundary_ != nullptr && AddSIDToBoundaryDescriptor(&boundary_, sid);
+        LocalFree(sid);
+        if (!added) return "lock: cannot create the boundary descriptor (error " + std::to_string(GetLastError()) + ")";
+        const std::wstring sddl = L"D:P(A;;GA;;;" + boundary_sid + L")(A;;GA;;;SY)";
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr))
+            return "lock: cannot build the security descriptor";
+        SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+        DWORD error = 0;
+        for (int attempt = 0; attempt < 20 && namespace_ == nullptr; ++attempt) {
+            namespace_ = CreatePrivateNamespaceW(&sa, boundary_, L"Isotone.devicetool");
+            if (namespace_ != nullptr) break;
+            error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS) break;
+            // Exists: open it. If the last run holding it exited in between, the
+            // open fails and the next attempt creates it.
+            namespace_ = OpenPrivateNamespaceW(boundary_, L"Isotone.devicetool");
+            if (namespace_ == nullptr) error = GetLastError();
+        }
+        if (namespace_ == nullptr) {
+            LocalFree(sd);
+            return "lock: cannot create or open the private namespace (error " + std::to_string(error) + ")";
+        }
+        mutex_ = CreateMutexW(&sa, FALSE, L"Isotone.devicetool\\registry");
+        error = GetLastError();
+        LocalFree(sd);
+        if (mutex_ == nullptr) return "lock: cannot create the mutex (error " + std::to_string(error) + ")";
+        const DWORD waited = WaitForSingleObject(mutex_, timeout_ms);
+        // Abandoned: a run holding it was killed. Its journal, not the lock,
+        // says what it left, and this run's command undoes that first.
+        if (waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED) {
+            held_ = true;
+            return "";
+        }
+        if (waited == WAIT_TIMEOUT) {
+            *busy = true;
+            return "another devicetool run held the machine lock for " + std::to_string(timeout_ms) + " ms";
+        }
+        return "lock: wait failed (error " + std::to_string(GetLastError()) + ")";
+    }
+    ~MachineLock() {
+        if (held_) ReleaseMutex(mutex_);
+        if (mutex_ != nullptr) CloseHandle(mutex_);
+        if (namespace_ != nullptr) ClosePrivateNamespace(namespace_, 0);
+        if (boundary_ != nullptr) DeleteBoundaryDescriptor(boundary_);
+    }
+
+private:
+    HANDLE boundary_ = nullptr;
+    HANDLE namespace_ = nullptr;
+    HANDLE mutex_ = nullptr;
+    bool held_ = false;
+};
+
+const DWORD kLockTimeoutMs = 60000;
+
+int dispatch(int argc, wchar_t** wargv) {
     std::vector<std::string> argv_utf8;
     for (int i = 0; i < argc; ++i) argv_utf8.push_back(utf8(std::wstring(wargv[i])));
 
-    std::vector<std::string> args;
+    // --output first, so every later error goes where the caller reads.
+    for (int i = 1; i < argc; ++i) {
+        if (argv_utf8[i] != "--output") continue;
+        if (i + 1 >= argc) return usage("", "--output needs a path");
+        const std::string error = redirect_output(wargv[i + 1]);
+        if (!error.empty()) return usage("", error);
+        break;
+    }
+
+    std::vector<std::string> args, flags;
     bool dry_run = false, replace_eapo = false;
     std::optional<std::string> mode_text;
     std::optional<std::string> simulation_text;
+    int outputs = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string& a = argv_utf8[i];
+        const bool takes_value = a == "--mode" || a == "--simulate-equalizerapo" || a == "--output";
+        if (takes_value && i + 1 >= argc) return usage("", a + " needs a value");
         if (a == "--dry-run") dry_run = true;
         else if (a == "--replace-equalizerapo") replace_eapo = true;
-        else if (a == "--mode" && i + 1 < argc) mode_text = argv_utf8[++i];
-        else if (a == "--simulate-equalizerapo" && i + 1 < argc) simulation_text = argv_utf8[++i];
-        else if (a.rfind("--", 0) == 0) return usage();
-        else args.push_back(a);
+        else if (a == "--mode") mode_text = argv_utf8[++i];
+        else if (a == "--simulate-equalizerapo") simulation_text = argv_utf8[++i];
+        else if (a == "--output") { ++i; ++outputs; continue; }
+        else if (a.rfind("--", 0) == 0) return usage("", "unknown flag " + a);
+        else { args.push_back(a); continue; }
+        flags.push_back(a);
     }
-    if (args.empty()) return usage();
+    if (args.empty()) return usage("", "no command");
+    const std::string& command = args[0];
+    if (outputs > 1) return usage(command, "--output given more than once");
+
+    // The flags each command takes; anything else is refused, not ignored.
+    const std::map<std::string, std::vector<std::string>> accepted = {
+        {"list", {}},
+        {"status", {}},
+        {"test", {}},
+        {"install", {"--mode", "--replace-equalizerapo", "--dry-run"}},
+        {"uninstall", {"--dry-run"}},
+        {"repair", {"--mode", "--dry-run"}},
+        {"roundtrip", {"--mode", "--replace-equalizerapo", "--simulate-equalizerapo"}},
+    };
+    const auto found_command = accepted.find(command);
+    if (found_command == accepted.end()) return usage(command, "unknown command " + command);
+    for (const std::string& f : flags) {
+        if (std::count(flags.begin(), flags.end(), f) > 1) return usage(command, f + " given more than once");
+        if (std::find(found_command->second.begin(), found_command->second.end(), f) == found_command->second.end())
+            return usage(command, command + " does not take " + f);
+    }
+    const bool takes_endpoint = command != "list" && command != "repair";
+    if (args.size() != (takes_endpoint ? 2u : 1u))
+        return usage(command, takes_endpoint ? command + " takes one endpoint" : command + " takes no endpoint");
+
     std::optional<DeviceAPOInfo::InstallMode> mode;
     if (mode_text) {
         DeviceAPOInfo::InstallMode parsed;
-        if (!parse_mode(*mode_text, &parsed)) return usage();
+        if (!parse_mode(*mode_text, &parsed)) return usage(command, "--mode is mfx, efx or gfx");
         mode = parsed;
     }
 
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-        return fail(args[0], "CoInitializeEx failed");
+        return fail(command, "CoInitializeEx failed");
     }
 
-    const std::string& command = args[0];
-    // --simulate-equalizerapo PRE,POST[,unhosted]: only for the dry-run roundtrip
-    // with --replace-equalizerapo. Either CLSID may be empty.
+    // --simulate-equalizerapo PRE,POST[,unhosted][,unregistered][,deleted|fallback]:
+    // only for the dry-run roundtrip with --replace-equalizerapo. Either CLSID
+    // may be empty.
     std::optional<Simulation> sim;
     if (simulation_text) {
-        if (command != "roundtrip" || !replace_eapo) return usage();
+        if (!replace_eapo) return usage(command, "--simulate-equalizerapo needs --replace-equalizerapo");
         std::vector<std::wstring> parts;
         const std::wstring text(simulation_text->begin(), simulation_text->end());
         size_t start = 0;
@@ -1795,7 +3225,7 @@ int wmain(int argc, wchar_t** wargv) {
             if (comma == std::wstring::npos) break;
             start = comma + 1;
         }
-        if (parts.size() < 2) return usage();
+        if (parts.size() < 2) return usage(command, "--simulate-equalizerapo needs PRE,POST");
         Simulation s;
         s.pre = parts[0];
         s.post = parts[1];
@@ -1803,32 +3233,56 @@ int wmain(int argc, wchar_t** wargv) {
             if (parts[k] == L"unhosted") s.hosted = false;
             else if (parts[k] == L"unregistered") s.eapo_unregistered = true;
             else if (parts[k] == L"deleted") s.deleted_slots = true;
-            else return usage();
+            else if (parts[k] == L"fallback") s.fallback = true;
+            else return usage(command, "unknown --simulate-equalizerapo option " + utf8(parts[k]));
         }
-        if (s.eapo_unregistered && !s.hosted) return usage();
+        if ((s.eapo_unregistered && !s.hosted) || (s.deleted_slots && s.fallback))
+            return usage(command, "--simulate-equalizerapo options conflict");
         GUID g;
         if ((s.pre.empty() && s.post.empty()) || (!s.pre.empty() && FAILED(CLSIDFromString(s.pre.c_str(), &g))) ||
             (!s.post.empty() && FAILED(CLSIDFromString(s.post.c_str(), &g)))) {
-            return usage();
+            return usage(command, "--simulate-equalizerapo CLSIDs are malformed");
         }
         sim = s;
     }
-    if (command == "list" && args.size() == 1) return cmd_list();
-    if (command == "repair" && args.size() == 1) return cmd_repair(mode, dry_run);
-
-    const bool needs_endpoint = command == "status" || command == "install" ||
-                                command == "uninstall" || command == "test" ||
-                                command == "roundtrip";
-    if (!needs_endpoint || args.size() != 2) return usage();
 
     Endpoint endpoint;
-    const int found = resolve_endpoint(args[1], &endpoint);
-    if (found == 2) return usage();
-    if (found == 1) return fail(command, "no render or capture endpoint with GUID " + args[1]);
+    if (takes_endpoint) {
+        const int found = resolve_endpoint(args[1], &endpoint);
+        if (found == 2) return usage(command, "malformed endpoint " + args[1]);
+        if (found == 1) return fail(command, "no endpoint with ID " + args[1]);
+    }
 
+    // The registry-changing commands: an elevated process, one run at a time.
+    MachineLock lock;
+    if ((command == "install" || command == "uninstall" || command == "repair") && !dry_run) {
+        if (!is_elevated())
+            return fail_with(kExitNotElevated, "not_elevated", command, "needs an elevated process; use --dry-run to preview");
+        bool busy = false;
+        const std::string error = lock.acquire(kLockTimeoutMs, &busy);
+        if (busy) return fail_with(kExitBusy, "busy", command, error);
+        if (!error.empty()) return fail(command, error);
+    }
+
+    if (command == "list") return cmd_list();
+    if (command == "repair") return cmd_repair(mode, dry_run);
     if (command == "status") return cmd_status(endpoint);
     if (command == "install") return cmd_install(endpoint, mode, replace_eapo, dry_run);
     if (command == "uninstall") return cmd_uninstall(endpoint, dry_run);
     if (command == "roundtrip") return cmd_roundtrip(endpoint, mode, replace_eapo, sim);
     return cmd_test(endpoint);
+}
+
+}  // namespace
+
+// wmain: arguments arrive as UTF-16 and are turned into UTF-8, so a non-ASCII
+// argument cannot put invalid UTF-8 into the JSON output.
+int wmain(int argc, wchar_t** wargv) {
+    const int code = dispatch(argc, wargv);
+    // With --output, the file is complete on disk and closed before the process
+    // exits, which is when the caller reads it.
+    std::fflush(stdout);
+    _commit(_fileno(stdout));
+    std::fclose(stdout);
+    return code;
 }

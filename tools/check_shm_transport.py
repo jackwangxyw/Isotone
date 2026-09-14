@@ -79,7 +79,7 @@ def main() -> int:
     shm_exe = find(build, "isotone-shm.exe")
 
     def shm(*args: str, stdin: str | None = None):
-        p = subprocess.run([str(shm_exe), *args], capture_output=True, text=True, input=stdin)
+        p = subprocess.run([str(shm_exe), *args], capture_output=True, encoding="utf-8", input=stdin)
         out = p.stdout.strip()
         try:
             return p.returncode, (json.loads(out) if out else None)
@@ -104,6 +104,41 @@ def main() -> int:
         code, js = shm("status", guid, "--local")
         check(code == 1 and js is not None and js.get("open") is False and js.get("error") == 2,
               "status reports engine idle")
+
+        # Saved state for another endpoint, so the served instance below does not
+        # start from it. --local keeps it in the self-test's directory.
+        saved_guid = "{" + str(uuid.uuid4()).upper() + "}"
+        side = tmp / "side-left.txt"
+        side.write_text("Channel: SL\nFilter 1: ON PK Fc 1000 Hz Gain -6 dB Q 1\n")
+        code, js = shm("persist", saved_guid, str(side), "--local")
+        check(code == 2 and js is not None and js.get("persisted") is False,
+              "persist with no engine and no --channels exits 2")
+        code, js = shm("persist", saved_guid, str(side), "--local", "--channels", "6", "--mask", "0x60F")
+        check(code == 0 and js is not None and js.get("persisted") is True
+              and js.get("layout") == {"channels": 6, "speaker_mask": "0x60f", "from_engine": False},
+              "persist with --channels and --mask uses that layout")
+        if code == 0:
+            block = pathlib.Path(js["path"]).read_bytes()
+            # ParamBlock: 48-byte header, bypass, mute, band_count, preamp, the
+            # layout's channels and mask and 8 reserved bytes, 8 trims, 80 bytes of
+            # speakers, then 32-byte bands with the channel mask at +12.
+            band_channels = struct.unpack_from("<I", block, 48 + 16 + 16 + 32 + 80 + 12)[0]
+            check(band_channels == 1 << 4, "Channel: SL on 5.1 (0x60F) is channel 4", f"mask 0x{band_channels:x}")
+            layout = struct.unpack_from("<II", block, 48 + 16)
+            check(layout == (6, 0x60F), "the saved state records the layout it was parsed for",
+                  f"{layout[0]} channels, mask 0x{layout[1]:x}")
+
+        # Paths and text outside the ANSI code page.
+        wide = tmp / "\u97f3\u03a9.txt"
+        wide.write_text("Preamp: 0 dB\n")
+        code, js = shm("persist", saved_guid, str(wide), "--local", "--channels", "2")
+        check(code == 0 and js is not None and js.get("persisted") is True, "a config path outside the ANSI code page is read")
+        missing = tmp / "\u7f3a\u03a9.txt"
+        code, js = shm("persist", saved_guid, str(missing), "--local", "--channels", "2")
+        check(code == 1 and js is not None and js.get("reason") == "cannot read " + str(missing),
+              "a non-ASCII path comes back in the JSON as UTF-8")
+        code, js = shm("forget", saved_guid, "--local")
+        check(code == 0 and js["forgotten"], "forget the saved state")
 
         print("with an instance served from another process")
         server = subprocess.Popen([str(selftest), "--serve", guid, "14"], cwd=selftest.parent,

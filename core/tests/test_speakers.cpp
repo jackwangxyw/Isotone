@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <vector>
@@ -71,6 +72,20 @@ double amplitude(const std::vector<double>& x, uint32_t bin) {
         im -= x[i] * std::sin(w);
     }
     return 2.0 * std::sqrt(re * re + im * im) / n;
+}
+
+// Phase in degrees of `x` at exactly `bin` cycles over the window, relative to a
+// sine starting at the window's first sample.
+double phase_at(const std::vector<double>& x, uint32_t bin) {
+    double re = 0.0, im = 0.0;
+    const double n = static_cast<double>(x.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        const double w = 2.0 * kPi * bin * static_cast<double>(i) / n;
+        re += x[i] * std::cos(w);
+        im -= x[i] * std::sin(w);
+    }
+    // A sine's bin is -j/2: rotate so that a sine reads 0.
+    return std::atan2(re, -im) * 180.0 / kPi;
 }
 
 double db(double linear) { return 20.0 * std::log10(linear); }
@@ -347,27 +362,37 @@ TEST_CASE("the peak auto preamp negates includes routing and bass management") {
     s.speakers.bass_management = true;
     s.speakers.small_speakers = 0xF7;
     s.channel_gain_db[6] = 2.0;
-    for (const double f : {40.0, 100.0, 1000.0}) {
-        CAPTURE(f);
-        const double bound = composite_peak_db(s, 8, kMask71, &f, 1, kFs);
-        double loudest = 0.0;
-        for (int step = 0; step < 36; ++step) {
-            const double lfe_phase = 2.0 * kPi * step / 36.0;
-            Processor p = make(8, kMask71, s, 1024);
-            const auto out = run(p, 48000, [f, lfe_phase](uint32_t c, size_t i) {
-                return std::sin(2.0 * kPi * f * static_cast<double>(i) / kFs + (c == 3 ? lfe_phase : 0.0));
-            });
-            for (uint32_t c = 0; c < 8; ++c) {
-                const std::vector<double> tail(out[c].begin() + 24000, out[c].end());
-                loudest = std::max(loudest, amplitude(tail, static_cast<uint32_t>(f / 2.0)));
+    const auto check = [&s](std::initializer_list<double> freqs) {
+        for (const double f : freqs) {
+            CAPTURE(f);
+            const double bound = composite_peak_db(s, 8, kMask71, &f, 1, kFs);
+            double loudest = 0.0;
+            for (int step = 0; step < 36; ++step) {
+                const double lfe_phase = 2.0 * kPi * step / 36.0;
+                Processor p = make(8, kMask71, s, 1024);
+                const auto out = run(p, 48000, [f, lfe_phase](uint32_t c, size_t i) {
+                    return std::sin(2.0 * kPi * f * static_cast<double>(i) / kFs + (c == 3 ? lfe_phase : 0.0));
+                });
+                for (uint32_t c = 0; c < 8; ++c) {
+                    const std::vector<double> tail(out[c].begin() + 24000, out[c].end());
+                    loudest = std::max(loudest, amplitude(tail, static_cast<uint32_t>(f / 2.0)));
+                }
             }
+            CHECK(db(loudest) <= bound + 0.001);
+            CHECK(bound - db(loudest) < 0.03);
         }
-        CHECK(db(loudest) <= bound + 0.001);
-        CHECK(bound - db(loudest) < 0.03);
-    }
+    };
+    check({40.0, 100.0, 1000.0});
     // Far above 0 dB: this is what the engine's limiter caught at 7.1.
     const double f40 = 40.0;
     CHECK(composite_peak_db(s, 8, kMask71, &f40, 1, kFs) > 12.0);
+    CHECK(auto_preamp_db(s, 8, kMask71, &f40, 1, kFs) == -composite_peak_db(s, 8, kMask71, &f40, 1, kFs));
+    // Muted small speakers send the sub nothing, and need no headroom there.
+    const double unmuted = composite_peak_db(s, 8, kMask71, &f40, 1, kFs);
+    s.speakers.muted = (ChannelMask{1} << 0) | (ChannelMask{1} << 6);
+    check({40.0, 100.0});
+    CHECK(composite_peak_db(s, 8, kMask71, &f40, 1, kFs) < unmuted - 1.0);
+    s.speakers.muted = 0;
     // A muted output plays nothing, so it needs no headroom.
     s.speakers.muted = ChannelMask{1} << 3;
     CHECK(composite_peak_db(s, 8, kMask71, &f40, 1, kFs) < 0.0);
@@ -389,6 +414,144 @@ TEST_CASE("the LFE low-pass filters the LFE channel's own content") {
         std::vector<double> sub(out[LFE].begin(), out[LFE].end());
         CAPTURE(f);
         CHECK(std::abs(db(amplitude(sub, bin)) - lr4_db(FilterType::LowPass, 120.0, f)) < 0.02);
+    }
+}
+
+TEST_CASE("the curve drawn for an output is what that output plays of its own input") {
+    // Speaker mute, a small speaker's high-pass, the LFE channel's own low-pass
+    // and polarity are part of an output's own path, bypassed or not. Each
+    // output is fed on its own input alone, so the bass the small speakers send
+    // the LFE is zero and the output is that path.
+    enum { FL, FR, FC, LFE, SL, SR };
+    constexpr size_t kN = 16384;
+    EqState s;
+    s.preamp_db = -3.0;
+    s.channel_gain_db[FR] = -2.0;
+    Band bell;
+    bell.type = FilterType::Peaking;
+    bell.fc = 100.0;
+    bell.gain_db = 6.0;
+    bell.width = 1.0;
+    s.bands.push_back(bell);
+    bell.id = 1;
+    bell.fc = 60.0;
+    bell.gain_db = -4.0;
+    bell.channels = ChannelMask{1} << LFE;
+    s.bands.push_back(bell);
+    s.speakers.bass_management = true;
+    s.speakers.crossover_hz = 90.0;
+    s.speakers.lfe_lowpass_hz = 110.0;
+    s.speakers.small_speakers = (ChannelMask{1} << FL) | (ChannelMask{1} << FR) | (ChannelMask{1} << SL);
+    s.speakers.inverted = (ChannelMask{1} << FL) | (ChannelMask{1} << LFE) | (ChannelMask{1} << SR);
+    s.speakers.muted = ChannelMask{1} << SL;
+
+    for (const bool bypass : {false, true}) {
+        s.bypass = bypass;
+        for (uint32_t bin : {14u, 27u, 41u, 68u, 341u}) {
+            const double f = bin * kFs / kN;
+            for (uint32_t ch = 0; ch < 6; ++ch) {
+                Processor p = make(6, kMask51, s);
+                auto tone = [&](uint32_t c, size_t i) { return c == ch ? std::sin(2.0 * kPi * f * static_cast<double>(i) / kFs) : 0.0; };
+                run(p, 32768, tone);
+                const auto out = run(p, kN, tone, 256, 32768);
+                const std::vector<double> x(out[ch].begin(), out[ch].end());
+                double mag = 0.0, phase = 0.0;
+                magnitude_db(s, 6, kMask51, ch, &f, 1, kFs, &mag);
+                phase_deg(s, 6, kMask51, ch, &f, 1, kFs, &phase);
+                CAPTURE(bypass);
+                CAPTURE(f);
+                CAPTURE(ch);
+                CAPTURE(mag);
+                if (ch == SL) {
+                    CHECK((std::isinf(mag) && mag < 0.0));
+                    CHECK(std::all_of(x.begin(), x.end(), [](double v) { return v == 0.0; }));
+                    continue;
+                }
+                CHECK(std::abs(db(amplitude(x, bin)) - mag) < 0.001);
+                double diff = std::abs(phase_at(x, bin) - phase);
+                if (diff > 180.0) diff = 360.0 - diff;
+                CHECK(diff < 0.01);
+            }
+        }
+    }
+
+    // With no LFE channel there is no bass management, and nothing to draw for it.
+    s.bypass = false;
+    s.bands.clear();
+    s.preamp_db = 0.0;
+    s.speakers.muted = 0;
+    const double f40 = 40.0;
+    double mag = 1.0;
+    magnitude_db(s, 2, 0x3, FL, &f40, 1, kFs, &mag);
+    CHECK(mag == doctest::Approx(0.0).epsilon(1e-12));
+}
+
+TEST_CASE("a muted small speaker plays nothing, from itself or from the sub") {
+    // Bass management sums a small speaker's bass into the LFE before the post
+    // gain that carries speaker mute, so a muted speaker's bass still played
+    // from the sub. Muting and unmuting ramp as speaker mute does.
+    enum { FL, FR, FC, LFE, SL, SR };
+    constexpr double kFreq = 40.0;
+    auto tone = [](uint32_t c, size_t i) { return c == FL ? std::sin(2.0 * kPi * kFreq * static_cast<double>(i) / kFs) : 0.0; };
+    const auto silent = [](const std::vector<float>& x, size_t from) {
+        return std::all_of(x.begin() + static_cast<long>(from), x.end(), [](float v) { return v == 0.0f; });
+    };
+    EqState s;
+    s.speakers.bass_management = true;
+    s.speakers.small_speakers = ChannelMask{1} << FL;
+    s.speakers.muted = ChannelMask{1} << FL;
+    Processor p = make(6, kMask51, s);
+    // Switch points a quarter cycle past a zero crossing, where the tone is at
+    // its peak.
+    constexpr size_t kOn = 9900, kOff = kOn + 24000;
+    auto a = run(p, kOn, tone);
+    CHECK(silent(a[FL], 0));
+    CHECK(silent(a[LFE], 0));
+
+    s.speakers.muted = 0;
+    p.set_target(s);
+    auto b = run(p, kOff - kOn, tone, 256, kOn);
+    std::vector<double> on(b[LFE].end() - 4800, b[LFE].end());
+    CHECK(std::abs(db(amplitude(on, 4)) - lr4_db(FilterType::LowPass, 80.0, kFreq)) < 0.01);
+
+    s.speakers.muted = ChannelMask{1} << FL;
+    p.set_target(s);
+    auto c2 = run(p, 48000, tone, 256, kOff);
+    CHECK(silent(c2[FL], 24000));
+    CHECK(silent(c2[LFE], 24000));
+
+    const double limit = 2.0 * std::sin(kPi * kFreq / kFs) * 1.10;
+    for (uint32_t c : {static_cast<uint32_t>(FL), static_cast<uint32_t>(LFE)}) {
+        std::vector<float> joined = a[c];
+        joined.insert(joined.end(), b[c].begin(), b[c].end());
+        joined.insert(joined.end(), c2[c].begin(), c2[c].end());
+        CAPTURE(c);
+        CHECK(worst_step(joined) < limit);
+    }
+}
+
+TEST_CASE("initializing again forgets the speaker setup that was playing") {
+    enum { FL, FR, FC, LFE, SL, SR };
+    auto tone = [](uint32_t c, size_t i) { return c == FL ? std::sin(2.0 * kPi * 40.0 * static_cast<double>(i) / kFs) : 0.0; };
+    EqState muted;
+    muted.speakers.bass_management = true;
+    muted.speakers.small_speakers = ChannelMask{1} << FL;
+    muted.speakers.muted = ChannelMask{1} << FL;
+    EqState playing = muted;
+    playing.speakers.muted = 0;
+
+    for (const bool mute_after : {false, true}) {
+        CAPTURE(mute_after);
+        Processor used = make(6, kMask51, mute_after ? playing : muted);
+        run(used, 4800, tone);
+        used.initialize(kFs, 6, 1024, 64, kMask51);
+        used.set_target(mute_after ? muted : playing);
+        Processor fresh;
+        fresh.initialize(kFs, 6, 1024, 64, kMask51);
+        fresh.set_target(mute_after ? muted : playing);
+        const auto a = run(used, 9600, tone);
+        const auto b = run(fresh, 9600, tone);
+        CHECK(a == b);
     }
 }
 

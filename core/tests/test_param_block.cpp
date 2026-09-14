@@ -67,6 +67,8 @@ TEST_CASE("an EqState survives a trip through the block") {
     s.preamp_db = -6.5;
     s.channel_gain_db[0] = -1.5;
     s.channel_gain_db[1] = 2.25;
+    s.layout_channels = 6;
+    s.layout_speaker_mask = 0x60F;
 
     Band a = peaking(1000.0, -12.0, 1.5);
     a.id = 42;
@@ -100,6 +102,8 @@ TEST_CASE("an EqState survives a trip through the block") {
     CHECK(back.preamp_db == doctest::Approx(s.preamp_db));
     CHECK(back.channel_gain_db[0] == doctest::Approx(s.channel_gain_db[0]));
     CHECK(back.channel_gain_db[1] == doctest::Approx(s.channel_gain_db[1]));
+    CHECK(back.layout_channels == 6);
+    CHECK(back.layout_speaker_mask == 0x60F);
     REQUIRE(back.bands.size() == 3);
 
     for (size_t i = 0; i < 3; ++i) {
@@ -137,8 +141,8 @@ TEST_CASE("the curve is preserved across the block within float precision") {
 
     const std::vector<double> grid = log_grid(20.0, 20000.0, 256);
     std::vector<double> a(grid.size()), b(grid.size());
-    magnitude_db(s, 0, grid.data(), grid.size(), 48000.0, a.data());
-    magnitude_db(back, 0, grid.data(), grid.size(), 48000.0, b.data());
+    magnitude_db(s, 2, 0, 0, grid.data(), grid.size(), 48000.0, a.data());
+    magnitude_db(back, 2, 0, 0, grid.data(), grid.size(), 48000.0, b.data());
     for (size_t i = 0; i < grid.size(); ++i) {
         CAPTURE(grid[i]);
         CHECK(a[i] == doctest::Approx(b[i]).epsilon(1e-5));
@@ -246,18 +250,22 @@ struct SeqlockRun {
     int accepted = 0;
     int rejected = 0;
     int torn = 0;
+    int checked = 0;   // accepted reads of a block a writer wrote
 };
 
 // Runs a writer thread against a reader thread. `writer_gap` is real elapsed
 // time between writes, standing in for the gap between UI updates. It must be
 // wall-clock rather than a spin count: a busy-wait stops being a time proxy the
 // moment the machine is loaded, and made this test flaky on a busy CI box.
-SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writers = 1) {
+// The reader makes at least `reads` attempts and goes on until `min_checked`
+// reads of written blocks were checked, or 60 s pass. The writers run until the
+// reader is done, so every checked read was taken while they were writing.
+SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writers = 1, int min_checked = 0) {
     ParamBlock shared{};
     init_param_block(&shared);
 
     std::atomic<bool> stop{false};
-    std::atomic<int> accepted{0}, rejected{0}, torn{0};
+    std::atomic<int> accepted{0}, rejected{0}, torn{0}, checked{0};
 
     // Each writer's generations carry its own number in the top byte, so two
     // writers never write the same generation.
@@ -286,7 +294,9 @@ SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writ
 
     std::thread reader([&] {
         ParamBlock copy{};
-        for (int i = 0; i < reads; ++i) {
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+        for (int i = 0; i < reads || (checked.load() < min_checked && std::chrono::steady_clock::now() < give_up);
+             ++i) {
             if (!param_block_read(&shared, &copy)) {
                 rejected.fetch_add(1, std::memory_order_relaxed);
                 continue;
@@ -295,6 +305,7 @@ SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writ
             if (copy.band_count == 0) {
                 continue;
             }
+            checked.fetch_add(1, std::memory_order_relaxed);
             // Every field was written in the same pass, so they must all carry
             // the same generation. A mix of two generations is a torn read.
             const uint32_t g = copy.bands[0].id;
@@ -313,7 +324,7 @@ SeqlockRun run_seqlock(int reads, std::chrono::microseconds writer_gap, int writ
 
     reader.join();
     for (std::thread& t : threads) t.join();
-    return {accepted.load(), rejected.load(), torn.load()};
+    return {accepted.load(), rejected.load(), torn.load(), checked.load()};
 }
 
 }  // namespace
@@ -322,10 +333,13 @@ TEST_CASE("a reader never observes a half-written block, even under full content
     // Writer hammering the block with no pause at all. A seqlock reader can be
     // starved by this and that is by design: it costs the host nothing, because
     // a failed read simply means it keeps the parameters it already had. What
-    // must never happen is an accepted read that mixes two generations.
-    const SeqlockRun r = run_seqlock(50000, std::chrono::microseconds{0});
+    // must never happen is an accepted read that mixes two generations. On a
+    // loaded machine 50,000 attempts checked as few as 11 reads (review
+    // 2026-09-13), so the reader goes on until it has checked 1000.
+    const SeqlockRun r = run_seqlock(50000, std::chrono::microseconds{0}, 1, 1000);
     CAPTURE(r.accepted);
     CAPTURE(r.rejected);
+    CHECK(r.checked >= 1000);
     CHECK(r.torn == 0);
 }
 

@@ -7,9 +7,12 @@
 
 #include "doctest.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include "isotone/biquad.h"
+#include "isotone/processor.h"
 
 using namespace isotone;
 
@@ -223,33 +226,64 @@ TEST_CASE("shelf_corner shifts the design frequency the way Equalizer APO does")
 }
 
 TEST_CASE("designed filters are stable across an aggressive parameter sweep") {
+    // Through effective_band, as the processor and the curve design a band: every
+    // width mode, widths past both ends of their clamp, 8 to 768 kHz. Q 1e17 on
+    // a low-pass designed a2 = 1 before widths had an upper clamp (review
+    // 2026-09-13), and Q 1e6 peaked at +120 dB.
     const FilterType types[] = {
         FilterType::Peaking,  FilterType::LowPass,   FilterType::HighPass,
         FilterType::BandPass, FilterType::Notch,     FilterType::AllPass,
         FilterType::LowShelf, FilterType::HighShelf,
     };
-    for (double fs : {44100.0, 48000.0, 96000.0, 192000.0}) {
+    struct Widths {
+        WidthMode mode;
+        std::vector<double> values;
+    };
+    const Widths widths[] = {
+        {WidthMode::Q, {1e-9, 1e-4, 0.05, 0.5, 1.0, 10.0, 20.0, 100.0, 1000.0, 1e4, 1e6, 1e17, 1e300}},
+        {WidthMode::BandwidthOct, {1e-12, 1e-6, 0.00145, 0.01, 0.145, 1.0, 5.0, 30.0, 1e3, 1e300}},
+        {WidthMode::SlopeDb, {1e-9, 1e-4, 1.0, 6.0, 12.0, 24.0, 1000.0, 1e4, 1e17, 1e300}},
+    };
+    // The level at the design frequency and at the poles' angle, where a
+    // resonance peaks: a lower bound on the peak, enough to see +120 dB.
+    const auto peak = [](const BiquadCoeffs& c, double fc, double fs) {
+        double worst = magnitude_db(c, clamp_fc(fc, fs), fs);
+        if (c.a2 > 0.0 && std::abs(c.a1) < 2.0 * std::sqrt(c.a2)) {
+            const double pole_hz = std::acos(-c.a1 / (2.0 * std::sqrt(c.a2))) * fs / (2.0 * 3.14159265358979323846);
+            worst = std::max(worst, magnitude_db(c, pole_hz, fs));
+        }
+        return worst;
+    };
+    for (double fs : {8000.0, 11025.0, 44100.0, 48000.0, 96000.0, 192000.0, 384000.0, 768000.0}) {
         for (FilterType t : types) {
+            const bool shelf = t == FilterType::LowShelf || t == FilterType::HighShelf;
             for (double fc : {1.0, 10.0, 20.0, 1000.0, 19000.0, 23000.0, 1e6}) {
-                for (double q : {0.05, 0.5, 1.0, 20.0, 100.0}) {
-                    for (double g : {-40.0, -6.0, 0.0, 6.0, 40.0}) {
-                        Band b;
-                        b.type = t;
-                        b.fc = fc;
-                        b.gain_db = g;
-                        b.width = q;
-                        CAPTURE(fs);
-                        CAPTURE(static_cast<int>(t));
-                        CAPTURE(fc);
-                        CAPTURE(q);
-                        CAPTURE(g);
-                        const BiquadCoeffs c = design(b, fs);
-                        CHECK(is_stable(c));
-                        CHECK(std::isfinite(c.b0));
-                        CHECK(std::isfinite(c.b1));
-                        CHECK(std::isfinite(c.b2));
-                        CHECK(std::isfinite(c.a1));
-                        CHECK(std::isfinite(c.a2));
+                for (const Widths& w : widths) {
+                    for (double width : w.values) {
+                        for (double g : {-1e3, -60.0, -6.0, 0.0, 6.0, 60.0, 1e3}) {
+                            Band b;
+                            b.type = t;
+                            b.fc = fc;
+                            b.gain_db = g;
+                            b.width = width;
+                            b.width_mode = w.mode;
+                            b.shelf_corner = shelf && (width > 1.0);
+                            CAPTURE(fs);
+                            CAPTURE(static_cast<int>(t));
+                            CAPTURE(fc);
+                            CAPTURE(static_cast<int>(w.mode));
+                            CAPTURE(width);
+                            CAPTURE(g);
+                            const BiquadCoeffs c = design(effective_band(b), fs);
+                            CHECK(is_stable(c));
+                            CHECK(std::isfinite(c.b0));
+                            CHECK(std::isfinite(c.b1));
+                            CHECK(std::isfinite(c.b2));
+                            CHECK(std::isfinite(c.a1));
+                            CHECK(std::isfinite(c.a2));
+                            // A shelf's resonance at the equivalent Q of 10 adds 20 dB.
+                            CHECK(peak(c, fc, fs) < kMaxBandGainDb + (shelf ? 20.0 : 0.0) + 0.01);
+                        }
                     }
                 }
             }

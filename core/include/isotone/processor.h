@@ -42,6 +42,29 @@ inline constexpr double kMaxBandGainDb = 60.0;
 inline constexpr double kMinLevelDb    = -120.0;
 inline constexpr double kMaxLevelDb    = 60.0;
 
+// The range of a band's width, for the same reason. A resonant filter peaks at
+// about its Q: a low-pass at Q 1000 reaches +60 dB, the gain limit, and Q 1e17
+// designs a pole on the unit circle. A shelf peaks higher, by up to its gain at
+// Q 10 (+80 dB at the gain limit), which is where a dB slope is already held
+// (biquad.cpp). A bandwidth has the lower limits that give the same Q: Q is at
+// most 1 / (2 sinh(ln 2 / 2 * BW)), so 0.00145 and 0.145 octaves reach 995 and
+// 9.94. The smallest Q and slope, 1e-4, stop a wide band near Nyquist designing
+// a2 = -1.
+inline constexpr double kMinWidth             = 1e-4;
+inline constexpr double kMaxQ                 = 1000.0;
+inline constexpr double kMaxShelfQ            = 10.0;
+inline constexpr double kMinBandwidthOct      = 0.00145;
+inline constexpr double kMinShelfBandwidthOct = 0.145;
+
+// A band as the processor designs it: gain and width clamped, and off when its
+// width is zero or negative. Non-finite values are left for design() to
+// ignore. The curve draws this, and a processor plays it for a band with no
+// earlier value of its own.
+Band effective_band(const Band& band);
+
+// A preamp or trim as the processor plays it: clamped, and 0 dB when not finite.
+double effective_level_db(double db);
+
 uint32_t control_block_frames(double sample_rate);
 
 // Turns on flush-to-zero and denormals-are-zero for the calling thread. A host
@@ -127,6 +150,9 @@ private:
         // The channels the outgoing filter covered, for a crossfade that also
         // changes the band's channels.
         ChannelMask old_channels = kAllChannels;
+        // The fade changes nothing but the channels. Where the band stays it is
+        // the same filter, which plays alone, from its own state.
+        bool only_channels = false;
 
         bool occupied = false;
 
@@ -143,6 +169,14 @@ private:
         State a, b;
         void clear() { a.clear(); b.clear(); }
     };
+
+    // What a band in `b` is set to by `in`: its smoothed parameters' targets,
+    // and whether it plays.
+    struct Targets {
+        double log_fc = 0.0, gain = 0.0, log_w = 0.0;
+        bool   enabled = false;
+    };
+    Targets targets_for(const BandSlot& b, const Band& in) const;
 
     void recompute_band(BandSlot& b);
     void match_bands(const EqState& state, uint32_t count);
@@ -211,6 +245,12 @@ private:
     double bass_target_[kMaxChannels] = {};
     double bass_cur_[kMaxChannels]    = {};
     double bass_begin_[kMaxChannels]  = {};
+    // Speaker mute on the bass a small speaker sends the LFE, 1 = audible, so a
+    // muted speaker plays from the sub no more than from itself. Polarity does
+    // not touch the redirected bass.
+    double sent_target_[kMaxChannels] = {};
+    double sent_cur_[kMaxChannels]    = {};
+    double sent_begin_[kMaxChannels]  = {};
     bool   bass_active_ = false;
     Lr4State xover_lp_state_[kMaxChannels];
     Lr4State xover_hp_state_[kMaxChannels];

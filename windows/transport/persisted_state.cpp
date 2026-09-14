@@ -9,7 +9,7 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
-#include <cwctype>
+#include "shared_mapping.h"
 
 namespace isotone::win {
 
@@ -42,12 +42,9 @@ std::wstring persisted_state_dir(bool selftest) {
     return dir;
 }
 
-std::wstring persisted_state_path(const std::wstring& dir, const std::wstring& endpoint_guid) {
-    std::wstring name;
-    for (wchar_t c : endpoint_guid) {
-        if (c != L'{' && c != L'}' && !std::iswspace(c)) name += static_cast<wchar_t>(std::towlower(c));
-    }
-    return dir + L"\\{" + name + L"}.bin";
+std::wstring persisted_state_path(const std::wstring& dir, const std::wstring& endpoint) {
+    const std::wstring guid = canonical_endpoint_guid(endpoint);
+    return guid.empty() ? std::wstring() : dir + L"\\" + guid + L".bin";
 }
 
 PersistedRead read_persisted_state(const std::wstring& path, ParamBlock* out) {
@@ -85,7 +82,12 @@ DWORD write_persisted_state(const std::wstring& path, const ParamBlock& block) {
     const HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
     if (file == INVALID_HANDLE_VALUE) return GetLastError();
-    const ParamBlock copy = parameters_only(block);
+    // The header is this build's whatever the caller's block holds: a block
+    // filled by to_param_block alone has none, and would be read back Invalid.
+    ParamBlock copy = parameters_only(block);
+    copy.hdr.magic = kParamMagic;
+    copy.hdr.version = kParamVersion;
+    copy.hdr.size = sizeof(ParamBlock);
     DWORD written = 0;
     const bool ok = WriteFile(file, &copy, sizeof(copy), &written, nullptr) && written == sizeof(copy) &&
                     FlushFileBuffers(file);

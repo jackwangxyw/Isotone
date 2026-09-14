@@ -38,10 +38,17 @@ endfunction()
 
 isoapo_dll(IsoAPO)
 
-# The same sources with the shared region in the Local\ namespace instead of
-# Global\. Creating a Global\ object needs SeCreateGlobalPrivilege, which audiodg
-# has and an unelevated test process does not. This is the only difference, and
-# this DLL must never be installed: the UI could not reach its region.
+# The same sources built so an unelevated test process can host them. It differs
+# from IsoAPO.dll in four ways (isoapo.cpp, persisted_state.cpp), and must never
+# be installed: the UI could not reach its region.
+# - The shared region is in Local\ instead of Global\. Creating a Global\ object
+#   needs SeCreateGlobalPrivilege, which audiodg has and a test process does not.
+# - The child APO record is read from HKCU\Software\IsoAPO-selftest\Child APOs
+#   instead of HKLM\SOFTWARE\IsoAPO\Child APOs.
+# - Saved state is under %LOCALAPPDATA%\IsoAPO-selftest\devices instead of
+#   %ProgramData%\IsoAPO\devices.
+# - An endpoint with no saved state starts with a -12 dB peaking band at 1 kHz,
+#   Q 1, which the self test measures, instead of flat.
 isoapo_dll(IsoAPO-selftest)
 target_compile_definitions(IsoAPO-selftest PRIVATE ISOAPO_SELFTEST_LOCAL_NAMESPACE)
 

@@ -54,6 +54,12 @@ public:
     // owns the ring. Clamped to kMaxChannels.
     void set_channels(uint32_t channels);
 
+    // Reads one byte of every page the current layout's writes can reach, so
+    // the first lap through a ring in not-yet-touched shared memory does not
+    // fault those pages in on the audio thread. Reads only, so it is safe while
+    // another writer owns the ring. Not real-time: call it before streaming.
+    void prefault() const;
+
     // Tries to become the ring's writer. Succeeds if nobody holds it, or if the
     // holder's token names a different process and its write index has stood
     // still for kRingStaleClaims calls in a row: that owner is dead (the audio
@@ -61,7 +67,9 @@ public:
     // playing. A live owner in another process keeps the ring, so two processes
     // hosting one endpoint do not take it from each other on every call. Call it
     // again on later process calls while it fails. Real-time safe.
-    // Token layout: process id in the high 32 bits, an instance serial below.
+    // Token layout: a value naming the process in the high 32 bits, an instance
+    // serial below. It must differ from any earlier process's that may have
+    // left a claim behind, so not a process id, which the system reuses.
     bool claim(uint64_t token);
     void release();
     // True while this writer holds the ring. Another process taking the claim

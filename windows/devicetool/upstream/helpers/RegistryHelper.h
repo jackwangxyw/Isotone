@@ -56,6 +56,7 @@ public:
 	virtual bool keyExists(const std::wstring& key, bool* result) = 0;
 	virtual bool valueExists(const std::wstring& key, const std::wstring& valuename, bool* result) = 0;
 	virtual bool readValue(const std::wstring& key, const std::wstring& valuename, std::wstring* result) = 0;
+	virtual bool readMultiValue(const std::wstring& key, const std::wstring& valuename, std::vector<std::wstring>* result) = 0;
 	virtual bool keyEmpty(const std::wstring& key, bool* result) = 0;
 };
 

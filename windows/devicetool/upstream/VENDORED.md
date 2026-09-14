@@ -27,12 +27,19 @@ to LF to match the repository; nothing else changed except as listed.
   - Added `EQUALIZERAPO_REGPATH` (upstream's old `APP_REGPATH` value) and
     `ISOAPO_PRE_MIX_GUID` / `ISOAPO_POST_MIX_GUID`. The `EQUALIZERAPO_*` GUIDs
     are kept for detecting an existing install.
-  - Added the `RegistryDryRun` interface and `RegistryHelper::dryRun`.
+  - Added the `RegistryDryRun` interface and `RegistryHelper::dryRun`,
+    including `RegistryDryRun::readMultiValue`.
 - `helpers/RegistryHelper.cpp`: when `dryRun` is set, `writeValue`,
   `writeDWORDValue`, both `writeMultiValue`s, `deleteValue`, `createKey`,
   `deleteKey`, `makeWritable`, `takeOwnership` and `saveToFile` report to it
   and return without touching the registry or the file system; `readValue`,
-  `keyExists`, `valueExists` and `keyEmpty` ask it first. Each of those writes
+  `readMultiValue`, `keyExists`, `valueExists` and `keyEmpty` ask it first.
+  Leaks fixed, which a CLI called repeatedly by a UI would otherwise
+  accumulate: `takeOwnership` closes its token and key handles, `makeWritable`
+  its key handle, and both free their SID, ACL and security descriptors on
+  every path, throws included (`SCOPE_EXIT` guards); `readValue`,
+  `readDWORDValue`, `readMultiValue` and both `writeMultiValue`s free their
+  `new[]` buffers with `delete[]` instead of `delete`. Each of those writes
   also reports itself to `RegistryHelper::log`, when one is installed, after it
   returns without throwing (`RegistryWriteReport`, `RegistryLog`); `createKey`
   does not report a key that already existed. `readValue` returns an empty

@@ -23,6 +23,11 @@ struct RegistryOperation {
     std::wstring data;
 };
 
+// Thrown by a dry run at the write it was told to stop at: the process killed
+// there. Not a RegistryException, so nothing that handles a failed write
+// catches it.
+struct SimulatedKill {};
+
 class DryRunRegistry : public RegistryDryRun {
 public:
     void write(const std::wstring& operation, const std::wstring& key,
@@ -31,7 +36,18 @@ public:
     bool valueExists(const std::wstring& key, const std::wstring& valuename, bool* result) override;
     bool readValue(const std::wstring& key, const std::wstring& valuename,
                    std::wstring* result) override;
+    // A REG_MULTI_SZ this dry run set, split where writeMultiValue joined it
+    // with '|' (the lists devicetool writes hold CLSIDs, which have none).
+    bool readMultiValue(const std::wstring& key, const std::wstring& valuename,
+                        std::vector<std::wstring>* result) override;
     bool keyEmpty(const std::wstring& key, bool* result) override;
+
+    // The write with this index (counting every write this dry run has taken)
+    // throws SimulatedKill instead of happening.
+    void kill_at(size_t index) { kill_at_ = index; }
+    // The write with this index throws RegistryException instead of happening,
+    // once per call; call twice to fail the write that follows at that index too.
+    void fail_at(size_t index) { fail_at_.insert(index); }
 
     // The type of a value this dry run has set, or *present false for one it
     // deleted (or whose key it deleted). False when it has not touched the
@@ -49,6 +65,8 @@ private:
     // has not taken ownership of it and made it writable.
     bool create_would_be_denied(const std::wstring& key) const;
     std::set<std::wstring> made_writable_;
+    size_t kill_at_ = static_cast<size_t>(-1);
+    std::multiset<size_t> fail_at_;
 
     std::vector<RegistryOperation> operations_;
     std::set<std::wstring> created_;

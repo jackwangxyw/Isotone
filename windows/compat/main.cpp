@@ -98,11 +98,19 @@ std::string utf8(const fs::path& p) {
     return s;
 }
 
+// Arguments are held as UTF-8 (wmain converts them); a path is made from one
+// through UTF-16, never through the ANSI code page.
+fs::path path_from_utf8(const std::string& s) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
 std::string error_text(DWORD e) {
-    char buf[256] = {};
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, e, 0, buf,
-                   sizeof(buf), nullptr);
-    std::string s = buf;
+    wchar_t buf[256] = {};
+    FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, e, 0, buf, 256, nullptr);
+    std::string s = utf8(fs::path(buf));
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
     return s;
 }
@@ -122,7 +130,7 @@ struct Args {
     bool real_install = false, bypass = false, mute = false, bad = false;
 };
 
-Args parse_args(int argc, char** argv) {
+Args parse_args(int argc, const std::vector<std::string>& argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
         const std::string s = argv[i];
@@ -167,14 +175,14 @@ bool resolve_root(const Args& a, fs::path* root, int* rc) {
         return true;
     }
     if (!a.root.empty()) {
-        if (is_live_install_path(a.root)) {
+        if (is_live_install_path(path_from_utf8(a.root))) {
             std::printf("{\"ok\":false,\"reason\":%s}\n",
                         json_string("that is inside the live Equalizer APO install; "
                                     "pass --real-install to mean it").c_str());
             *rc = 1;
             return false;
         }
-        *root = a.root;
+        *root = path_from_utf8(a.root);
         return true;
     }
     // The default sandbox is created on demand, with an empty config.txt. The
@@ -227,6 +235,8 @@ std::string inspection_json(const ConfigInspection& i) {
            ",\"peace_included\":" + (i.peace_included ? "true" : "false") +
            ",\"has_stage_lines\":" + (i.has_stage_lines ? "true" : "false") +
            ",\"has_conditionals\":" + (i.has_conditionals ? "true" : "false") +
+           ",\"open_ifs\":" + std::to_string(i.open_ifs) +
+           ",\"stage_changed_at_end\":" + (i.stage_changed_at_end ? "true" : "false") +
            ",\"includes\":" + includes + "}";
 }
 
@@ -259,11 +269,7 @@ int cmd_loopback(const Args& a) {
     if (a.render.empty() || !(a.seconds > 0.0) || a.seconds > 600.0 || a.positional.size() != 2) {
         return usage();
     }
-    const std::string& out_text = a.positional[1];
-    const int wn = MultiByteToWideChar(CP_UTF8, 0, out_text.data(), static_cast<int>(out_text.size()), nullptr, 0);
-    std::wstring out_wide(static_cast<size_t>(wn > 0 ? wn : 0), L'\0');
-    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, out_text.data(), static_cast<int>(out_text.size()), out_wide.data(), wn);
-    const fs::path out_path = out_wide;
+    const fs::path out_path = path_from_utf8(a.positional[1]);
     std::error_code ec;
     if (is_live_install_path(fs::absolute(out_path, ec).parent_path())) {
         std::printf("{\"ok\":false,\"reason\":%s}\n",
@@ -322,7 +328,11 @@ int cmd_loopback(const Args& a) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+// wmain: arguments arrive as UTF-16 and are turned into UTF-8, so a path outside
+// the ANSI code page survives and the JSON output stays UTF-8.
+int wmain(int argc, wchar_t** wargv) {
+    std::vector<std::string> argv;
+    for (int i = 0; i < argc; ++i) argv.push_back(utf8(fs::path(wargv[i])));
     const Args a = parse_args(argc, argv);
     if (a.bad || a.positional.empty()) return usage();
     const std::string& cmd = a.positional[0];
@@ -356,7 +366,8 @@ int main(int argc, char** argv) {
     if (cmd == "attach" && a.positional.size() == 1) {
         const AttachResult r = attach_include(root);
         if (r.error == ERROR_ALREADY_EXISTS) {
-            return fail("Isotone.txt is already included under a Device or If line, where only some devices reach it; "
+            return fail("Isotone.txt is already included under a Device, If or Stage line, where only some devices "
+                        "or Equalizer APO instances reach it; "
                         "remove that line by hand",
                         r.error);
         }
@@ -385,7 +396,7 @@ int main(int argc, char** argv) {
             std::ostringstream ss;
             ss << std::cin.rdbuf();
             text = ss.str();
-        } else if (const DWORD e = read_file_bytes(a.positional[1], &text); e != ERROR_SUCCESS) {
+        } else if (const DWORD e = read_file_bytes(path_from_utf8(a.positional[1]), &text); e != ERROR_SUCCESS) {
             return fail("cannot read " + a.positional[1], e);
         }
         DeviceConfig device;

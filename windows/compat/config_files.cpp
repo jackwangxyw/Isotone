@@ -6,8 +6,11 @@
 
 #include "config_files.h"
 
+#include <shlobj.h>
+
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 #include "eapo_install.h"
 
@@ -26,10 +29,6 @@ std::string trim(const std::string& s) {
 std::string lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
-}
-
-bool ends_with(const std::string& s, const std::string& tail) {
-    return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
 }
 
 // Upstream splits on '\n' and drops one trailing '\r' (FilterEngine::loadConfigFile).
@@ -75,9 +74,37 @@ std::string newline_of(const std::string& bytes) {
     return "\r\n";
 }
 
-std::string attach_block(const std::string& nl) {
-    return nl + "# Added by Isotone. Remove these three lines to detach it." + nl +
-           "Device: all" + nl + "Include: " + kIsotoneFileName + nl;
+constexpr char kAttachComment[] = "# Added by Isotone. Remove these ";
+constexpr char kStageReset[] = "Stage: post-mix capture";
+
+// `open_ifs` EndIf lines close Ifs config.txt leaves open, and the Stage line
+// undoes a Stage line that leaves the end of the file for other instances. Both
+// come after `Device: all`, since a Device line that does not match skips them.
+std::string attach_block(const std::string& nl, unsigned open_ifs = 0, bool reset_stage = false) {
+    static constexpr const char* kWords[] = {"three", "four", "five", "six", "seven", "eight", "nine"};
+    const unsigned lines = 3 + open_ifs + (reset_stage ? 1 : 0);
+    std::string out = nl + kAttachComment + (lines - 3 < 7 ? kWords[lines - 3] : std::to_string(lines)) +
+                      " lines to detach it." + nl + "Device: all" + nl;
+    for (unsigned i = 0; i < open_ifs; ++i) out += "EndIf:" + nl;
+    if (reset_stage) out += kStageReset + nl;
+    return out + "Include: " + kIsotoneFileName + nl;
+}
+
+// The size of the block attach_include appended, when it is the file's tail; 0
+// when it is not.
+size_t attached_block_size(const std::string& bytes) {
+    for (const std::string nl : {"\r\n", "\n"}) {
+        const size_t at = bytes.rfind(nl + kAttachComment);
+        if (at == std::string::npos) continue;
+        const std::string tail = bytes.substr(at);
+        unsigned open_ifs = 0;
+        for (size_t p = tail.find(nl + "EndIf:" + nl); p != std::string::npos; p = tail.find(nl + "EndIf:" + nl, p + 1)) {
+            ++open_ifs;
+        }
+        const bool reset_stage = tail.find(nl + kStageReset + nl) != std::string::npos;
+        if (tail == attach_block(nl, open_ifs, reset_stage)) return tail.size();
+    }
+    return 0;
 }
 
 DWORD open_error(const fs::path& path) {
@@ -120,15 +147,138 @@ DWORD read_file_bytes(const fs::path& path, std::string* out) {
     return ERROR_SUCCESS;
 }
 
-DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWORD retry_ms) {
-    fs::path tmp = path;
-    tmp += L".tmp";
+namespace {
+
+// MoveFileExW returns ERROR_ACCESS_DENIED both for a replace that waits on a
+// reader and for one that can never succeed. Measured on NTFS: a target held
+// with FILE_SHARE_READ (as Equalizer APO opens it) refuses a DELETE open with
+// ERROR_SHARING_VIOLATION, and one held with FILE_SHARE_DELETE as well grants
+// it, yet both block the replace; a read-only file or a directory grants it and
+// can never be replaced; an ACL that denies delete refuses it with
+// ERROR_ACCESS_DENIED. So does a file pending deletion, which is treated as
+// permanent here: the caller's next attempt sees the name gone.
+bool replace_denied_for_good(const fs::path& target) {
+    const DWORD attrs = GetFileAttributesW(target.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        return true;
+    }
+    HANDLE h = CreateFileW(target.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        return false;
+    }
+    const DWORD e = GetLastError();
+    return e != ERROR_SHARING_VIOLATION && e != ERROR_FILE_NOT_FOUND;
+}
+
+DWORD win32_error(HRESULT hr) {
+    return HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : static_cast<DWORD>(hr);
+}
+
+// %LOCALAPPDATA%\Isotone\compat-tmp, not created.
+DWORD default_temp_dir(fs::path* out) {
+    PWSTR local = nullptr;
+    const HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local);
+    if (SUCCEEDED(hr)) *out = fs::path(local) / L"Isotone" / L"compat-tmp";
+    CoTaskMemFree(local);
+    return SUCCEEDED(hr) ? ERROR_SUCCESS : win32_error(hr);
+}
+
+// The volume GUID path (\\?\Volume{...}\) `path` is on, following junctions and
+// mounted folders, for a path that need not exist yet. Empty when there is none:
+// a network share, a drive letter nothing is mounted on.
+std::wstring volume_guid_path(const fs::path& path) {
+    std::vector<wchar_t> mount(path.native().size() + MAX_PATH);
+    wchar_t guid[64] = {};
+    if (!GetVolumePathNameW(path.c_str(), mount.data(), static_cast<DWORD>(mount.size())) ||
+        !GetVolumeNameForVolumeMountPointW(mount.data(), guid, 64)) {
+        return {};
+    }
+    return guid;
+}
+
+DWORD read_security(const fs::path& path, SECURITY_INFORMATION what, std::vector<BYTE>* sd) {
+    DWORD need = 0;
+    if (!GetFileSecurityW(path.c_str(), what, nullptr, 0, &need) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return GetLastError();
+    }
+    sd->assign(need, 0);
+    return GetFileSecurityW(path.c_str(), what, sd->data(), need, &need) ? ERROR_SUCCESS : GetLastError();
+}
+
+// The DACL `path` has, or, when there is no file there yet, the one a file
+// created there by this process gets: the directory's inheritable ACEs, marked
+// inherited when the directory's are (NTFS marks them only then), or the
+// token's default DACL when there are none.
+DWORD dacl_for(const fs::path& path, std::vector<BYTE>* sd) {
+    const DWORD e = read_security(path, DACL_SECURITY_INFORMATION, sd);
+    if (e != ERROR_FILE_NOT_FOUND) return e;
+
+    std::vector<BYTE> parent;
+    const SECURITY_INFORMATION all = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    if (const DWORD pe = read_security(path.parent_path(), all, &parent); pe != ERROR_SUCCESS) return pe;
+    WORD control = 0;
+    DWORD revision = 0;
+    if (!GetSecurityDescriptorControl(parent.data(), &control, &revision)) return GetLastError();
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return GetLastError();
+    GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+    PSECURITY_DESCRIPTOR created = nullptr;
+    const ULONG flags = SEF_AVOID_OWNER_CHECK | SEF_AVOID_PRIVILEGE_CHECK |
+                        ((control & SE_DACL_AUTO_INHERITED) ? SEF_DACL_AUTO_INHERIT : 0);
+    const BOOL ok = CreatePrivateObjectSecurityEx(parent.data(), nullptr, &created, nullptr, FALSE, flags, token, &mapping);
+    const DWORD ce = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(token);
+    if (!ok) return ce;
+    const BYTE* bytes = static_cast<const BYTE*>(created);
+    sd->assign(bytes, bytes + GetSecurityDescriptorLength(created));
+    DestroyPrivateObjectSecurity(&created);
+    return ERROR_SUCCESS;
+}
+
+}  // namespace
+
+DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWORD retry_ms, const fs::path& temp_dir) {
+    std::error_code ec;
+    const fs::path target = fs::absolute(path, ec);
+    if (ec) return static_cast<DWORD>(ec.value());
+
+    // Equalizer APO reloads on every name created in its config directory, so a
+    // temporary file there costs a second reload. It is made outside, on the
+    // same volume so the move is a rename, unless no such directory is at hand.
+    fs::path dir = temp_dir;
+    if (dir.empty()) {
+        if (const DWORD e = default_temp_dir(&dir); e != ERROR_SUCCESS) return e;
+    }
+    const std::wstring volume = volume_guid_path(target.parent_path());
+    const bool outside = !volume.empty() && _wcsicmp(volume.c_str(), volume_guid_path(dir).c_str()) == 0;
+
+    // Moved in, the file keeps the DACL it was created with, so it is given the
+    // one the file it replaces has, or a file created in the directory would get.
+    std::vector<BYTE> sd;
+    if (outside) {
+        if (const DWORD e = dacl_for(target, &sd); e != ERROR_SUCCESS) return e;
+        fs::create_directories(dir, ec);
+        if (ec) return static_cast<DWORD>(ec.value());
+        // Without the request bit, setting a DACL clears SE_DACL_AUTO_INHERITED.
+        WORD control = 0;
+        DWORD revision = 0;
+        if (GetSecurityDescriptorControl(sd.data(), &control, &revision) && (control & SE_DACL_AUTO_INHERITED)) {
+            SetSecurityDescriptorControl(sd.data(), SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERIT_REQ);
+        }
+    }
+
+    // A name of its own for each process and thread, so writers running at the
+    // same time never delete, open or rename each other's temporary file.
+    fs::path tmp = (outside ? dir : target.parent_path()) / target.filename();
+    tmp += L"." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetCurrentThreadId()) + L".tmp";
 
     // CREATE_ALWAYS on an existing name writes through it, so a .tmp planted as
     // a hard link to another file would be overwritten. Remove the name, which
     // only unlinks it, and create a new file.
     DeleteFileW(tmp.c_str());
-    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE | WRITE_DAC, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     DWORD written = 0;
@@ -138,7 +288,13 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
     const DWORD write_error = ok ? ERROR_SUCCESS : GetLastError();
     const bool flushed = ok && FlushFileBuffers(h);
     const DWORD flush_error = flushed ? ERROR_SUCCESS : GetLastError();
+    const bool secured = !flushed || !outside || SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, sd.data());
+    const DWORD secure_error = secured ? ERROR_SUCCESS : GetLastError();
     CloseHandle(h);
+    if (!secured) {
+        DeleteFileW(tmp.c_str());
+        return secure_error;
+    }
     if (!ok || !flushed) {
         DeleteFileW(tmp.c_str());
         return !ok ? (write_error != ERROR_SUCCESS ? write_error : ERROR_WRITE_FAULT) : flush_error;
@@ -150,8 +306,8 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
             return ERROR_SUCCESS;
         }
         const DWORD e = GetLastError();
-        const bool contended = e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED ||
-                               e == ERROR_LOCK_VIOLATION;
+        const bool contended = e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION ||
+                               (e == ERROR_ACCESS_DENIED && !replace_denied_for_good(path));
         if (!contended || GetTickCount64() >= deadline) {
             DeleteFileW(tmp.c_str());
             return e;
@@ -228,7 +384,25 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
     // conditions hold, only the device can say; `Device: all` and no If reach
     // every device.
     bool every_device = true;
-    int if_depth = 0;
+    unsigned if_depth = 0;
+    // Which Equalizer APO instances a line reaches after Stage lines, as the
+    // values it can have: StageFilterFactory starts every configuration with
+    // stageMatches = capture || !preMix || !postMixInstalled, and a Stage line
+    // replaces that until the end of config.txt. Isotone.txt is for the post-mix
+    // instance of a render device and for capture devices, and must not run a
+    // second time in the pre-mix instance where post-mix is installed too. A
+    // pre-mix instance with no post-mix installed matches by default, but no
+    // Stage line says that without also matching pre-mix where post-mix is
+    // installed, so that case is not modelled. Include is handled before Stage
+    // (FilterEngine's factory order), but every line inside the included file
+    // is skipped where the stage does not match.
+    struct Reach {
+        bool can_match, can_skip;
+    };
+    Reach post_mix{true, false}, capture{true, false}, pre_mix{false, true};
+    const auto stage_is_default = [&] {
+        return !post_mix.can_skip && !capture.can_skip && !pre_mix.can_match;
+    };
     for (const std::string& line : config_lines(bytes)) {
         const size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
@@ -237,7 +411,11 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
         if (key == "Include") {
             r.includes.push_back(trim(value));
             if (names_isotone_file(value, config_dir)) {
-                (every_device && if_depth == 0 ? r.isotone_included : r.isotone_included_conditionally) = true;
+                if (every_device && if_depth == 0 && stage_is_default()) {
+                    r.isotone_included = true;
+                } else if (post_mix.can_match || capture.can_match || pre_mix.can_match) {
+                    r.isotone_included_conditionally = true;
+                }
             }
             r.peace_included |= names_peace_file(value);
         } else if (key == "Device") {
@@ -246,14 +424,29 @@ ConfigInspection inspect_config_text(const std::string& bytes, const fs::path& c
             every_device = pattern == "all";
         } else if (key == "Stage") {
             r.has_stage_lines = true;
+            // StageFilterFactory: lower case, split on spaces, any part matching.
+            bool post = false, cap = false, pre = false;
+            std::istringstream parts(lower(trim(value)));
+            for (std::string part; std::getline(parts, part, ' ');) {
+                post |= part == "post-mix";
+                cap |= part == "capture";
+                pre |= part == "pre-mix";
+            }
+            // A Stage line some devices or conditions skip leaves either value.
+            const bool everywhere = every_device && if_depth == 0;
+            for (auto [reach, matches] : {std::pair{&post_mix, post}, {&capture, cap}, {&pre_mix, pre}}) {
+                *reach = everywhere ? Reach{matches, !matches}
+                                    : Reach{reach->can_match || matches, reach->can_skip || !matches};
+            }
         } else if (key == "If" || key == "ElseIf" || key == "Else" || key == "EndIf") {
             r.has_conditionals = true;
             if (key == "If") ++if_depth;
             if (key == "EndIf" && if_depth > 0) --if_depth;
         }
     }
-    r.attached_by_isotone =
-        ends_with(bytes, attach_block("\r\n")) || ends_with(bytes, attach_block("\n"));
+    r.open_ifs = if_depth;
+    r.stage_changed_at_end = !stage_is_default();
+    r.attached_by_isotone = attached_block_size(bytes) != 0;
     return r;
 }
 
@@ -294,7 +487,8 @@ AttachResult attach_include(const fs::path& config_dir) {
         CloseHandle(h);
         return r;
     }
-    const std::string block = attach_block(newline_of(original));
+    const std::string block =
+        attach_block(newline_of(original), r.before.open_ifs, r.before.stage_changed_at_end);
     LARGE_INTEGER zero{};
     DWORD written = 0;
     const bool ok = SetFilePointerEx(h, zero, nullptr, FILE_END) &&
@@ -320,17 +514,14 @@ DWORD detach_include(const fs::path& config_dir, bool* removed) {
         return e;
     }
 
-    std::string block;
-    for (const char* nl : {"\r\n", "\n"}) {
-        if (ends_with(bytes, attach_block(nl))) block = attach_block(nl);
-    }
-    if (block.empty()) {
+    const size_t block = attached_block_size(bytes);
+    if (block == 0) {
         CloseHandle(h);
         return inspect_config_text(bytes, config_dir).isotone_included ? ERROR_INVALID_DATA : ERROR_SUCCESS;
     }
 
     LARGE_INTEGER end{};
-    end.QuadPart = static_cast<LONGLONG>(bytes.size() - block.size());
+    end.QuadPart = static_cast<LONGLONG>(bytes.size() - block);
     const bool ok = SetFilePointerEx(h, end, nullptr, FILE_BEGIN) && SetEndOfFile(h) &&
                     FlushFileBuffers(h);
     const DWORD e = ok ? ERROR_SUCCESS : GetLastError();

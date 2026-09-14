@@ -27,6 +27,7 @@
 #include <audioclient.h>
 #include <audioenginebaseapo.h>
 #include <audiomediatype.h>
+#include <psapi.h>
 #include <sddl.h>
 
 #include <chrono>
@@ -34,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <functional>
 #include <limits>
 #include <string>
@@ -254,6 +256,7 @@ struct ChildProbe {
     bool host_isoapo = false;         // a wrapper whose own child is IsoAPO
     HRESULT nested_init = S_OK;       // what the IsoAPO it hosts said to Initialize
     int refuse_formats = 0;   // refuse this many format probes first
+    bool refuse_locked = false;   // refuse every probe while this child is locked
     std::wstring endpoint;
     CLSID init_clsid{};
 };
@@ -324,6 +327,9 @@ public:
     HRESULT __stdcall IsInputFormatSupported(IAudioMediaType*, IAudioMediaType* requested,
                                              IAudioMediaType** supported) override {
         ++g_child.format_calls;
+        if (g_child.refuse_locked && g_child.locks > g_child.unlocks) {
+            return APOERR_FORMAT_NOT_SUPPORTED;
+        }
         if (g_child.refuse_formats > 0) {
             --g_child.refuse_formats;
             return APOERR_FORMAT_NOT_SUPPORTED;
@@ -580,6 +586,38 @@ int main(int argc, char** argv) {
     StringFromGUID2(endpoint, endpoint_upper, 64);
     const std::wstring name = isotone::win::mapping_name(L"Local\\", endpoint_upper);
 
+    {
+        // IsoAPO passes PKEY_AudioEndpoint_GUID, braced upper case; the UI and
+        // the tools may have a bare GUID or the full IMMDevice::GetId string.
+        // Every form names the region and the saved file IsoAPO uses, and the
+        // braced form's names are the ones existing regions and files have.
+        std::wstring lower = endpoint_upper;
+        for (wchar_t& c : lower) c = static_cast<wchar_t>(std::towlower(c));
+        const std::wstring bare_upper = std::wstring(endpoint_upper).substr(1, 36);
+        const std::wstring expected_name = L"Local\\IsoAPO." + lower;
+        const std::wstring expected_file = L"C:\\dir\\" + lower + L".bin";
+        bool same = name == expected_name &&
+                    isotone::win::persisted_state_path(L"C:\\dir", endpoint_upper) == expected_file;
+        for (const std::wstring& form : {bare_upper, lower.substr(1, 36), L"{0.0.0.00000000}." + lower,
+                                         L"{0.0.1.00000000}." + std::wstring(endpoint_upper),
+                                         L" \t" + std::wstring(endpoint_upper) + L"\r\n",
+                                         L"  {0.0.0.00000000}.{" + bare_upper + L"} "}) {
+            same &= isotone::win::mapping_name(L"Local\\", form) == expected_name &&
+                    isotone::win::persisted_state_path(L"C:\\dir", form) == expected_file;
+        }
+        check(same, "braced, bare and full device ID forms of the GUID name the same region and file");
+        bool refused = true;
+        for (const std::wstring& form : {std::wstring(L"not-a-guid"), std::wstring(L"{0.0.0.00000000}"),
+                                         std::wstring(L"{0.0.0.00000000}.") + bare_upper,
+                                         bare_upper + L"0", std::wstring(L"")}) {
+            refused &= isotone::win::mapping_name(L"Local\\", form).empty() &&
+                       isotone::win::persisted_state_path(L"C:\\dir", form).empty();
+        }
+        isotone::win::SharedMapping nameless;
+        check(refused && nameless.create_or_open(L"") == ERROR_INVALID_NAME && nameless.open(L"") == ERROR_INVALID_NAME,
+              "text that is not an endpoint GUID names no region and no file");
+    }
+
     isotone::win::SharedMapping ui;
     check(ui.open(name) == ERROR_FILE_NOT_FOUND, "no region exists before Initialize");
 
@@ -800,6 +838,24 @@ int main(int argc, char** argv) {
     }
 
     {
+        // Negotiated at 480 frames, handed 1024 valid frames a call.
+        Apo capped;
+        create_apo(factory, &capped);
+        capped.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        APO_CONNECTION_DESCRIPTOR small_max = descriptor;
+        small_max.u32MaxFrameCount = 480;
+        APO_CONNECTION_DESCRIPTOR* small_max_in[1] = {&small_max};
+        const HRESULT locked = capped.config->LockForProcess(1, small_max_in, 1, small_max_in);
+        const std::vector<float> out = SUCCEEDED(locked) ? run_sine(capped.rt, buffer, 1000.0, 48000) : std::vector<float>{};
+        const double level = out.empty() ? 0.0 : settled_db(out, 1000.0);
+        std::printf("  %-66s %+.3f dB\n", "level with 1024 frames a call locked at 480", level);
+        check(SUCCEEDED(locked) && std::abs(level + 6.0) < 0.01,
+              "a buffer longer than the negotiated maximum is processed in full");
+        if (SUCCEEDED(locked)) capped.config->UnlockForProcess();
+        capped.release();
+    }
+
+    {
         isotone::EqState poison = peaking_state(1000.0, -6.0, 1.0);
         poison.preamp_db = std::numeric_limits<double>::quiet_NaN();
         poison.bands[0].gain_db = std::numeric_limits<double>::infinity();
@@ -900,22 +956,29 @@ int main(int argc, char** argv) {
     std::printf("\nengine restart while the UI holds the region\n");
 
     // Simulate a claim left behind by an audiodg process that died without
-    // unlocking. A different process id marks it as stale.
-    ring->writer = (uint64_t{GetCurrentProcessId() + 4} << 32) | 1u;
+    // unlocking, first from another process id, then from the id this process
+    // has now: Windows reuses process ids, so the new audiodg can get the dead
+    // one's.
+    for (const uint64_t stale : {(uint64_t{GetCurrentProcessId() + 4} << 32) | 1u,
+                                 (uint64_t{GetCurrentProcessId()} << 32) | 1u}) {
+        ring->writer = stale;
 
-    Apo third;
-    check(create_apo(factory, &third), "a new instance after the old ones are gone");
-    check_hr(third.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init)),
-             "Initialize finds the region the UI kept alive");
-    check_hr(third.config->LockForProcess(1, descriptors, 1, descriptors), "LockForProcess");
-    run_sine(third.rt, buffer, 1000.0, size_t{kMaxFrames} * (isotone::kRingStaleClaims + 2));
-    check((ring->writer >> 32) == GetCurrentProcessId(),
-          "a ring claim left by a dead engine process is taken over once its writes have stopped");
-    captured = run_sine(third.rt, buffer, 1000.0, 48000);
-    check(std::abs(settled_db(captured, 1000.0) + 6.0) < 0.01,
-          "the new instance starts on the UI's block, not the file seed");
-    check_hr(third.config->UnlockForProcess(), "UnlockForProcess");
-    third.release();
+        Apo third;
+        check(create_apo(factory, &third), "a new instance after the old ones are gone");
+        check_hr(third.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init)),
+                 "Initialize finds the region the UI kept alive");
+        check_hr(third.config->LockForProcess(1, descriptors, 1, descriptors), "LockForProcess");
+        run_sine(third.rt, buffer, 1000.0, size_t{kMaxFrames} * (isotone::kRingStaleClaims + 2));
+        check(ring->writer != stale && ring->writer != 0,
+              (stale >> 32) == GetCurrentProcessId()
+                  ? "a stale ring claim carrying this process's id is taken over too"
+                  : "a ring claim left by a dead engine process is taken over once its writes have stopped");
+        captured = run_sine(third.rt, buffer, 1000.0, 48000);
+        check(std::abs(settled_db(captured, 1000.0) + 6.0) < 0.01,
+              "the new instance starts on the UI's block, not the file seed");
+        check_hr(third.config->UnlockForProcess(), "UnlockForProcess");
+        third.release();
+    }
 
     // ------------------------------------------------------------------
     std::printf("\n7.1.4, wider than the trim table\n");
@@ -1010,6 +1073,257 @@ int main(int argc, char** argv) {
         wide.release();
         _aligned_free(wide_buffer);
         if (wide_media) wide_media->Release();
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\na state written for 7.1 on other layouts\n");
+    {
+        // 7.1 surround is L R C LFE RL RR SL SR. A -12 dB band on SL, a -6 dB
+        // trim and polarity on SR, a 1 ms delay on SL, C muted, each by 7.1's
+        // index. On 5.1 surround (L R C LFE SL SR) SL and SR are channels 4 and
+        // 5; read by index, channels 6 and 7 do not exist and nothing would play.
+        isotone::EqState s71 = peaking_state(1000.0, -12.0, 1.0);
+        s71.layout_channels = 8;
+        s71.layout_speaker_mask = 0x63F;
+        s71.bands[0].channels = isotone::ChannelMask{1} << 6;
+        s71.channel_gain_db[7] = -6.0;
+        s71.speakers.inverted = isotone::ChannelMask{1} << 7;
+        s71.speakers.delay_ms[6] = 1.0;
+        s71.speakers.muted = isotone::ChannelMask{1} << 2;
+
+        constexpr UINT32 kSix = 6;
+        UNCOMPRESSEDAUDIOFORMAT six_format = format;
+        six_format.dwSamplesPerFrame = kSix;
+        six_format.dwChannelMask = 0x60F;
+        IAudioMediaType* six_media = nullptr;
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&six_format, &six_media);
+        std::vector<float> six(size_t{kMaxFrames} * kSix);
+        APO_CONNECTION_DESCRIPTOR six_d = descriptor;
+        six_d.pBuffer = reinterpret_cast<UINT_PTR>(six.data());
+        six_d.pFormat = six_media;
+        APO_CONNECTION_DESCRIPTOR* six_ds[1] = {&six_d};
+
+        // One second of a 0.5 amplitude 1 kHz sine on every channel.
+        const auto run_six = [&](IAudioProcessingObjectRT* rt) {
+            std::vector<float> out;
+            for (size_t position = 0; position < 48000; position += kMaxFrames) {
+                for (UINT32 i = 0; i < kMaxFrames; ++i) {
+                    const float v = static_cast<float>(
+                        0.5 * std::sin(2.0 * kPi * 1000.0 * static_cast<double>(position + i) / kRate));
+                    for (UINT32 c = 0; c < kSix; ++c) six[i * kSix + c] = v;
+                }
+                APO_CONNECTION_PROPERTY in{};
+                in.pBuffer = reinterpret_cast<UINT_PTR>(six.data());
+                in.u32ValidFrameCount = kMaxFrames;
+                in.u32BufferFlags = BUFFER_VALID;
+                in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+                APO_CONNECTION_PROPERTY o = in;
+                APO_CONNECTION_PROPERTY* ins[1] = {&in};
+                APO_CONNECTION_PROPERTY* outs[1] = {&o};
+                rt->APOProcess(1, ins, 1, outs);
+                out.insert(out.end(), six.begin(), six.end());
+            }
+            return out;
+        };
+        const auto level_of = [](const std::vector<float>& out, UINT32 channels, UINT32 c) {
+            const size_t frames = out.size() / channels;
+            const size_t skip = frames / 2;
+            return 20.0 * std::log10(std::max(
+                amplitude_at(out.data() + skip * channels + c, frames - skip, channels, 1000.0, kRate) / 0.5, 1e-10));
+        };
+        // The sign of a channel against channel 0, which nothing inverts.
+        const auto polarity_of = [](const std::vector<float>& out, UINT32 channels, UINT32 c) {
+            double dot = 0.0;
+            for (size_t f = out.size() / channels / 2; f < out.size() / channels; ++f) {
+                dot += static_cast<double>(out[f * channels + c]) * out[f * channels];
+            }
+            return dot < 0.0 ? -1 : 1;
+        };
+        // `from_start`: the stream has just locked, so the delay lines start silent.
+        const auto on_six = [&](const std::vector<float>& out, double band_db, bool from_start) {
+            bool ok = out.size() == size_t{48000 / kMaxFrames + 1} * kMaxFrames * kSix;
+            const double sl_band = peaking_db(1000.0, band_db, 1.0, 1000.0, kRate);
+            for (UINT32 c = 0; c < kSix && ok; ++c) {
+                const double expected = c == 2 ? -200.0 : c == 4 ? sl_band : c == 5 ? -6.0 : 0.0;
+                const double level = level_of(out, kSix, c);
+                std::printf("  %-66s %+.3f dB\n", ("level on channel " + std::to_string(c)).c_str(), level);
+                ok = c == 2 ? level < -120.0 : std::abs(level - expected) < 0.01;
+            }
+            // 1 ms is 48 samples at 48 kHz: SL is silent until then, L is not.
+            bool delayed = true;
+            for (size_t f = 0; f < 48 && ok && from_start; ++f) delayed &= out[f * kSix + 4] == 0.0f;
+            delayed &= !from_start || (out[50 * kSix + 4] != 0.0f && out[10 * kSix] != 0.0f);
+            return ok && delayed && polarity_of(out, kSix, 5) == -1 && polarity_of(out, kSix, 4) == 1;
+        };
+
+        Apo apo;
+        create_apo(factory, &apo);
+        apo.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        ui_write(shared, s71);
+        const HRESULT locked = apo.config->LockForProcess(1, six_ds, 1, six_ds);
+        check(SUCCEEDED(locked) && six_media != nullptr && on_six(run_six(apo.rt), -12.0, true),
+              "on 5.1 each value locks onto its speaker: SL band and delay, SR trim and polarity, C mute");
+        isotone::EqState s71_nine = s71;
+        s71_nine.bands[0].gain_db = -9.0;
+        ui_write(shared, s71_nine);
+        run_six(apo.rt);   // the band's change settles in this second
+        check(SUCCEEDED(locked) && on_six(run_six(apo.rt), -9.0, false),
+              "a block written for 7.1 while playing 5.1 lands the same way");
+        if (SUCCEEDED(locked)) apo.config->UnlockForProcess();
+        apo.release();
+        if (six_media) six_media->Release();
+
+        // Stereo has none of SL, SR or C: the band plays nowhere, which an empty
+        // mask read as all channels would not, and the trim, polarity and mute go.
+        Apo stereo;
+        create_apo(factory, &stereo);
+        stereo.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        ui_write(shared, s71);
+        const HRESULT stereo_locked = stereo.config->LockForProcess(1, descriptors, 1, descriptors);
+        const std::vector<float> out = SUCCEEDED(stereo_locked) ? run_sine(stereo.rt, buffer, 1000.0, 48000)
+                                                                : std::vector<float>{};
+        const double l = out.empty() ? -1.0 : 20.0 * std::log10(amplitude_at(out.data() + 24000 * kChannels, 24000, kChannels, 1000.0, kRate));
+        const double r = out.empty() ? -1.0 : 20.0 * std::log10(amplitude_at(out.data() + 24000 * kChannels + 1, 24000, kChannels, 1000.0, kRate));
+        std::printf("  %-66s %+.3f / %+.3f dB\n", "levels on stereo, L / R", l, r);
+        check(!out.empty() && std::abs(l) < 0.01 && std::abs(r) < 0.01 && polarity_of(out, kChannels, 1) == 1,
+              "on stereo the values for speakers it lacks are dropped and play nowhere");
+        if (SUCCEEDED(stereo_locked)) stereo.config->UnlockForProcess();
+        stereo.release();
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\nformats the header describes\n");
+    {
+        // Upstream EqualizerAPO::LockForProcess, render side: the output
+        // format's mask, the input's when the output gives none.
+        UNCOMPRESSEDAUDIOFORMAT back51 = format;
+        back51.dwSamplesPerFrame = 6;
+        back51.dwChannelMask = 0x3F;
+        UNCOMPRESSEDAUDIOFORMAT side51 = back51;
+        side51.dwChannelMask = 0x60F;
+        UNCOMPRESSEDAUDIOFORMAT nomask = back51;
+        nomask.dwChannelMask = 0;
+        IAudioMediaType* back_media = nullptr;
+        IAudioMediaType* side_media = nullptr;
+        IAudioMediaType* nomask_media = nullptr;
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&back51, &back_media);
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&side51, &side_media);
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&nomask, &nomask_media);
+        std::vector<float> six_buffer(size_t{kMaxFrames} * 6);
+        const auto mask_after_lock = [&](IAudioMediaType* in_media, IAudioMediaType* out_media) {
+            APO_CONNECTION_DESCRIPTOR in_d = descriptor;
+            in_d.pBuffer = reinterpret_cast<UINT_PTR>(six_buffer.data());
+            in_d.pFormat = in_media;
+            APO_CONNECTION_DESCRIPTOR out_d = in_d;
+            out_d.pFormat = out_media;
+            APO_CONNECTION_DESCRIPTOR* ins[1] = {&in_d};
+            APO_CONNECTION_DESCRIPTOR* outs[1] = {&out_d};
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+            const HRESULT locked = apo.config->LockForProcess(1, ins, 1, outs);
+            const uint32_t mask = SUCCEEDED(locked) ? shared->hdr.speaker_mask : 0xFFFFFFFFu;
+            if (SUCCEEDED(locked)) apo.config->UnlockForProcess();
+            apo.release();
+            return mask;
+        };
+        const uint32_t from_output = mask_after_lock(back_media, side_media);
+        const uint32_t from_input = mask_after_lock(back_media, nomask_media);
+        std::printf("  %-66s 0x%x / 0x%x\n", "mask for 0x3F in, 0x60F out / 0x3F in, 0 out", from_output, from_input);
+        check(from_output == 0x60F && from_input == 0x3F,
+              "alone, the speaker mask is the output's, or the input's when the output has none");
+        if (back_media) back_media->Release();
+        if (side_media) side_media->Release();
+        if (nomask_media) nomask_media->Release();
+    }
+    {
+        // A 48 kHz stereo instance owns the ring; a 16 kHz 5.1 instance on the
+        // same endpoint locks and runs beside it. The header must keep saying
+        // what the ring carries.
+        UNCOMPRESSEDAUDIOFORMAT comms = format;
+        comms.fFramesPerSecond = 16000.0f;
+        comms.dwSamplesPerFrame = 6;
+        comms.dwChannelMask = 0x60F;
+        IAudioMediaType* comms_media = nullptr;
+        CreateAudioMediaTypeFromUncompressedAudioFormat(&comms, &comms_media);
+        std::vector<float> comms_buffer(size_t{kMaxFrames} * 6);
+        APO_CONNECTION_DESCRIPTOR comms_d = descriptor;
+        comms_d.pBuffer = reinterpret_cast<UINT_PTR>(comms_buffer.data());
+        comms_d.pFormat = comms_media;
+        APO_CONNECTION_DESCRIPTOR* comms_ds[1] = {&comms_d};
+
+        const auto process_comms = [&](IAudioProcessingObjectRT* rt) {
+            APO_CONNECTION_PROPERTY in{};
+            in.pBuffer = reinterpret_cast<UINT_PTR>(comms_buffer.data());
+            in.u32ValidFrameCount = kMaxFrames;
+            in.u32BufferFlags = BUFFER_VALID;
+            in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+            APO_CONNECTION_PROPERTY o = in;
+            APO_CONNECTION_PROPERTY* ins[1] = {&in};
+            APO_CONNECTION_PROPERTY* outs[1] = {&o};
+            rt->APOProcess(1, ins, 1, outs);
+        };
+        const auto header_is = [&](uint32_t rate, uint32_t channels, uint32_t mask) {
+            return shared->hdr.sample_rate == rate && shared->hdr.channels == channels &&
+                   shared->hdr.speaker_mask == mask && ring->channels == channels;
+        };
+
+        Apo media_apo, comms_apo;
+        create_apo(factory, &media_apo);
+        create_apo(factory, &comms_apo);
+        media_apo.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        comms_apo.apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init));
+        const HRESULT media_locked = media_apo.config->LockForProcess(1, descriptors, 1, descriptors);
+        const HRESULT comms_locked = comms_apo.config->LockForProcess(1, comms_ds, 1, comms_ds);
+        run_sine(media_apo.rt, buffer, 1000.0, kMaxFrames);
+        process_comms(comms_apo.rt);
+        check(SUCCEEDED(media_locked) && SUCCEEDED(comms_locked) && header_is(48000, 2, 0x3),
+              "a second instance's lock does not overwrite the ring owner's format");
+        media_apo.config->UnlockForProcess();
+        process_comms(comms_apo.rt);
+        check(header_is(16000, 6, 0x60F), "the instance that takes the ring over publishes its own format");
+        comms_apo.config->UnlockForProcess();
+        media_apo.release();
+        comms_apo.release();
+        if (comms_media) comms_media->Release();
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\nreal-time path\n");
+    {
+        // A region no one has written yet, so every ring page starts untouched.
+        // A full lap of the ring must not fault a page in on the audio thread:
+        // LockForProcess touches them first.
+        GUID fresh_endpoint{};
+        CoCreateGuid(&fresh_endpoint);
+        wchar_t fresh_text[64] = {};
+        StringFromGUID2(fresh_endpoint, fresh_text, 64);
+        FakeEndpointProperties fresh_properties(fresh_text);
+        APOInitSystemEffects fresh_init = init;
+        fresh_init.pAPOEndpointProperties = &fresh_properties;
+        Apo apo;
+        create_apo(factory, &apo);
+        apo.apo->Initialize(sizeof(fresh_init), reinterpret_cast<BYTE*>(&fresh_init));
+        const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, descriptors);
+        for (size_t i = 0; i < sample_count; ++i) buffer[i] = 0.25f;
+        APO_CONNECTION_PROPERTY in{};
+        in.pBuffer = reinterpret_cast<UINT_PTR>(buffer);
+        in.u32ValidFrameCount = kMaxFrames;
+        in.u32BufferFlags = BUFFER_VALID;
+        in.u32Signature = APO_CONNECTION_PROPERTY_SIGNATURE;
+        APO_CONNECTION_PROPERTY o = in;
+        APO_CONNECTION_PROPERTY* ins[1] = {&in};
+        APO_CONNECTION_PROPERTY* outs[1] = {&o};
+        const UINT32 lap_calls = isotone::kRingCapacityFrames / kMaxFrames + 2;
+        PROCESS_MEMORY_COUNTERS before{}, after{};
+        GetProcessMemoryInfo(GetCurrentProcess(), &before, sizeof(before));
+        for (UINT32 call = 0; call < lap_calls; ++call) apo.rt->APOProcess(1, ins, 1, outs);
+        GetProcessMemoryInfo(GetCurrentProcess(), &after, sizeof(after));
+        const DWORD faults = after.PageFaultCount - before.PageFaultCount;
+        std::printf("  %-66s %lu\n", "page faults over a full lap of the ring, stereo", static_cast<unsigned long>(faults));
+        check(SUCCEEDED(locked) && faults < 8, "a full lap of the ring takes no page faults on the audio thread");
+        apo.config->UnlockForProcess();
+        apo.release();
     }
 
     // ------------------------------------------------------------------
@@ -1113,26 +1427,56 @@ int main(int argc, char** argv) {
                   what);
         }
 
-        // A child that declines one probed format is kept: the engine goes on to
-        // try another.
+        // Upstream EqualizerAPO::IsInputFormatSupported drops a child that
+        // refuses a format and answers with the base class, so the endpoint
+        // keeps its EQ.
         record(clsid_text(kTestChildClsid));
+        g_child = ChildProbe{};
+        g_child.refuse_formats = 1000;
+        r = run();
+        check(r.format == S_OK && SUCCEEDED(r.lock) && g_child.locks == 0 && g_child.processes == 0 &&
+                  std::abs(r.level - alone) < 0.01,
+              "a child that refuses every format is dropped and IsoAPO runs alone");
+        // The base class's LockForProcess asks again after the child locked.
+        g_child = ChildProbe{};
+        g_child.refuse_locked = true;
+        r = run();
+        check(SUCCEEDED(r.lock) && g_child.locks == 1 && g_child.unlocks == 1 && g_child.processes == 0 &&
+                  std::abs(r.level - alone) < 0.01,
+              "a child that refuses the format it locked is unlocked, dropped, and IsoAPO runs alone");
+        // While locked the audio thread may be running the child: a refused
+        // probe then must not release it.
         g_child = ChildProbe{};
         {
             Apo apo;
             create_apo(factory, &apo);
             apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, descriptors);
             g_child.refuse_formats = 1;
             IAudioMediaType* supported = nullptr;
             const HRESULT refused = apo.apo->IsInputFormatSupported(media, media, &supported);
             if (supported) supported->Release();
-            const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, descriptors);
             const std::vector<float> out = run_sine(apo.rt, buffer, 1000.0, 48000);
             const double level = out.empty() ? 0.0 : settled_db(out, 1000.0);
             apo.config->UnlockForProcess();
             apo.release();
-            check(refused == APOERR_FORMAT_NOT_SUPPORTED && SUCCEEDED(locked) && g_child.locks == 1 &&
-                      std::abs(level - with_child) < 0.01,
-                  "a child that declines one probed format is kept");
+            check(SUCCEEDED(locked) && FAILED(refused) && std::abs(level - with_child) < 0.01,
+                  "a child that refuses a probe while IsoAPO is locked keeps running");
+        }
+
+        // A second unlock must not give the child an unbalanced unlock.
+        g_child = ChildProbe{};
+        {
+            Apo apo;
+            create_apo(factory, &apo);
+            apo.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            const HRESULT locked = apo.config->LockForProcess(1, descriptors, 1, descriptors);
+            const HRESULT unlocked = apo.config->UnlockForProcess();
+            const HRESULT again = apo.config->UnlockForProcess();
+            apo.release();
+            check(SUCCEEDED(locked) && SUCCEEDED(unlocked) && again == APOERR_ALREADY_UNLOCKED &&
+                      g_child.locks == 1 && g_child.unlocks == 1,
+                  "UnlockForProcess while unlocked is refused before the child is touched");
         }
 
         // A silent buffer holds whatever was there before; the child must see
@@ -1237,9 +1581,22 @@ int main(int argc, char** argv) {
             const HRESULT retried = apo.config->LockForProcess(1, descriptors, 1, six_outs);
             if (SUCCEEDED(retried)) apo.config->UnlockForProcess();
             apo.release();
-            if (six_media) six_media->Release();
             check(FAILED(refused) && kept && SUCCEEDED(retried) && g_child.locks == 2,
                   "a child that fails LockForProcess on a channel change it negotiated fails the lock and is kept");
+
+            // Locks the channel change, then refuses it when the base class asks:
+            // dropped, and IsoAPO alone cannot change the channel count.
+            g_child = ChildProbe{};
+            g_child.refuse_locked = true;
+            Apo changer;
+            create_apo(factory, &changer);
+            changer.apo->Initialize(sizeof(child_init), reinterpret_cast<BYTE*>(&child_init));
+            const HRESULT changed = changer.config->LockForProcess(1, descriptors, 1, six_outs);
+            const HRESULT unlocked = changer.config->UnlockForProcess();
+            changer.release();
+            if (six_media) six_media->Release();
+            check(FAILED(changed) && unlocked == APOERR_ALREADY_UNLOCKED && g_child.locks == 1 && g_child.unlocks == 1,
+                  "a child that refuses the channel change it locked fails the lock, leaving nothing locked");
         }
 
         // A second lock while locked must not touch the child the audio thread
@@ -1353,6 +1710,28 @@ int main(int argc, char** argv) {
             in->initialized = in->apo.apo->Initialize(sizeof(in->init), reinterpret_cast<BYTE*>(&in->init));
         };
 
+        {
+            // A block converted without init_param_block has no magic, version
+            // or size; the file must still be one IsoAPO reads.
+            const std::wstring guid = fresh();
+            isotone::ParamBlock raw{};
+            isotone::EqState s = peaking_state(1000.0, -6.0, 1.0);
+            s.layout_channels = 8;
+            s.layout_speaker_mask = 0x63F;
+            isotone::to_param_block(s, &raw);
+            raw.hdr.channels = 2;
+            raw.hdr.speaker_mask = 0x3;
+            written.push_back(isotone::win::persisted_state_path(dir, guid));
+            const DWORD saved = isotone::win::write_persisted_state(written.back(), raw);
+            isotone::ParamBlock back{};
+            const isotone::win::PersistedRead read = isotone::win::read_persisted_state(written.back(), &back);
+            check(saved == ERROR_SUCCESS && read == isotone::win::PersistedRead::Loaded && back.band_count == 1 &&
+                      back.bands[0].gain_db == -6.0f,
+                  "a block written without an initialised header is read back with its parameters");
+            check(back.layout_channels == 8 && back.layout_speaker_mask == 0x63F && back.hdr.channels == 0 &&
+                      back.hdr.speaker_mask == 0,
+                  "the saved file keeps the layout the state was written for, not the host's format");
+        }
         {
             const std::wstring guid = fresh();
             check(persist(guid, isotone::EqState{}), "a flat state is saved for a device");

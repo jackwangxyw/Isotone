@@ -84,6 +84,29 @@ void debug_line(const wchar_t* text, HRESULT hr) {
 
 std::atomic<uint32_t> g_instance_serial{0};
 
+// The high half of this process's ring tokens (audio_ring.h). Not the process
+// id: Windows reuses ids, and a claim left by a crashed audiodg whose id the new
+// audiodg got would read as held by an instance in this process and never be
+// taken over. The performance counter when the first instance is made, mixed
+// with the id, differs between the two. QueryPerformanceCounter cannot fail on
+// Windows XP or later.
+std::atomic<uint32_t> g_process_nonce{0};
+
+uint32_t process_nonce() {
+    uint32_t nonce = g_process_nonce.load();
+    if (nonce != 0) return nonce;
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    uint64_t x = static_cast<uint64_t>(counter.QuadPart) + uint64_t{GetCurrentProcessId()} * 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;   // splitmix64's finaliser
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    const uint32_t candidate = static_cast<uint32_t>(x >> 32) | 1u;   // never 0, which means unset
+    // A sibling made at the same moment may have set it first; theirs stands.
+    g_process_nonce.compare_exchange_strong(nonce, candidate);
+    return g_process_nonce.load();
+}
+
 // Nonzero while this thread is inside create_child. An IsoAPO initialized then
 // is being created by its own child, directly or through other APOs, and each
 // would create the other until the stack runs out. A plain int: no dynamic
@@ -103,7 +126,7 @@ IsoApo::IsoApo(IUnknown* outer) : CBaseAudioProcessingObject(regPostMixPropertie
                  ? outer
                  : reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));
     InterlockedIncrement(&instanceCount);
-    ring_token_ = (uint64_t{GetCurrentProcessId()} << 32) | (g_instance_serial.fetch_add(1) + 1);
+    ring_token_ = (uint64_t{process_nonce()} << 32) | (g_instance_serial.fetch_add(1) + 1);
 }
 
 IsoApo::~IsoApo() {
@@ -179,9 +202,11 @@ HRESULT IsoApo::Initialize(UINT32 size, BYTE* data) {
         // Re-initializing would drop the child while the audio thread may be using it.
         return APOERR_ALREADY_INITIALIZED;
     }
-    // Same acceptance as upstream EqualizerAPO::Initialize, which reads the
-    // endpoint GUID the same way. APOInitSystemEffects2 begins with the same
-    // fields, so it is read through the smaller struct.
+    // Upstream EqualizerAPO::Initialize accepts only APOInitSystemEffects, and
+    // reads the endpoint GUID the same way. APOInitSystemEffects2 is accepted
+    // too, read through the smaller struct it begins with; audiodg passes it only
+    // to an APO that implements IAudioSystemEffects2, which IsoAPO does not, so
+    // only the self test sends it.
     if (size != sizeof(APOInitSystemEffects) && size != sizeof(APOInitSystemEffects2)) {
         return E_INVALIDARG;
     }
@@ -340,10 +365,22 @@ HRESULT IsoApo::IsInputFormatSupported(IAudioMediaType* output, IAudioMediaType*
     }
 
     // With a child, the child decides: it may convert the format, and IsoAPO
-    // processes whatever it outputs. A refusal is an answer to this one probe,
-    // not a failure: the engine goes on to try other formats, so the child stays.
+    // processes whatever it outputs. A child that refuses is dropped and IsoAPO
+    // answers alone, as upstream EqualizerAPO::IsInputFormatSupported does, so
+    // the endpoint keeps its EQ. This includes the probe the base class's
+    // LockForProcess makes after the child has locked, so the child is unlocked
+    // first. While locked the audio thread may be running the child, so it stays.
     if (child_ != nullptr) {
-        return child_->IsInputFormatSupported(output, requested, supported);
+        const HRESULT hr = child_->IsInputFormatSupported(output, requested, supported);
+        if (SUCCEEDED(hr) || locked_) {
+            return hr;
+        }
+        debug_line(L"child APO refused a format; running without it", hr);
+        if (child_locked_) {
+            child_cfg_->UnlockForProcess();
+            child_locked_ = false;
+        }
+        reset_child();
     }
 
     IAudioMediaType* base_supported = nullptr;
@@ -416,7 +453,6 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
         return E_INVALIDARG;
     }
 
-    bool child_locked = false;
     if (child_cfg_ != nullptr) {
         hr = child_cfg_->LockForProcess(inputCount, inputs, outputCount, outputs);
         if (FAILED(hr) && format.dwSamplesPerFrame != out_format.dwSamplesPerFrame) {
@@ -430,7 +466,7 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
             debug_line(L"child APO failed LockForProcess; running without it", hr);
             reset_child();
         } else {
-            child_locked = true;
+            child_locked_ = true;
         }
     }
     // IsoAPO processes the child's output, so with a child the output format is
@@ -442,10 +478,13 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
         return APOERR_FORMAT_NOT_SUPPORTED;
     }
 
+    // Asks IsInputFormatSupported again, which drops a child that refuses now.
+    // A dropped child's channel change then fails here, in IsoAPO's own answer.
     hr = CBaseAudioProcessingObject::LockForProcess(inputCount, inputs, outputCount, outputs);
     if (FAILED(hr)) {
-        if (child_locked) {
+        if (child_locked_) {
             child_cfg_->UnlockForProcess();
+            child_locked_ = false;
         }
         return hr;
     }
@@ -453,14 +492,16 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
     // From here on a failure must leave nothing locked.
     struct Undo {
         IsoApo* apo;
-        bool child;
         bool armed = true;
         ~Undo() {
             if (!armed) return;
-            if (child && apo->child_cfg_ != nullptr) apo->child_cfg_->UnlockForProcess();
+            if (apo->child_locked_) {
+                apo->child_cfg_->UnlockForProcess();
+                apo->child_locked_ = false;
+            }
             apo->CBaseAudioProcessingObject::UnlockForProcess();
         }
-    } undo{this, child_locked};
+    } undo{this};
 
     // Windows tears down and recreates an APO whenever the device format
     // changes, so every LockForProcess is a cold start (plan 5.4).
@@ -469,10 +510,19 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
     input_channels_ = SUCCEEDED(inputs[0]->pFormat->GetUncompressedAudioFormat(&in_format))
                           ? in_format.dwSamplesPerFrame
                           : channels_;
-    // A stream that reports no mask gets upstream's default for its channel
-    // count, which is also what the processor assumes for 0.
-    const uint32_t speaker_mask =
-        format.dwChannelMask != 0 ? format.dwChannelMask : isotone::default_speaker_mask(channels_);
+    // Upstream EqualizerAPO::LockForProcess, render side: the output format's
+    // mask, or the input's when the output reports none and the channel counts
+    // match. A stream that reports no mask gets upstream's default for its
+    // channel count, which is also what the processor assumes for 0.
+    uint32_t speaker_mask = out_format.dwChannelMask;
+    if (speaker_mask == 0 && in_format.dwSamplesPerFrame == out_format.dwSamplesPerFrame) {
+        speaker_mask = in_format.dwChannelMask;
+    }
+    if (speaker_mask == 0) {
+        speaker_mask = isotone::default_speaker_mask(channels_);
+    }
+    sample_rate_ = static_cast<uint32_t>(format.fFramesPerSecond);
+    speaker_mask_ = speaker_mask;
     // A region Initialize could not make or open is tried again here.
     if (!mapping_.is_open()) {
         open_shared_region();
@@ -492,16 +542,20 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
     // from_param_block reuses this capacity, so applying a block on the audio
     // thread never allocates.
     state_.bands.reserve(isotone::kParamMaxBands);
+    // Per-channel values follow their speaker onto this stream's layout when the
+    // state was written for another.
+    isotone::remap_channels(&state_, isotone::ChannelLayout{channels_, speaker_mask_});
 
     processor_.initialize(format.fFramesPerSecond, channels_, max_frames, isotone::kParamMaxBands, speaker_mask);
     processor_.set_target(state_);
     processor_.reset();
 
     if (mapping_.is_open()) {
-        isotone::host_publish_format(mapping_.params(), static_cast<uint32_t>(format.fFramesPerSecond),
-                                     channels_, speaker_mask, isotone::HostState::Running);
         ring_.set_channels(channels_);
-        ring_.claim(ring_token_);
+        // Here rather than on the audio thread, whose first lap through a
+        // pagefile-backed ring would fault every page in.
+        ring_.prefault();
+        claim_ring();
     }
 
     undo.armed = false;
@@ -509,10 +563,26 @@ HRESULT IsoApo::lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT
     return S_OK;
 }
 
+// The header's format is the ring owner's: the UI draws the ring's spectrum at
+// that rate and parses imports for that layout. Every instance on the endpoint
+// locks (a 16 kHz communications stream beside 48 kHz media), but only the
+// owner publishes. Real-time safe.
+void IsoApo::claim_ring() {
+    if (ring_.claim(ring_token_) && ring_.owns()) {
+        isotone::host_publish_format(mapping_.params(), sample_rate_, channels_, speaker_mask_,
+                                     isotone::HostState::Running);
+    }
+}
+
 HRESULT IsoApo::UnlockForProcess() {
+    // First, so a second unlock does not reach the child: it would be unbalanced.
+    if (!locked_) {
+        return APOERR_ALREADY_UNLOCKED;
+    }
     locked_ = false;
     ring_.release();
-    if (child_cfg_ != nullptr) {
+    if (child_locked_) {
+        child_locked_ = false;
         const HRESULT hr = child_cfg_->UnlockForProcess();
         if (FAILED(hr)) debug_line(L"child APO failed UnlockForProcess", hr);
     }
@@ -534,11 +604,12 @@ void IsoApo::APOProcess(UINT32 inputCount, APO_CONNECTION_PROPERTY** inputs,
             isotone::param_block_read(shared, &block_)) {
             applied_seq_ = block_.hdr.seq;
             isotone::from_param_block(block_, &state_);
+            isotone::remap_channels(&state_, isotone::ChannelLayout{channels_, speaker_mask_});
             processor_.set_target(state_);
         }
         // Another instance may have released the ring since this one locked.
         if (!ring_.owns()) {
-            ring_.claim(ring_token_);
+            claim_ring();
         }
     }
 
@@ -581,8 +652,13 @@ void IsoApo::APOProcess(UINT32 inputCount, APO_CONNECTION_PROPERTY** inputs,
 
     // Silence goes through the processor too: its delay lines and filters keep
     // moving, so a delayed tail plays out and nothing stale waits in them for
-    // the next sound.
-    processor_.process_interleaved(out, frames);
+    // the next sound. The processor takes at most the negotiated maximum a
+    // call, and a longer buffer is processed in pieces rather than skipped.
+    const UINT32 piece = processor_.max_frames();
+    for (UINT32 done = 0; done < frames; done += piece) {
+        processor_.process_interleaved(out + static_cast<size_t>(done) * channels_,
+                                       frames - done < piece ? frames - done : piece);
+    }
     ring_.write(out, channels_, frames);
 
     bool audible = !silent;

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 #include "config_files.h"
 
@@ -23,22 +24,62 @@ std::string device_key(const std::string& id) {
     return k;
 }
 
+// Held from reading Isotone.txt to replacing it, so no other writer, in this
+// process or another, for this Windows user or another, replaces it in between
+// and loses this writer's blocks or has its own lost. The lock is an exclusive
+// open of Isotone.txt.lock in the same directory: the directory's ACL decides
+// who may take it, as it decides who may write Isotone.txt, and the handle
+// closes if the process dies. The file is never written or deleted, so after it
+// is first created, taking the lock changes nothing Equalizer APO watches.
+class DirectoryLock {
+public:
+    ~DirectoryLock() {
+        if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
+    }
+    DWORD acquire(const std::filesystem::path& path, DWORD wait_ms) {
+        const ULONGLONG deadline = GetTickCount64() + wait_ms;
+        for (;;) {
+            h_ = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (h_ != INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+            const DWORD e = GetLastError();
+            if (e != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) return e;
+            Sleep(1);
+        }
+    }
+
+private:
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+};
+
+// Longer than one write holds the lock, which includes up to 200 ms of
+// write_file_atomically waiting out a reader.
+constexpr DWORD kLockWaitMs = 1000;
+
 }  // namespace
 
-CompatWriter::CompatWriter(std::filesystem::path config_dir, WriteCoalescer::Clock clock)
-    : dir_(std::move(config_dir)),
-      path_(dir_ / kIsotoneFileName),
-      coalescer_([this](const std::string& bytes) { return write(bytes); }, kCompatWriteInterval, std::move(clock)) {}
+CompatWriter::CompatWriter(std::filesystem::path config_dir)
+    : dir_(std::move(config_dir)), path_(dir_ / kIsotoneFileName) {}
 
 CompatWriter::~CompatWriter() {
-    coalescer_.flush();
+    flush();
 }
 
-DWORD CompatWriter::write(const std::string& bytes) {
+DWORD CompatWriter::flush() {
+    return pending_ ? write() : ERROR_SUCCESS;
+}
+
+DWORD CompatWriter::write() {
+    pending_ = true;
+    std::filesystem::path lock_path = path_;
+    lock_path += L".lock";
+    DirectoryLock lock;
+    if (const DWORD e = lock.acquire(lock_path, kLockWaitMs); e != ERROR_SUCCESS) return e;
+
     std::string current;
     const DWORD e = read_file_bytes(path_, &current);
     if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) return e;
-    std::string out = bytes;
+    std::string out = text_;
     if (current != on_disk_) {
         // Another writer changed the file: keep its blocks, and put this
         // writer's devices back on top.
@@ -48,8 +89,18 @@ DWORD CompatWriter::write(const std::string& bytes) {
         }
         text_ = out;
     }
+    // What is on disk decides whether to write, not what this writer last
+    // wrote: another writer, or a deleted file, may have changed it since.
+    if (e == ERROR_SUCCESS && out == current) {
+        on_disk_ = current;
+        pending_ = false;
+        return ERROR_SUCCESS;
+    }
     const DWORD w = write_file_atomically(path_, out);
-    if (w == ERROR_SUCCESS) on_disk_ = out;
+    if (w == ERROR_SUCCESS) {
+        on_disk_ = out;
+        pending_ = false;
+    }
     return w;
 }
 
@@ -81,26 +132,35 @@ void remember(std::vector<std::pair<std::string, std::optional<DeviceConfig>>>* 
     mine->emplace_back(key, std::move(device));
 }
 
+// Routing is written for a channel count and bands for a rate, and a guess at
+// either is wrong on the device: there is no safe default. No stream has more
+// than kMaxApoChannels channels.
+bool has_format(const DeviceConfig& device) {
+    return device.layout.channels != 0 && device.layout.channels <= kMaxApoChannels && device.sample_rate > 0.0 &&
+           std::isfinite(device.sample_rate);
+}
+
 }  // namespace
 
 DWORD CompatWriter::apply(const DeviceConfig& device) {
+    if (!has_format(device)) return ERROR_INVALID_PARAMETER;
     remember(&mine_, device_key(device.endpoint_guid), device);
     text_ = update_isotone_file(text_, device);
-    return coalescer_.submit(text_);
+    pending_ = true;
+    return ERROR_SUCCESS;
 }
 
 DWORD CompatWriter::persist(const DeviceConfig& device) {
+    if (!has_format(device)) return ERROR_INVALID_PARAMETER;
     remember(&mine_, device_key(device.endpoint_guid), device);
     text_ = update_isotone_file(text_, device);
-    const DWORD e = coalescer_.submit(text_);
-    return e != ERROR_SUCCESS ? e : coalescer_.flush();
+    return write();
 }
 
 DWORD CompatWriter::remove(const std::string& endpoint_guid) {
     remember(&mine_, device_key(endpoint_guid), std::nullopt);
     text_ = remove_device(text_, endpoint_guid);
-    const DWORD e = coalescer_.submit(text_);
-    return e != ERROR_SUCCESS ? e : coalescer_.flush();
+    return write();
 }
 
 }  // namespace isotone::compat

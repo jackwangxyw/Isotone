@@ -31,8 +31,6 @@
 namespace isotone {
 namespace {
 
-constexpr double kMinWidth = 1e-4;
-
 double db_to_linear(double db) { return std::pow(10.0, db / 20.0); }
 
 // One step of a one-pole smoother: current moves a fixed fraction of the
@@ -75,6 +73,35 @@ bool effective_enabled(const Band& in) {
 }
 
 }  // namespace
+
+Band effective_band(const Band& band) {
+    Band b = band;
+    b.enabled = effective_enabled(band);
+    if (std::isfinite(b.gain_db)) {
+        b.gain_db = std::clamp(b.gain_db, -kMaxBandGainDb, kMaxBandGainDb);
+    }
+    if (std::isfinite(b.width) && b.width > 0.0) {
+        const bool shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
+        switch (b.width_mode) {
+            case WidthMode::Q:
+                b.width = std::clamp(b.width, kMinWidth, shelf ? kMaxShelfQ : kMaxQ);
+                break;
+            case WidthMode::BandwidthOct:
+                b.width = std::max(b.width, shelf ? kMinShelfBandwidthOct : kMinBandwidthOct);
+                break;
+            case WidthMode::SlopeDb:
+                // design() reads a slope as a Q for all but shelves, and holds a
+                // shelf's slope where it gets steep.
+                b.width = std::clamp(b.width, kMinWidth, kMaxQ);
+                break;
+        }
+    }
+    return b;
+}
+
+double effective_level_db(double db) {
+    return std::isfinite(db) ? std::clamp(db, kMinLevelDb, kMaxLevelDb) : 0.0;
+}
 
 uint32_t control_block_frames(double sample_rate) {
     if (!(sample_rate > 0.0)) {
@@ -143,6 +170,7 @@ void Processor::initialize(double sample_rate, uint32_t channels, uint32_t max_f
     recompute_bass_filters();
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         bass_target_[c] = bass_cur_[c] = bass_begin_[c] = 0.0;
+        sent_target_[c] = sent_cur_[c] = sent_begin_[c] = 1.0;
         xover_lp_state_[c].clear();
         xover_hp_state_[c].clear();
     }
@@ -211,6 +239,9 @@ void Processor::set_speaker_targets(const SpeakerSetup& sp) {
         const ChannelMask bit = c < kMaskChannels ? ChannelMask{1} << c : 0;
         const double sign = (sp.inverted & bit) != 0 ? -1.0 : 1.0;
         chan_target_[c] = (sp.muted & bit) != 0 ? 0.0 : sign;
+        if (c < routed_) {
+            sent_target_[c] = (sp.muted & bit) != 0 ? 0.0 : 1.0;
+        }
     }
 
     // Delay, rounded to whole samples the way Equalizer APO's DelayFilter does.
@@ -238,6 +269,7 @@ void Processor::begin_crossfade(uint32_t index) {
     BandSlot& b = bands_[index];
     b.old_coeffs = b.coeffs;
     b.old_channels = b.channels;
+    b.only_channels = false;
     b.fade = 0.0;
     b.fade_prev = 0.0;
 
@@ -254,20 +286,34 @@ void Processor::begin_crossfade(uint32_t index) {
     }
 }
 
-void Processor::apply_band(uint32_t index, const Band& in) {
-    BandSlot& b = bands_[index];
-
+Processor::Targets Processor::targets_for(const BandSlot& b, const Band& in) const {
     // A non-finite value keeps the previous target. Fed to a smoother it would
     // make the current value NaN, and a NaN smoother never recovers, so one bad
     // write to shared memory would silence the device until the stream
-    // restarted. Finite values are clamped for the same reason.
-    const double fc      = std::max(clamp_fc(in.fc, sample_rate_), kMinFc);
-    const bool   enabled = effective_enabled(in);
-    const double log_fc  = std::isfinite(fc) ? std::log(fc) : b.log_fc_target;
-    const double log_w   = std::isfinite(in.width) && in.width > 0.0 ? std::log(std::max(in.width, kMinWidth))
-                                                                     : b.log_w_target;
-    const double gain    = std::isfinite(in.gain_db) ? std::clamp(in.gain_db, -kMaxBandGainDb, kMaxBandGainDb)
-                                                     : b.gain_target;
+    // restarted. Finite values are clamped for the same reason. A band with no
+    // earlier value of its own, new or in a slot another band held, has nothing
+    // to keep: the target is NaN, and the band plays nothing until it gets a
+    // value, which is what the curve draws for it.
+    const Band   e    = effective_band(in);
+    const bool   own  = b.occupied && b.id == in.id;
+    const double none = std::numeric_limits<double>::quiet_NaN();
+    const double fc   = std::max(clamp_fc(e.fc, sample_rate_), kMinFc);
+    Targets t;
+    t.log_fc  = std::isfinite(fc) ? std::log(fc) : own ? b.log_fc_target : none;
+    t.log_w   = std::isfinite(e.width) && e.width > 0.0 ? std::log(e.width) : own ? b.log_w_target : none;
+    t.gain    = std::isfinite(e.gain_db) ? e.gain_db : own ? b.gain_target : none;
+    t.enabled = e.enabled && std::isfinite(t.log_fc) && std::isfinite(t.log_w) && std::isfinite(t.gain);
+    return t;
+}
+
+void Processor::apply_band(uint32_t index, const Band& in) {
+    BandSlot& b = bands_[index];
+
+    const Targets t       = targets_for(b, in);
+    const bool    enabled = t.enabled;
+    const double  log_fc  = t.log_fc;
+    const double  log_w   = t.log_w;
+    const double  gain    = t.gain;
 
     // A change of shape that cannot be interpolated: the filter is a different
     // filter afterwards, so its output is crossfaded instead.
@@ -288,6 +334,11 @@ void Processor::apply_band(uint32_t index, const Band& in) {
         b.gain_cur   = gain;
         b.log_w_cur  = log_w;
     }
+    // A value the band gets for the first time starts where it is set, as a
+    // new band's do.
+    if (!std::isfinite(b.log_fc_target)) b.log_fc_cur = log_fc;
+    if (!std::isfinite(b.gain_target))   b.gain_cur   = gain;
+    if (!std::isfinite(b.log_w_target))  b.log_w_cur  = log_w;
 
     if (discontinuous || !b.occupied) {
         const bool was_occupied = b.occupied;
@@ -295,6 +346,18 @@ void Processor::apply_band(uint32_t index, const Band& in) {
         if (!was_occupied) {
             // Nothing was here before, so the outgoing filter is a wire.
             b.old_coeffs = BiquadCoeffs::identity();
+        } else if (b.type == in.type && b.width_mode == in.width_mode && b.shelf_corner == in.shelf_corner &&
+                   b.enabled == enabled && b.id == in.id) {
+            // Only the channels changed. Where the band stays it is the same
+            // filter, so it carries on from its own state, unfaded; restarted
+            // from rest, a resonant band's startup played under the fade.
+            b.only_channels = true;
+            for (uint32_t c = 0; c < channels_; ++c) {
+                if (covers(b.channels, c) && covers(in.channels, c)) {
+                    const size_t k = static_cast<size_t>(index) * channels_ + c;
+                    state_new_[k] = state_old_[k];
+                }
+            }
         }
     }
 
@@ -372,7 +435,7 @@ void Processor::set_target(const EqState& state) {
         const uint32_t i = band_slot_[k];
         BandSlot&   b  = bands_[i];
         const bool shape_differs = !b.occupied || b.type != in.type || b.width_mode != in.width_mode ||
-                                   b.shelf_corner != in.shelf_corner || b.enabled != effective_enabled(in) ||
+                                   b.shelf_corner != in.shelf_corner || b.enabled != targets_for(b, in).enabled ||
                                    b.id != in.id || b.channels != in.channels;
         if (b.fade < 1.0 && shape_differs) {
             b.pending        = true;
@@ -458,6 +521,7 @@ void Processor::reset() {
     bass_active_ = false;
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         bass_cur_[c] = bass_begin_[c] = bass_target_[c];
+        sent_cur_[c] = sent_begin_[c] = sent_target_[c];
         bass_active_ |= bass_target_[c] > 0.0;
         xover_lp_state_[c].clear();
         xover_hp_state_[c].clear();
@@ -562,6 +626,10 @@ void Processor::advance_smoothers(uint32_t frames) {
         if (near_enough(bass_cur_[c], bass_target_[c], 1e-6)) {
             bass_cur_[c] = bass_target_[c];
         }
+        // Moves and ends on its target as speaker mute's post gain does.
+        sent_begin_[c] = sent_cur_[c];
+        approach(sent_cur_[c], sent_target_[c], coef);
+        if (near_enough(sent_cur_[c], sent_target_[c], 1e-6)) sent_cur_[c] = sent_target_[c];
         if (bass_begin_[c] == 0.0 && bass_cur_[c] == 0.0) {
             // Out of use: start from rest next time, so no stale ringing leaks in.
             xover_lp_state_[c].clear();
@@ -596,12 +664,16 @@ bool Processor::is_settling() const {
     if (!near_enough(mute_cur_, mute_target_, 1e-5)) return true;
     if (!near_enough(bypass_cur_, bypass_target_, 1e-5)) return true;
 
+    // A target a band has no value for (NaN) is not moving.
+    const auto moving = [](double cur, double target, double eps) {
+        return std::isfinite(target) && !near_enough(cur, target, eps);
+    };
     for (const BandSlot& b : bands_) {
         if (b.fade < 1.0 || b.pending) return true;
         if (!b.occupied) continue;
-        if (!near_enough(b.log_fc_cur, b.log_fc_target, 1e-6)) return true;
-        if (!near_enough(b.gain_cur,   b.gain_target,   1e-4)) return true;
-        if (!near_enough(b.log_w_cur,  b.log_w_target,  1e-6)) return true;
+        if (moving(b.log_fc_cur, b.log_fc_target, 1e-6)) return true;
+        if (moving(b.gain_cur,   b.gain_target,   1e-4)) return true;
+        if (moving(b.log_w_cur,  b.log_w_target,  1e-6)) return true;
     }
 
     if (!mat_settled_) return true;
@@ -658,6 +730,7 @@ void Processor::stage_bass(float* const* planar, uint32_t offset, uint32_t frame
             // takes what is below. The two halves are in phase at every
             // frequency, so they add back to the input's level.
             const double m  = bass_begin_[c] + (bass_cur_[c] - bass_begin_[c]) * t;
+            const double a  = sent_begin_[c] + (sent_cur_[c] - sent_begin_[c]) * t;
             const double x  = planar[c][offset + n];
             double lo = lr4(xover_lp_, xover_lp_state_[c], x);
             double hi = lr4(xover_hp_, xover_hp_state_[c], x);
@@ -668,7 +741,7 @@ void Processor::stage_bass(float* const* planar, uint32_t offset, uint32_t frame
                 lo = hi = 0.0;
             }
             planar[c][offset + n] = static_cast<float>(std::isfinite(x) ? x + (hi - x) * m : 0.0);
-            sub += lo * m;
+            sub += lo * m * a;
         }
         if (lfe_ >= 0) {
             const uint32_t c = static_cast<uint32_t>(lfe_);
@@ -758,6 +831,10 @@ void Processor::process_block(float* const* planar, uint32_t offset, uint32_t fr
                     // in where it is going, like any other change of shape.
                     const bool in_old = covers(b.old_channels, c);
                     if (!in_new && !in_old) {
+                        continue;
+                    }
+                    if (in_new && in_old && b.only_channels) {
+                        x = step(b.coeffs, state_new_[k].s1, state_new_[k].s2, x);
                         continue;
                     }
                     const double w = b.fade_prev + (b.fade - b.fade_prev) * t;

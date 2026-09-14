@@ -32,6 +32,10 @@ struct ChannelLayout {
     uint32_t speaker_mask = 0x63F;   // KSAUDIO_SPEAKER_7POINT1_SURROUND
 };
 
+// The most channels a stream can have, and so upstream: WAVEFORMATEX counts
+// them in 16 bits. A layout with more is read as having this many.
+inline constexpr uint32_t kMaxApoChannels = 65535;
+
 // Upstream's mask for a stream that reports none (getDefaultChannelMask):
 // mono, stereo, quad, 5.1 surround and 7.1 surround; 0 for any other count.
 uint32_t default_speaker_mask(uint32_t channels);
@@ -43,6 +47,26 @@ uint32_t default_speaker_mask(uint32_t channels);
 // alias for LFE, and SL/SR and RL/RR stand in for each other when the layout
 // has only one pair.
 std::vector<std::string> apo_channel_names(const ChannelLayout& layout);
+
+// Moves the per-channel values of `state` (see EqState::layout_channels) from
+// the layout they were written for to `layout`, the way Equalizer APO resolves
+// a channel name written for one layout on another: each channel is named as
+// apo_channel_names names it on the old layout, and that name is looked up on
+// `layout` as a Channel line's word is. So a speaker keeps its values wherever
+// it sits in the new layout, SL and RL (SR and RR) stand in for each other when
+// the new layout has only one of them, and a numbered channel keeps its index.
+// Values of a channel that resolves to nothing, or to a channel past the new
+// count, are dropped. Values that land on one channel combine as the Equalizer
+// APO backend's lines for them do: band channels, polarity, speaker mute and
+// small speakers as a union, trims and speaker delays as a sum. A band left with
+// no channel is disabled, keeping its mask, since an empty mask would mean all
+// channels; a band on all channels stays on all. The state's layout becomes
+// `layout`.
+//
+// Nothing changes when the state's layout is unspecified (0 channels), when
+// `layout` has 0 channels, or when the two are the same once a mask of 0 is
+// read as the default for its count. Real-time safe: no allocation.
+void remap_channels(EqState* state, const ChannelLayout& layout);
 
 struct ApoParseMessage {
     size_t      line = 0;      // 1-based
@@ -61,6 +85,7 @@ struct ApoParseResult {
     // Device: patterns seen, in order. Empty means the file was unscoped.
     std::vector<std::string> devices;
 
+    // Every line that was not applied as written, `unsupported` lines included.
     std::vector<ApoParseMessage> warnings;
 
     bool ok() const { return warnings.empty(); }
@@ -73,6 +98,7 @@ struct ApoParseResult {
 // warning. A result with warnings may not measure as the file does in
 // Equalizer APO: Device sections for particular devices and If/Else branches
 // are all imported, since only the device the file runs on can decide them.
+// A filter line with OFF and a whole filter after it is read as a disabled band.
 //
 // `layout` must be the layout of the device the result is for. Channel names
 // resolve through it, and mute is recognised only as a Copy line silencing

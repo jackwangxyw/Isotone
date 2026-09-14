@@ -21,7 +21,7 @@ $vs = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools'
 $cm = "$vs\Common7\IDE\CommonExtensions\Microsoft\CMake"
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" -S . -B build -G Ninja"
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" --build build"
-cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\ctest.exe`" --test-dir build"   # core_tests, compat_tests
+cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\ctest.exe`" --test-dir build"   # core, compat, measure, devices tests
 Push-Location build\windows\apo; .\isotone-apo-selftest.exe; Pop-Location      # IsoAPO hosted in-process
 python tools\check_shm_transport.py build                                       # cross-process transport
 python tools\gen_reference.py --check                                          # scipy reference data
@@ -31,8 +31,10 @@ python tools\gen_reference.py --check                                          #
 - GCC (stand-in for the Linux CI job): WinLibs g++ under
   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_*\mingw64\bin`,
   on PATH for the call, building into `build-gcc` with the bundled Ninja.
-- CI (`.github/workflows/ci.yml`) runs MSVC and GCC builds, ctest, the APO self
-  test, the transport check and the reference-data check.
+- CI (`.github/workflows/ci.yml`) runs MSVC and GCC builds with
+  `-DISOTONE_WARNINGS_AS_ERRORS=ON`, ctest, the APO self test, the transport
+  check and the reference-data check. Pass the option locally too, or a warning
+  only shows up in CI.
 
 ## Code map
 
@@ -44,9 +46,10 @@ core/tests/           doctest; reference/ is scipy-generated response data
 windows/transport/    named shared region (ParamBlock + ring), per-endpoint saved state
 windows/apo/          IsoAPO.dll, IsoAPO-selftest.dll (Local\ namespace), isotone-apo-selftest
 windows/compat/       isotone-compat and its library: Isotone.txt, config.txt attach, loopback
-windows/devicetool/   isotone-devicetool: status/install/uninstall/repair/roundtrip; upstream code vendored
+windows/devicetool/   isotone-devicetool: list/status/test/install/uninstall/repair/roundtrip; upstream code vendored
+windows/devices/      isotone_devices: render endpoints, their format and engine, change notifications, engine probe
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
-windows/measure/      isotone-measure: stepped-sine measurement between endpoints
+windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
 tools/                gen_reference.py, check_shm_transport.py
 docs/design/          approved screens and their generator; gitignored, this machine only
 ```

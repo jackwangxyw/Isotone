@@ -42,6 +42,23 @@ void AudioRingWriter::set_channels(uint32_t channels) {
     }
 }
 
+void AudioRingWriter::prefault() const {
+    if (ring_ == nullptr || channels_ == 0) {
+        return;
+    }
+    // 4096 bytes is the smallest page size on any target; larger pages are
+    // touched more than once, which costs nothing.
+    constexpr size_t kPage = 4096;
+    const size_t bytes = size_t{capacity_} * channels_ * sizeof(float);
+    const auto* base = reinterpret_cast<const unsigned char*>(samples_);
+    volatile unsigned char sink = 0;
+    for (size_t offset = 0; offset < bytes; offset += kPage) {
+        sink = base[offset];
+    }
+    sink = base[bytes - 1];
+    static_cast<void>(sink);
+}
+
 bool AudioRingWriter::claim(uint64_t token) {
     if (ring_ == nullptr || token == 0) {
         return false;

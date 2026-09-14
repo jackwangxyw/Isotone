@@ -55,6 +55,9 @@ bool to_param_block(const EqState& state, ParamBlock* out) {
     out->bypass = state.bypass ? 1u : 0u;
     out->mute   = state.mute ? 1u : 0u;
     out->preamp_db = static_cast<float>(state.preamp_db);
+    out->layout_channels = state.layout_channels;
+    out->layout_speaker_mask = state.layout_speaker_mask;
+    std::memset(out->reserved, 0, sizeof(out->reserved));
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         out->channel_gain_db[c] = static_cast<float>(state.channel_gain_db[c]);
     }
@@ -105,6 +108,8 @@ void from_param_block(const ParamBlock& block, EqState* out) {
     out->bypass = block.bypass != 0;
     out->mute   = block.mute != 0;
     out->preamp_db = block.preamp_db;
+    out->layout_channels = block.layout_channels;
+    out->layout_speaker_mask = block.layout_speaker_mask;
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
         out->channel_gain_db[c] = block.channel_gain_db[c];
     }

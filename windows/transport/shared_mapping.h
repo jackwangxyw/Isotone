@@ -23,11 +23,17 @@ namespace isotone::win {
 // inherited.
 inline constexpr wchar_t kMappingSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GRGW;;;AU)";
 
-// "<object_namespace>IsoAPO.{guid}" with the GUID lower-cased. Kernel object
-// names are case-sensitive, and the two sides learn the GUID in different
-// cases: PKEY_AudioEndpoint_GUID, which the APO reads, is upper case, while
-// IMMDevice::GetId, which the UI sees, is lower case.
-std::wstring mapping_name(const wchar_t* object_namespace, const std::wstring& endpoint_guid);
+// The endpoint GUID as "{guid}", lower case, from any form a caller has it in:
+// braced (PKEY_AudioEndpoint_GUID, which the APO reads, upper case), bare, or
+// inside the full device ID IMMDevice::GetId returns ("{0.0.0.00000000}.{guid}",
+// lower case), in either case and with surrounding whitespace. Empty when
+// `text` is none of these.
+std::wstring canonical_endpoint_guid(const std::wstring& text);
+
+// "<object_namespace>IsoAPO.{guid}" with canonical_endpoint_guid's GUID, since
+// kernel object names are case-sensitive. Empty when `endpoint` is not an
+// endpoint GUID.
+std::wstring mapping_name(const wchar_t* object_namespace, const std::wstring& endpoint);
 
 class SharedMapping {
 public:
@@ -45,7 +51,8 @@ public:
                          void* context = nullptr);
 
     // Client side. Opens an existing region; ERROR_FILE_NOT_FOUND means no
-    // engine has created it yet.
+    // engine has created it yet. An empty name, which mapping_name returns for
+    // text that is not a GUID, is ERROR_INVALID_NAME.
     DWORD open(const std::wstring& name);
 
     void close();

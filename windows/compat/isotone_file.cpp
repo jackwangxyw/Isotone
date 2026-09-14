@@ -23,6 +23,7 @@ constexpr char kHeader[] =
 constexpr char kBypassMarker[]   = "# Isotone: bypass";
 constexpr char kMuteMarker[]     = "# Isotone: mute";
 constexpr char kSpeakersMarker[] = "# Isotone: speakers";
+constexpr char kLayoutMarker[]   = "# Isotone: layout";
 constexpr char kRoutingMarker[]  = "# Isotone: routing";
 constexpr char kOutputMarker[]   = "# Isotone: output";
 constexpr char kEndMarker[]      = "# Isotone: end";
@@ -179,6 +180,7 @@ std::string routing_lines(const SpeakerSetup& sp, const ChannelLayout& layout,
         std::string small, sum;
         for (uint32_t c = 0; c < n; ++c) {
             if (static_cast<int>(c) == lfe || (sp.small_speakers & (ChannelMask{1} << c)) == 0) continue;
+            if ((sp.muted & (ChannelMask{1} << c)) != 0) continue;   // a muted speaker sends the sub nothing
             small += " " + names[c];
             sum += (sum.empty() ? "" : "+") + std::string("1*") + names[c];
         }
@@ -196,35 +198,48 @@ std::string routing_lines(const SpeakerSetup& sp, const ChannelLayout& layout,
     return out;
 }
 
+// Polarity, speaker mute and delay by channel name, so on any layout each acts
+// on the speaker it was set for, where Equalizer APO resolves that name, and on
+// nothing where the name resolves to no channel; remap_channels moves IsoAPO's
+// values the same way. Values that resolve to one channel combine as
+// remap_channels says: the Copy line's assignments to one target are the same,
+// so the last one wins (a union); the mute selection is a union; Delay lines add.
 std::string output_lines(const SpeakerSetup& sp, const ChannelLayout& layout,
-                         const std::vector<std::string>& names) {
+                         const std::vector<std::string>& names, double sample_rate) {
     std::string out;
-    std::string copy;
+    // Copy resolves a target and its source against the same channels, so a name
+    // this layout lacks becomes a virtual channel, never output, and the constant
+    // its source is read as stays there.
+    std::string copy, muted;
     for (uint32_t c = 0; c < layout.channels && c < kMaskChannels; ++c) {
         const ChannelMask bit = ChannelMask{1} << c;
-        if ((sp.muted & bit) != 0) {
-            copy += " " + names[c] + "=0";
-        } else if ((sp.inverted & bit) != 0) {
-            copy += " " + names[c] + "=-1*" + names[c];
-        }
+        if ((sp.inverted & bit) != 0) copy += " " + names[c] + "=-1*" + names[c];
+        if ((sp.muted & bit) != 0) muted += " " + names[c];
     }
-    if (!copy.empty()) out += "Copy:" + copy + "\n";
+    if (!copy.empty()) out += "Channel: all\nCopy:" + copy + "\n";
+    if (!muted.empty()) out += "Channel:" + muted + "\n" + kSilence + "\n";
 
-    // One Delay line per distinct delay, on the channels that share it.
-    std::vector<std::pair<std::string, std::string>> groups;   // delay text, channel names
-    for (uint32_t c = 0; c < layout.channels; ++c) {
-        const double ms = channel_delay_ms(sp, c, kMaxDelaySeconds * 1000.0);
-        if (ms <= 0.0) continue;
-        const std::string key = num(ms);
-        auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& g) { return g.first == key; });
-        if (it == groups.end()) {
-            groups.push_back({key, names[c]});
-        } else {
-            it->second += " " + names[c];
-        }
+    // Lip sync on every channel, then each speaker's own delay. The processor
+    // rounds their sum to whole samples once and upstream rounds each Delay line,
+    // so at the device's rate each is written as a whole number of samples.
+    const double max_ms = kMaxDelaySeconds * 1000.0;
+    const auto samples = [&](double ms) { return std::floor(ms * sample_rate / 1000.0 + 0.5); };
+    const auto longer = [&](double ms, double than_ms) {
+        return sample_rate > 0.0 ? samples(ms) > samples(than_ms) : ms > than_ms;
+    };
+    const auto ms_text = [&](double ms, double base_ms) {
+        return num(sample_rate > 0.0 ? (samples(ms) - samples(base_ms)) * 1000.0 / sample_rate : ms - base_ms);
+    };
+    // A channel past the per-speaker values has lip sync alone.
+    const double lip_ms = channel_delay_ms(sp, kMaxChannels, max_ms);
+    if (longer(lip_ms, 0.0)) {
+        out += "Channel: all\nDelay: " + ms_text(lip_ms, 0.0) + " ms\n";
     }
-    for (const auto& [ms, channels] : groups) {
-        out += "Channel: " + channels + "\nDelay: " + ms + " ms\n";
+    for (uint32_t c = 0; c < layout.channels && c < kMaxChannels; ++c) {
+        const double ms = channel_delay_ms(sp, c, max_ms);
+        if (longer(ms, lip_ms)) {
+            out += "Channel: " + names[c] + "\nDelay: " + ms_text(ms, lip_ms) + " ms\n";
+        }
     }
     return out;
 }
@@ -272,18 +287,24 @@ static ChannelLayout with_mask(ChannelLayout layout) {
 
 std::string format_device_block(const DeviceConfig& given) {
     DeviceConfig device = given;
+    // A stream has at most kMaxApoChannels channels; a larger count is read as that.
     device.layout = with_mask(given.layout);
+    device.layout.channels = std::min(device.layout.channels, kMaxApoChannels);
+    // Per-channel values written for another layout move to this one's speakers.
+    remap_channels(&device.state, device.layout);
     const SpeakerSetup& sp = device.state.speakers;
     const std::vector<std::string> numbers = channel_numbers(device.layout.channels);
     const std::string layout_guard = kLayoutGuard + std::to_string(device.layout.channels) + "\n";
     std::ostringstream body;
 
-    // Routing and output address channels by position, so they are written for
-    // one channel count and guarded by it: Equalizer APO applies the file to
-    // whatever format the device has when it loads, with or without Isotone
-    // running, and on another count they do nothing.
+    // Routing addresses channels by position, so it is written for one channel
+    // count and guarded by it: Equalizer APO applies the file to whatever format
+    // the device has when it loads, with or without Isotone running, and on
+    // another count it does nothing. The speaker setup's per-speaker values are
+    // for this layout, which is recorded so a reader on another can move them.
     if (!is_default(sp)) {
         body << kSpeakersMarker << " " << format_speaker_setup(sp) << "\n";
+        body << kLayoutMarker << " " << device.layout.channels << " " << hex(device.layout.speaker_mask) << "\n";
     }
     const std::string routing = routing_lines(sp, device.layout, numbers);
     if (!routing.empty()) {
@@ -291,24 +312,30 @@ std::string format_device_block(const DeviceConfig& given) {
     }
 
     // The curve: preamp and bands, which bypass turns off, then the trims,
-    // which it does not. Bands are guarded by the lowest rate they are stable at.
-    EqState eq = device.state;
-    eq.mute = false;
-    eq.bypass = false;
-    eq.speakers = SpeakerSetup{};
+    // which it does not. Bands are guarded by the lowest rate they are stable at;
+    // the preamp is not, since the processor keeps it at every rate and routing
+    // written for the channel count can sum channels into one.
+    EqState bands = device.state;
+    bands.mute = false;
+    bands.bypass = false;
+    bands.speakers = SpeakerSetup{};
+    bands.preamp_db = 0.0;
+    EqState preamp;
+    preamp.preamp_db = device.state.preamp_db;
     EqState trims;
     for (uint32_t c = 0; c < kMaxChannels; ++c) {
-        trims.channel_gain_db[c] = eq.channel_gain_db[c];
-        eq.channel_gain_db[c] = 0.0;
+        trims.channel_gain_db[c] = bands.channel_gain_db[c];
+        bands.channel_gain_db[c] = 0.0;
     }
     ApoFormatOptions options;
     options.layout = device.layout;
     options.sample_rate = device.sample_rate;
-    std::string eq_text = format_apo_config(eq, options);
-    const double rate_floor = device.sample_rate > 0.0 ? lowest_stable_rate(eq, device.sample_rate) : 0.0;
-    if (!eq_text.empty() && rate_floor > 0.0) {
-        eq_text = kRateGuard + num(rate_floor) + "\n" + eq_text + kEndGuard + "\n";
+    std::string band_text = format_apo_config(bands, options);
+    const double rate_floor = device.sample_rate > 0.0 ? lowest_stable_rate(bands, device.sample_rate) : 0.0;
+    if (!band_text.empty() && rate_floor > 0.0) {
+        band_text = kRateGuard + num(rate_floor) + "\n" + band_text + kEndGuard + "\n";
     }
+    const std::string eq_text = format_apo_config(preamp, options) + band_text;
     if (device.state.bypass) {
         body << kBypassMarker << "\n" << comment_lines(eq_text) << kEndMarker << "\n";
     } else {
@@ -316,10 +343,9 @@ std::string format_device_block(const DeviceConfig& given) {
     }
     body << format_apo_config(trims, options);
 
-    const std::string output = output_lines(sp, device.layout, numbers);
+    const std::string output = output_lines(sp, device.layout, apo_channel_names(device.layout), device.sample_rate);
     if (!output.empty()) {
-        body << kOutputMarker << "\n" << layout_guard << "Channel: all\n" << output << kEndGuard << "\nChannel: all\n"
-             << kEndMarker << "\n";
+        body << kOutputMarker << "\n" << output << "Channel: all\n" << kEndMarker << "\n";
     }
 
     if (device.state.mute) {
@@ -412,13 +438,24 @@ std::vector<ParsedDevice> parse_isotone_file(
         std::string curve;
         bool mute = false;
         SpeakerSetup speakers;
+        ChannelLayout written{0, 0};   // 0 channels: not recorded
         const std::string speakers_prefix = std::string(kSpeakersMarker) + " ";
+        const std::string layout_prefix = std::string(kLayoutMarker) + " ";
         for (size_t k = 0; k < lines.size(); ++k) {
             const std::string t = trim(lines[k]);
             if (t.rfind(speakers_prefix, 0) == 0) {
                 std::string error;
                 if (!parse_speaker_setup(t.substr(speakers_prefix.size()), &speakers, &error)) {
                     d.warnings.push_back({k + 2, error});
+                }
+                continue;
+            }
+            if (t.rfind(layout_prefix, 0) == 0) {
+                std::istringstream in(t.substr(layout_prefix.size()));
+                in >> written.channels >> std::hex >> written.speaker_mask;
+                if (!in || !(in >> std::ws).eof()) {
+                    written = ChannelLayout{0, 0};
+                    d.warnings.push_back({k + 2, "cannot read the speaker layout '" + t + "'"});
                 }
                 continue;
             }
@@ -430,7 +467,8 @@ std::vector<ParsedDevice> parse_isotone_file(
                 while (end < lines.size() && trim(lines[end]) != kEndMarker) {
                     const std::string s = trim(lines[end]);
                     if (!(s.rfind("Copy:", 0) == 0 || s.rfind("Channel:", 0) == 0 || s.rfind("Filter:", 0) == 0 ||
-                          s.rfind("Delay:", 0) == 0 || s.rfind(kLayoutGuard, 0) == 0 || s == kEndGuard)) {
+                          s.rfind("Delay:", 0) == 0 || s == kSilence || s.rfind(kLayoutGuard, 0) == 0 ||
+                          s == kEndGuard)) {
                         break;
                     }
                     ++end;
@@ -462,11 +500,19 @@ std::vector<ParsedDevice> parse_isotone_file(
             curve += lines[k] + "\n";
         }
 
-        const ApoParseResult parsed = parse_apo_config(curve, with_mask(layout_for(d.endpoint_guid)));
+        const ChannelLayout layout = with_mask(layout_for(d.endpoint_guid));
+        const ApoParseResult parsed = parse_apo_config(curve, layout);
         d.state = parsed.state;
         d.state.mute = mute;
         d.state.bypass = bypass;
-        d.state.speakers = speakers;
+        // The curve's channel names resolved on this layout; the speaker setup's
+        // values move from the layout they were written for.
+        EqState moved;
+        moved.speakers = speakers;
+        moved.layout_channels = written.channels;
+        moved.layout_speaker_mask = written.speaker_mask;
+        remap_channels(&moved, layout);
+        d.state.speakers = moved.speakers;
         d.warnings.insert(d.warnings.end(), parsed.warnings.begin(), parsed.warnings.end());
         d.unsupported = parsed.unsupported;
         out.push_back(std::move(d));

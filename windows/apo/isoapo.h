@@ -100,6 +100,7 @@ private:
     static void seed_region(isotone::ParamBlock* block, void* self);
     HRESULT lock(UINT32 inputCount, APO_CONNECTION_DESCRIPTOR** inputs, UINT32 outputCount,
                  APO_CONNECTION_DESCRIPTOR** outputs);
+    void claim_ring();
     void create_child(const std::wstring& endpoint_guid, const CLSID& own_clsid, UINT32 size, BYTE* data);
     void reset_child();
 
@@ -110,12 +111,15 @@ private:
     isotone::EqState   state_;
     uint32_t           channels_       = 0;   // processed: the output format's
     uint32_t           input_channels_ = 0;
+    uint32_t           sample_rate_    = 0;   // published with channels_ and speaker_mask_
+    uint32_t           speaker_mask_   = 0;   // while this instance owns the ring
     bool               locked_         = false;
+    bool               child_locked_   = false;
 
     std::wstring                endpoint_guid_;
     isotone::win::SharedMapping mapping_;
     isotone::AudioRingWriter    ring_;
-    uint64_t                    ring_token_  = 0;    // process id << 32 | instance serial
+    uint64_t                    ring_token_  = 0;    // process nonce << 32 | instance serial
     uint32_t                    applied_seq_ = 0;    // seq of the block last applied
     isotone::ParamBlock         block_{};            // private copy taken under the seqlock
 

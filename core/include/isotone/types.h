@@ -96,6 +96,14 @@ struct EqState {
     double            channel_gain_db[kMaxChannels] = {0, 0, 0, 0, 0, 0, 0, 0};
     bool              mute        = false;
     SpeakerSetup      speakers;
+    // The stream layout the per-channel values were written for: band channel
+    // masks, channel_gain_db, and the speakers' delay_ms, inverted, muted and
+    // small_speakers. remap_channels (apo_config.h) moves them to another layout
+    // by speaker role. 0 channels is unspecified: the values are by stream index
+    // on whatever layout plays them. A speaker mask of 0 is the default for the
+    // channel count.
+    uint32_t          layout_channels     = 0;
+    uint32_t          layout_speaker_mask = 0;
 };
 
 // True if `band` contributes to output channel `channel`.

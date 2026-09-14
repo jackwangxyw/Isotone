@@ -4,16 +4,19 @@
 #include "isotone/apo_config.h"
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <regex>
 #include <sstream>
 
 #include "isotone/biquad.h"
 #include "isotone/processor.h"
+#include "isotone/speakers.h"
 
 namespace isotone {
 namespace {
@@ -155,6 +158,7 @@ bool lookup_token(const std::string& token, TokenInfo* out) {
 // units required, searched anywhere in the text after the type.
 struct FilterPatterns {
     std::regex type{R"(^\s*ON\s+([A-Za-z]+))"};
+    std::regex off{R"(^\s*OFF\s+([A-Za-z]+))"};
     std::regex freq{"\\s+Fc\\s*((?:[-+0-9.eE]|\xC2\xA0|\xA0)+)\\s*H\\s*z"};
     std::regex gain{R"(\s+Gain\s*([-+0-9.eE]+)\s*dB)"};
     std::regex q{R"(\s+Q\s*([-+0-9.eE]+))"};
@@ -165,6 +169,25 @@ struct FilterPatterns {
 const FilterPatterns& filter_patterns() {
     static const FilterPatterns patterns;
     return patterns;
+}
+
+// Each run of whitespace as one space. The patterns above match whitespace only
+// with \s+ and \s*, and nothing else in them matches it, so a run is always
+// consumed whole and one space matches wherever a longer run does, with the
+// same captures. It keeps matching linear: std::regex backtracks through a run
+// once for every position in it (50,000 spaces took 78 s with libstdc++, and
+// Visual C++ threw error_complexity at 600).
+std::string collapse_whitespace(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        const bool space = c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+        if (!space) {
+            out += c;
+        } else if (out.empty() || out.back() != ' ') {
+            out += ' ';
+        }
+    }
+    return out;
 }
 
 // Returns false when the words select no channel. Upstream's ChannelFilter
@@ -264,33 +287,114 @@ std::string mute_copy_line(const std::vector<std::string>& names) {
     return line;
 }
 
+// Upstream's StringHelper::split: the parts between `sep`, empty ones dropped.
+std::vector<std::string> split_on(const std::string& s, char sep) {
+    std::vector<std::string> parts;
+    size_t from = 0;
+    for (size_t at = s.find(sep); ; at = s.find(sep, from)) {
+        const std::string part = s.substr(from, at == std::string::npos ? std::string::npos : at - from);
+        if (!part.empty()) parts.push_back(part);
+        if (at == std::string::npos) return parts;
+        from = at + 1;
+    }
+}
+
+// A number as wcstod reads it, which is how upstream reads a Copy factor:
+// leading whitespace, one sign, then a decimal or 0x hexadecimal number, inf or
+// nan; 0 where there is no number. Past double's range it is 0 or infinity.
+double read_like_wcstod(const std::string& s) {
+    const char* p = s.data();
+    const char* const end = s.data() + s.size();
+    while (p < end && (*p == ' ' || (*p >= '\t' && *p <= '\r'))) ++p;
+    const bool negative = p < end && *p == '-';
+    if (p < end && (*p == '+' || *p == '-')) ++p;
+    const bool hex = end - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+    const char* const digits = hex ? p + 2 : p;
+    if (digits < end && (*digits == '+' || *digits == '-')) {
+        return 0.0;   // a second sign, which from_chars would take: no number, or "0x" read as 0
+    }
+    double v = 0.0;
+    const std::from_chars_result r =
+        std::from_chars(digits, end, v, hex ? std::chars_format::hex : std::chars_format::general);
+    if (r.ptr == digits) {
+        return 0.0;   // no number; for "0x" alone, wcstod reads the 0
+    }
+    if (r.ec == std::errc::result_out_of_range) {
+        // The order of magnitude decides which: where the first nonzero digit
+        // is, plus the exponent. Hexadecimal digits are 4 bits and the exponent
+        // is in bits.
+        const char mark = hex ? 'p' : 'e';
+        long long order = 0;
+        bool point = false, significant = false;
+        const char* q = digits;
+        for (; q < r.ptr && std::tolower(static_cast<unsigned char>(*q)) != mark; ++q) {
+            if (*q == '.') {
+                point = true;
+            } else if (significant) {
+                order += point ? 0 : 1;
+            } else if (*q != '0') {
+                significant = true;
+            } else if (point) {
+                --order;
+            }
+        }
+        long long exponent = 0;
+        if (q + 1 < r.ptr) {
+            const char* e = q[1] == '+' ? q + 2 : q + 1;
+            if (e < r.ptr && std::from_chars(e, r.ptr, exponent).ec != std::errc()) {
+                exponent = *e == '-' ? -(1LL << 40) : (1LL << 40);
+            }
+        }
+        v = (hex ? order * 4 : order) + exponent < 0 ? 0.0 : std::numeric_limits<double>::infinity();
+    }
+    return negative ? -v : v;
+}
+
 // True for a Copy line that sets every channel of the layout to zero and does
-// nothing else: the form format_apo_config writes for mute.
+// nothing else, read as upstream reads it (CopyFilterFactory::createFilter,
+// CopyFilter::initialize): words split on spaces, each target=source; a source
+// is summands split on '+', each factor*channel, factor or channel. A lone
+// summand is a factor only if it is "0" or has a period; otherwise it names a
+// channel, and a name that resolves to nothing is added as a constant 1.0. A
+// factor ending in dB is a level. The float factor must be 0.
 bool copy_is_mute(const std::string& params, const std::vector<std::string>& names) {
-    std::istringstream words(params);
-    std::string word;
-    std::vector<std::string> zeroed;
-    while (words >> word) {
-        const size_t eq = word.find('=');
-        if (eq == std::string::npos || eq == 0) {
-            return false;
+    std::vector<bool> zeroed(names.size(), false);
+    const std::vector<std::string> words = split_on(params, ' ');
+    for (const std::string& word : words) {
+        const std::vector<std::string> parts = split_on(word, '=');
+        const std::vector<std::string> summands =
+            parts.size() == 2 ? split_on(parts[1], '+') : std::vector<std::string>{};
+        if (summands.empty()) {
+            return false;   // not an assignment; upstream skips it
         }
-        double v = 1.0;
-        if (!parse_apo_number(word.substr(eq + 1), &v) || v != 0.0 ||
-            word.find_first_not_of("0.+-", eq + 1) != std::string::npos) {
-            return false;
+        for (const std::string& summand : summands) {
+            const std::vector<std::string> factors = split_on(summand, '*');
+            std::string factor;
+            if (factors.size() == 2) {
+                factor = factors[0];
+            } else if (factors.size() == 1 && (factors[0] == "0" || factors[0].find('.') != std::string::npos)) {
+                factor = factors[0];
+            }
+            if (factor.empty()) {
+                return false;   // a factor of 1
+            }
+            double value = read_like_wcstod(factor);
+            if (factor.size() > 2 && to_lower(factor.substr(factor.size() - 2)) == "db") {
+                value = std::pow(10.0, value / 20.0);
+            }
+            // Zero as a float: at most half the smallest float, which rounds down.
+            if (!(std::abs(value) <= std::numeric_limits<float>::denorm_min() / 2.0)) {
+                return false;
+            }
         }
-        zeroed.push_back(to_upper(word.substr(0, eq)));
-    }
-    if (zeroed.empty() || names.empty()) {
-        return false;
-    }
-    for (const std::string& name : names) {
-        if (std::find(zeroed.begin(), zeroed.end(), to_upper(name)) == zeroed.end()) {
-            return false;
+        // The target as upstream resolves it, case-sensitive; a name the layout
+        // does not have is a new channel, and the layout's still plays.
+        const long target = channel_index(parts[0], names);
+        if (target >= 0) {
+            zeroed[static_cast<size_t>(target)] = true;
         }
     }
-    return true;
+    return !names.empty() && std::find(zeroed.begin(), zeroed.end(), false) == zeroed.end();
 }
 
 const char* token_for(FilterType type, bool corner) {
@@ -342,10 +446,112 @@ std::vector<std::string> apo_channel_names(const ChannelLayout& layout) {
         }
         names.push_back(name != nullptr ? name : std::to_string(names.size() + 1));
     }
-    while (names.size() < layout.channels) {
+    while (names.size() < std::min(layout.channels, kMaxApoChannels)) {
         names.push_back(std::to_string(names.size() + 1));
     }
     return names;
+}
+
+namespace {
+
+// The name apo_channel_names gives `channel` of a layout with `mask`, without
+// building it: the speaker bit when the name is a speaker's, 0 when it is the
+// channel's number.
+uint32_t channel_name_bit(uint32_t mask, uint32_t channel) {
+    uint32_t index = 0;
+    for (uint32_t i = 0; i < 31; ++i) {
+        const uint32_t bit = uint32_t{1} << i;
+        if ((mask & bit) == 0 || index++ != channel) {
+            continue;
+        }
+        for (const NamedPosition& p : kNamedPositions) {
+            if (p.bit == bit) return bit;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// channel_index for that name on a layout with `mask` and `channels`: a speaker
+// by its position, with the SL/RL and SR/RR substitutions, or a number by its
+// index. -1 when it resolves to nothing or past the channel count.
+int resolve_channel(uint32_t name_bit, uint32_t channel, uint32_t mask, uint32_t channels) {
+    if (name_bit == 0) {
+        return channel < channels ? static_cast<int>(channel) : -1;
+    }
+    const auto position = [&](uint32_t bit) {
+        return (mask & bit) != 0 ? std::popcount(mask & (bit - 1)) : -1;
+    };
+    int index = position(name_bit);
+    if (index < 0) {
+        if (name_bit == kSpeakerSideLeft) index = position(kSpeakerBackLeft);
+        else if (name_bit == kSpeakerSideRight) index = position(kSpeakerBackRight);
+        else if (name_bit == kSpeakerBackLeft) index = position(kSpeakerSideLeft);
+        else if (name_bit == kSpeakerBackRight) index = position(kSpeakerSideRight);
+    }
+    return index >= 0 && static_cast<uint32_t>(index) < channels ? index : -1;
+}
+
+}  // namespace
+
+void remap_channels(EqState* state, const ChannelLayout& layout) {
+    const uint32_t from_channels = state->layout_channels;
+    if (from_channels == 0 || layout.channels == 0) {
+        return;
+    }
+    const uint32_t from_mask =
+        state->layout_speaker_mask != 0 ? state->layout_speaker_mask : default_speaker_mask(from_channels);
+    const uint32_t to_mask = layout.speaker_mask != 0 ? layout.speaker_mask : default_speaker_mask(layout.channels);
+    if (from_channels == layout.channels && from_mask == to_mask) {
+        return;
+    }
+
+    // Where each channel a mask can name goes, or -1.
+    int to[kMaskChannels];
+    for (uint32_t c = 0; c < kMaskChannels; ++c) {
+        to[c] = resolve_channel(channel_name_bit(from_mask, c), c, to_mask, layout.channels);
+    }
+    const auto moved = [&](ChannelMask mask) {
+        ChannelMask out = 0;
+        for (uint32_t c = 0; c < kMaskChannels; ++c) {
+            if ((mask & (ChannelMask{1} << c)) != 0 && to[c] >= 0) {
+                out |= ChannelMask{1} << static_cast<uint32_t>(to[c]);
+            }
+        }
+        return out;
+    };
+
+    for (Band& band : state->bands) {
+        if (band.channels == kAllChannels) {
+            continue;
+        }
+        const ChannelMask mask = moved(band.channels);
+        if (mask != 0) {
+            band.channels = mask;
+        } else {
+            band.enabled = false;
+        }
+    }
+
+    double gain[kMaxChannels] = {};
+    double delay[kMaxChannels] = {};
+    SpeakerSetup& sp = state->speakers;
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        if (to[c] >= 0 && static_cast<uint32_t>(to[c]) < kMaxChannels) {
+            gain[to[c]] += state->channel_gain_db[c];
+            delay[to[c]] += sp.delay_ms[c];
+        }
+    }
+    for (uint32_t c = 0; c < kMaxChannels; ++c) {
+        state->channel_gain_db[c] = gain[c];
+        sp.delay_ms[c] = delay[c];
+    }
+    sp.inverted = moved(sp.inverted);
+    sp.muted = moved(sp.muted);
+    sp.small_speakers = moved(sp.small_speakers);
+
+    state->layout_channels = layout.channels;
+    state->layout_speaker_mask = layout.speaker_mask;
 }
 
 std::string apo_device_pattern_for_guid(const std::string& guid) {
@@ -366,6 +572,14 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
     ApoParseResult result;
 
     const std::vector<std::string> channel_names = apo_channel_names(layout);
+    if (layout.channels > kMaxApoChannels) {
+        result.warnings.push_back({0, "a layout of " + std::to_string(layout.channels) +
+                                          " channels is more than a stream can carry; read as " +
+                                          std::to_string(kMaxApoChannels)});
+    }
+    // Channel masks, trims and the rest are indexes into this layout.
+    result.state.layout_channels = std::min(layout.channels, kMaxApoChannels);
+    result.state.layout_speaker_mask = layout.speaker_mask;
     ChannelMask current_mask = kAllChannels;
     bool no_channel_selected = false;
     bool stage_matches = true;
@@ -374,8 +588,16 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
 
     std::istringstream in(text);
     std::string line;
-    while (std::getline(in, line)) {
+    // Upstream catches what reading a line throws and skips that line
+    // (FilterEngine::loadConfigFile); std::regex can throw error_complexity or
+    // error_stack for input it finds too costly to match.
+    while (std::getline(in, line)) try {
         ++line_no;
+
+        // Upstream trims the command but not what follows the colon, only a
+        // line's final CR. A Copy line's last source keeps a trailing tab.
+        std::string untrimmed = line;
+        if (!untrimmed.empty() && untrimmed.back() == '\r') untrimmed.pop_back();
 
         // A comment is a line starting with '#' (ExpressionFilterFactory); a '#'
         // later in a line is part of it, as in `Include: EQ #2.txt`.
@@ -464,29 +686,38 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
             }
             continue;
         }
-        if (command == "Copy" && copy_is_mute(params, channel_names)) {
+        if (command == "Copy" && copy_is_mute(untrimmed.substr(untrimmed.find(':') + 1), channel_names)) {
             result.state.mute = true;
             continue;
         }
         if (command.rfind("Filter", 0) == 0) {
             const FilterPatterns& re = filter_patterns();
-            const std::string norm = normalise_decimal(params);
+            const std::string norm = collapse_whitespace(normalise_decimal(params));
             std::smatch m;
+            bool enabled = true;
             if (!std::regex_search(norm, m, re.type)) {
-                // "Filter 3: OFF ..." and "Filter 3: None" are legal ways to say
-                // nothing is here; upstream ignores anything else too, silently.
-                std::istringstream ps(norm);
-                std::string first;
-                ps >> first;
-                if (!first.empty() && first != "OFF" && first != "None") {
-                    result.warnings.push_back({line_no, "filter line does not start with ON and a type, ignored"});
+                // "Filter 3: OFF ..." with a filter after it is one upstream skips;
+                // it is read here as a disabled band, which plays the same.
+                if (!std::regex_search(norm, m, re.off)) {
+                    // "Filter 3: OFF" and "Filter 3: None" are legal ways to say
+                    // nothing is here; upstream ignores anything else too, silently.
+                    std::istringstream ps(norm);
+                    std::string first;
+                    ps >> first;
+                    if (!first.empty() && first != "OFF" && first != "None") {
+                        result.warnings.push_back({line_no, "filter line does not start with ON and a type, ignored"});
+                    }
+                    continue;
                 }
-                continue;
+                enabled = false;
             }
             const std::string type_token = m.str(1);
             // Everything after the type token, which is what upstream's regexes
             // are applied to.
             const std::string rest = m.suffix().str();
+            if (!enabled && trim(rest).empty()) {
+                continue;   // "Filter 3: OFF PK": nothing to keep
+            }
             TokenInfo info{};
             if (!lookup_token(type_token, &info)) {
                 if (type_token != "None") {
@@ -504,7 +735,7 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
             band.id = next_id++;
             band.type = info.type;
             band.channels = current_mask;
-            band.enabled = true;
+            band.enabled = enabled;
 
             if (!std::regex_search(rest, m, re.freq)) {
                 result.warnings.push_back({line_no, "no Fc in Hz in filter line"});
@@ -600,8 +831,14 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& la
             continue;
         }
 
-        // Everything else is preserved but not modelled.
+        // Everything else is preserved but not modelled, and reported, once: an
+        // If line already was.
         result.unsupported.push_back(line);
+        if (result.warnings.empty() || result.warnings.back().line != line_no) {
+            result.warnings.push_back({line_no, "'" + command + "' is not imported, line skipped"});
+        }
+    } catch (const std::regex_error& e) {
+        result.warnings.push_back({line_no, std::string("line too costly to read, skipped: ") + e.what()});
     }
 
     return result;
@@ -702,28 +939,24 @@ std::string format_apo_config(const EqState& state, const ApoFormatOptions& opti
             out << "\n";
         }
 
-        for (const Band& b : state.bands) {
-            if (b.channels != mask) {
+        for (const Band& given : state.bands) {
+            if (given.channels != mask) {
                 continue;
             }
-            // A band that cannot be written as numbers is left out; one with no
-            // width is off, as it is in the processor.
+            // As the processor plays it: width clamped, and off with no width.
+            const Band b = effective_band(given);
+            // A band that cannot be written as numbers is left out.
             if (!std::isfinite(b.fc) || !std::isfinite(b.gain_db) || !std::isfinite(b.width)) {
                 continue;
             }
-            if (!b.enabled || b.width <= 0.0) {
-                if (options.write_disabled_as_none) {
-                    out << "Filter " << index++ << ": OFF " << token(b) << " Fc " << fc_text(b) << " Hz";
-                    if (type_uses_gain(b.type)) {
-                        out << " Gain " << format_double(written_gain(b)) << " dB";
-                    }
-                    out << width_text(b, width_rate) << "\n";
-                }
+            if (!b.enabled && !options.write_disabled_as_none) {
                 continue;
             }
 
+            // A disabled band is the same line with OFF, which upstream skips and
+            // the parser reads back as a disabled band.
             const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
-            out << "Filter " << index++ << ": ON " << token(b) << " ";
+            out << "Filter " << index++ << ": " << (b.enabled ? "ON " : "OFF ") << token(b) << " ";
             if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
                 out << format_double(written_slope(b)) << " dB ";
             }

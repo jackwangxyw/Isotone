@@ -12,13 +12,31 @@
 
 namespace isotone::win {
 
-std::wstring mapping_name(const wchar_t* object_namespace, const std::wstring& endpoint_guid) {
-    std::wstring name = object_namespace;
-    name += L"IsoAPO.";
-    for (wchar_t c : endpoint_guid) {
-        name += static_cast<wchar_t>(std::towlower(c));
+std::wstring canonical_endpoint_guid(const std::wstring& text) {
+    const size_t first = text.find_first_not_of(L" \t\r\n\f\v");
+    if (first == std::wstring::npos) return {};
+    std::wstring s = text.substr(first, text.find_last_not_of(L" \t\r\n\f\v") - first + 1);
+    // A device ID: "{flow and state}." before the braced GUID.
+    if (s.size() > 38) {
+        const size_t prefix = s.size() - 38;
+        if (prefix < 3 || s.front() != L'{' || s.compare(prefix - 2, 2, L"}.") != 0) return {};
+        s.erase(0, prefix);
     }
-    return name;
+    if (s.size() == 36) s = L"{" + s + L"}";
+    // {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+    if (s.size() != 38 || s.front() != L'{' || s.back() != L'}') return {};
+    for (size_t i = 1; i < 37; ++i) {
+        const wchar_t c = static_cast<wchar_t>(std::towlower(s[i]));
+        const bool dash = i == 9 || i == 14 || i == 19 || i == 24;
+        if (dash ? c != L'-' : !((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) return {};
+        s[i] = c;
+    }
+    return s;
+}
+
+std::wstring mapping_name(const wchar_t* object_namespace, const std::wstring& endpoint) {
+    const std::wstring guid = canonical_endpoint_guid(endpoint);
+    return guid.empty() ? std::wstring() : object_namespace + (L"IsoAPO." + guid);
 }
 
 DWORD SharedMapping::create_or_open(const std::wstring& name, void (*seed)(ParamBlock* block, void* context),
@@ -70,6 +88,10 @@ DWORD SharedMapping::create_or_open(const std::wstring& name, void (*seed)(Param
 
 DWORD SharedMapping::open(const std::wstring& name) {
     close();
+    // An empty name would open or create an unnamed mapping no one else can reach.
+    if (name.empty()) {
+        return ERROR_INVALID_NAME;
+    }
     handle_ = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name.c_str());
     if (handle_ == nullptr) {
         return GetLastError();

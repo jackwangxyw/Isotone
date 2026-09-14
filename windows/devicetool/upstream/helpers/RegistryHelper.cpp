@@ -65,13 +65,13 @@ wstring RegistryHelper::readValue(wstring key, wstring valuename)
 
 	if (status != ERROR_SUCCESS)
 	{
-		delete buf;
+		delete[] buf;   // Isotone modification: was delete on new[]
 		throw RegistryException(L"Error while reading registry value " + key + L"\\" + valuename + L": " + StringHelper::getSystemErrorString(status));
 	}
 
 	if (bufSize < sizeof(wchar_t))   // Isotone modification: an empty value would index buf[-1]
 	{
-		delete buf;
+		delete[] buf;   // Isotone modification: was delete on new[]
 		return result;
 	}
 
@@ -79,7 +79,7 @@ wstring RegistryHelper::readValue(wstring key, wstring valuename)
 	if (buf[bufSize / sizeof(wchar_t) - 1] == L'\0')
 		bufSize -= sizeof(wchar_t);
 	result = wstring((wchar_t*)buf, (wstring::size_type)bufSize / sizeof(wchar_t));
-	delete buf;
+	delete[] buf;   // Isotone modification: was delete on new[]
 
 	return result;
 }
@@ -113,12 +113,12 @@ unsigned long RegistryHelper::readDWORDValue(wstring key, wstring valuename)
 
 	if (status != ERROR_SUCCESS)
 	{
-		delete buf;
+		delete[] buf;   // Isotone modification: was delete on new[]
 		throw RegistryException(L"Error while reading registry value " + key + L"\\" + valuename + L": " + StringHelper::getSystemErrorString(status));
 	}
 
 	result = ((unsigned long*)buf)[0];
-	delete buf;
+	delete[] buf;   // Isotone modification: was delete on new[]
 
 	return result;
 }
@@ -126,6 +126,9 @@ unsigned long RegistryHelper::readDWORDValue(wstring key, wstring valuename)
 vector<wstring> RegistryHelper::readMultiValue(wstring key, wstring valuename)
 {
 	vector<wstring> result;
+
+	if (dryRun && dryRun->readMultiValue(key, valuename, &result))   // Isotone modification
+		return result;
 
 	HKEY keyHandle = openKey(key, KEY_QUERY_VALUE | KEY_WOW64_64KEY);
 
@@ -152,7 +155,7 @@ vector<wstring> RegistryHelper::readMultiValue(wstring key, wstring valuename)
 
 	if (status != ERROR_SUCCESS)
 	{
-		delete buf;
+		delete[] buf;   // Isotone modification: was delete on new[]
 		throw RegistryException(L"Error while reading registry value " + key + L"\\" + valuename + L": " + StringHelper::getSystemErrorString(status));
 	}
 
@@ -174,7 +177,7 @@ vector<wstring> RegistryHelper::readMultiValue(wstring key, wstring valuename)
 	if (length > start)
 		result.push_back(wstring(buf + start, length - start));
 
-	delete buf;
+	delete[] buf;   // Isotone modification: was delete on new[]
 
 	return result;
 }
@@ -253,7 +256,7 @@ void RegistryHelper::writeMultiValue(wstring key, wstring valuename, wstring val
 
 	LSTATUS status = RegSetValueExW(keyHandle, valuename.c_str(), 0, REG_MULTI_SZ, (const BYTE*)data, (DWORD)((value.size() + 2) * sizeof(wchar_t)));
 
-	delete data;
+	delete[] data;   // Isotone modification: was delete on new[]
 
 	RegCloseKey(keyHandle);
 
@@ -283,7 +286,7 @@ void RegistryHelper::writeMultiValue(wstring key, wstring valuename, vector<wstr
 
 	LSTATUS status = RegSetValueExW(keyHandle, valuename.c_str(), 0, REG_MULTI_SZ, (const BYTE*)data, (DWORD)(size * sizeof(wchar_t)));
 
-	delete data;
+	delete[] data;   // Isotone modification: was delete on new[]
 
 	RegCloseKey(keyHandle);
 
@@ -340,11 +343,13 @@ void RegistryHelper::makeWritable(wstring key)
 	if (dryRun) { dryRun->write(L"grant Administrators KEY_ALL_ACCESS", key, L"", L""); return; }   // Isotone modification
 	RegistryWriteReport report(L"grant Administrators KEY_ALL_ACCESS", key, L"", L"");   // Isotone modification
 	HKEY keyHandle = openKey(key, READ_CONTROL | WRITE_DAC | KEY_WOW64_64KEY);
+	SCOPE_EXIT{ RegCloseKey(keyHandle); };   // Isotone modification: the handle was never closed
 
 	DWORD descriptorSize = 0;
 	RegGetKeySecurity(keyHandle, DACL_SECURITY_INFORMATION, NULL, &descriptorSize);
 
 	PSECURITY_DESCRIPTOR oldSd = (PSECURITY_DESCRIPTOR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, descriptorSize);
+	SCOPE_EXIT{ if (oldSd) HeapFree(GetProcessHeap(), 0, oldSd); };   // Isotone modification: freed on every path, throws included
 	LSTATUS status = RegGetKeySecurity(keyHandle, DACL_SECURITY_INFORMATION, oldSd, &descriptorSize);
 	if (status != ERROR_SUCCESS)
 		throw RegistryException(L"Error while getting security information for registry key " + key + L": " + StringHelper::getSystemErrorString(status));
@@ -359,6 +364,7 @@ void RegistryHelper::makeWritable(wstring key)
 	if (!AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
 		0, 0, 0, 0, 0, 0, &sid))
 		throw RegistryException(L"Error in AllocateAndInitializeSid while ensuring writability");
+	SCOPE_EXIT{ FreeSid(sid); };   // Isotone modification: freed on every path, throws included
 
 	EXPLICIT_ACCESS ea;
 	ea.grfAccessPermissions = KEY_ALL_ACCESS;
@@ -371,10 +377,12 @@ void RegistryHelper::makeWritable(wstring key)
 	PACL acl = NULL;
 	if (ERROR_SUCCESS != SetEntriesInAcl(1, &ea, oldAcl, &acl))
 		throw RegistryException(L"Error in SetEntriesInAcl while ensuring writability");
+	SCOPE_EXIT{ LocalFree(acl); };   // Isotone modification: freed on every path, throws included
 
 	PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
 	if (NULL == sd)
 		throw RegistryException(L"Error in LocalAlloc while ensuring writability");
+	SCOPE_EXIT{ LocalFree(sd); };   // Isotone modification: freed on every path, throws included
 
 	if (!InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION))
 		throw RegistryException(L"Error in InitializeSecurityDescriptor while ensuring writability");
@@ -385,11 +393,7 @@ void RegistryHelper::makeWritable(wstring key)
 	status = RegSetKeySecurity(keyHandle, DACL_SECURITY_INFORMATION, sd);
 	if (status != ERROR_SUCCESS)
 		throw RegistryException(L"Error while setting security information for registry key " + key + L": " + StringHelper::getSystemErrorString(status));
-
-	FreeSid(sid);
-	LocalFree(acl);
-	HeapFree(GetProcessHeap(), 0, oldSd);
-	LocalFree(sd);
+	// Isotone modification: sid, acl, oldSd and sd are freed by the guards above.
 }
 
 void RegistryHelper::takeOwnership(wstring key)
@@ -399,6 +403,7 @@ void RegistryHelper::takeOwnership(wstring key)
 	HANDLE tokenHandle;
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle))
 		throw RegistryException(L"Error in OpenProcessToken while taking ownership");
+	SCOPE_EXIT{ CloseHandle(tokenHandle); };   // Isotone modification: the token was never closed
 
 	LUID luid;
 	if (!LookupPrivilegeValue(NULL, SE_TAKE_OWNERSHIP_NAME, &luid))
@@ -413,10 +418,12 @@ void RegistryHelper::takeOwnership(wstring key)
 		throw RegistryException(L"Error in AdjustTokenPrivileges while taking ownership");
 
 	HKEY keyHandle = openKey(key, WRITE_OWNER | KEY_WOW64_64KEY);
+	SCOPE_EXIT{ RegCloseKey(keyHandle); };   // Isotone modification: the handle was never closed
 
 	PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
 	if (NULL == sd)
 		throw RegistryException(L"Error in SetPrivilege while taking ownership");
+	SCOPE_EXIT{ LocalFree(sd); };   // Isotone modification: freed on every path, throws included
 
 	if (!InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION))
 		throw RegistryException(L"Error in InitializeSecurityDescriptor while taking ownership");
@@ -426,6 +433,7 @@ void RegistryHelper::takeOwnership(wstring key)
 	if (!AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
 		0, 0, 0, 0, 0, 0, &sid))
 		throw RegistryException(L"Error in AllocateAndInitializeSid while taking ownership");
+	SCOPE_EXIT{ FreeSid(sid); };   // Isotone modification: freed on every path, throws included
 
 	if (!SetSecurityDescriptorOwner(sd, sid, FALSE))
 		throw RegistryException(L"Error in SetSecurityDescriptorOwner while taking ownership");
@@ -438,9 +446,7 @@ void RegistryHelper::takeOwnership(wstring key)
 
 	if (!AdjustTokenPrivileges(tokenHandle, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL))
 		throw RegistryException(L"Error in AdjustTokenPrivileges while taking ownership");
-
-	FreeSid(sid);
-	LocalFree(sd);
+	// Isotone modification: sid, sd, the key and the token are released by the guards above.
 }
 
 ACCESS_MASK RegistryHelper::getFileAccessForUser(std::wstring path, unsigned long rid)

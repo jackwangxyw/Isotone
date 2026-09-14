@@ -11,19 +11,28 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
+#include <audioclient.h>
 #include <objbase.h>
+#include <sddl.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <atomic>
 #include <chrono>
+#include <optional>
+#include <regex>
 #include <sstream>
 #include <tuple>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "compat_writer.h"
 #include "config_files.h"
@@ -32,7 +41,7 @@
 #include "isotone/processor.h"
 #include "isotone/speakers.h"
 #include "isotone_file.h"
-#include "write_coalescer.h"
+#include "loopback_capture.h"
 
 namespace fs = std::filesystem;
 using namespace isotone;
@@ -72,9 +81,182 @@ std::string get(const fs::path& p) {
 // CRLF). Written out literally so CI, which has no sim/, runs the same test.
 constexpr char kOwnerConfig[] = "Include: peace.txt\r\n";
 
-std::string block(const char* nl) {
-    return std::string(nl) + "# Added by Isotone. Remove these three lines to detach it." + nl +
-           "Device: all" + nl + "Include: Isotone.txt" + nl;
+// The block attach appends, with any lines it puts before the Include.
+std::string block(const char* nl, const std::vector<std::string>& before_include = {}) {
+    static const char* const kWords[] = {"three", "four", "five", "six"};
+    std::string out = std::string(nl) + "# Added by Isotone. Remove these " + kWords[before_include.size()] +
+                      " lines to detach it." + nl + "Device: all" + nl;
+    for (const std::string& line : before_include) out += line + nl;
+    return out + "Include: Isotone.txt" + nl;
+}
+
+// Where write_file_atomically makes its temporary files by default.
+fs::path default_temp_dir() {
+    PWSTR local = nullptr;
+    REQUIRE(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local)));
+    const fs::path dir = fs::path(local) / L"Isotone" / L"compat-tmp";
+    CoTaskMemFree(local);
+    return dir;
+}
+
+// Temporary files write_file_atomically may have left in `dir`, or left in the
+// default temporary directory by this process (other processes share that one).
+bool no_temporary_files(const fs::path& dir) {
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.path().extension() == ".tmp") return false;
+    }
+    std::error_code ec;
+    const std::wstring mine = L"." + std::to_wstring(GetCurrentProcessId()) + L".";
+    for (const auto& entry : fs::directory_iterator(default_temp_dir(), ec)) {
+        if (entry.path().extension() == ".tmp" && entry.path().filename().native().find(mine) != std::wstring::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Records the changes made in a directory and below from construction on, with
+// every filter ReadDirectoryChangesW has but security.
+class DirectoryWatch {
+public:
+    struct Event {
+        DWORD action;
+        std::wstring name;   // relative to the directory; empty for a lost-events overflow
+        bool operator==(const Event& o) const { return action == o.action && name == o.name; }
+    };
+
+    explicit DirectoryWatch(const fs::path& dir)
+        : h_(CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr)) {
+        REQUIRE(h_ != INVALID_HANDLE_VALUE);
+        ov_.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        arm();
+    }
+    ~DirectoryWatch() {
+        CancelIoEx(h_, &ov_);
+        DWORD n = 0;
+        GetOverlappedResult(h_, &ov_, &n, TRUE);
+        CloseHandle(ov_.hEvent);
+        CloseHandle(h_);
+    }
+
+    // What arrived so far, once nothing more has arrived for `quiet_ms`.
+    std::vector<Event> events(DWORD quiet_ms = 300) {
+        while (WaitForSingleObject(ov_.hEvent, quiet_ms) == WAIT_OBJECT_0) {
+            DWORD n = 0;
+            REQUIRE(GetOverlappedResult(h_, &ov_, &n, FALSE));
+            if (n == 0) events_.push_back({0, L""});
+            for (size_t at = 0; n != 0;) {
+                const auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer_ + at);
+                events_.push_back({info->Action, std::wstring(info->FileName, info->FileNameLength / sizeof(wchar_t))});
+                if (info->NextEntryOffset == 0) break;
+                at += info->NextEntryOffset;
+            }
+            arm();
+        }
+        return events_;
+    }
+
+private:
+    void arm() {
+        ResetEvent(ov_.hEvent);
+        const DWORD filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES |
+                             FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION;
+        REQUIRE((ReadDirectoryChangesW(h_, buffer_, sizeof(buffer_), TRUE, filter, nullptr, &ov_, nullptr) ||
+                 GetLastError() == ERROR_IO_PENDING));
+    }
+
+    HANDLE h_;
+    OVERLAPPED ov_{};
+    alignas(DWORD) BYTE buffer_[64 * 1024];
+    std::vector<Event> events_;
+};
+
+std::string event_text(const std::vector<DirectoryWatch::Event>& events) {
+    std::string out;
+    for (const auto& e : events) {
+        out += std::to_string(e.action) + ":";
+        for (wchar_t c : e.name) out += static_cast<char>(c < 128 ? c : '?');
+        out += " ";
+    }
+    return out;
+}
+
+// Owner, group and DACL.
+std::string sddl_of(const fs::path& p) {
+    const SECURITY_INFORMATION si = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    DWORD need = 0;
+    GetFileSecurityW(p.c_str(), si, nullptr, 0, &need);
+    std::vector<BYTE> sd(need);
+    if (need == 0 || !GetFileSecurityW(p.c_str(), si, sd.data(), need, &need)) return "error " + std::to_string(GetLastError());
+    LPWSTR s = nullptr;
+    REQUIRE(ConvertSecurityDescriptorToStringSecurityDescriptorW(sd.data(), SDDL_REVISION_1, si, &s, nullptr));
+    std::string out;
+    for (const wchar_t* c = s; *c; ++c) out += static_cast<char>(*c);
+    LocalFree(s);
+    return out;
+}
+
+// Sets a DACL the way Explorer and icacls do, so ACEs are inherited below it and
+// marked as such: SE_DACL_AUTO_INHERITED, protected (`P`) or not.
+void set_inheriting_dacl(const fs::path& p, const wchar_t* sddl, bool protect) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr));
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
+    std::wstring name = p.native();
+    const DWORD e = SetNamedSecurityInfoW(name.data(), SE_FILE_OBJECT,
+                                          DACL_SECURITY_INFORMATION | (protect ? PROTECTED_DACL_SECURITY_INFORMATION
+                                                                               : UNPROTECTED_DACL_SECURITY_INFORMATION),
+                                          nullptr, nullptr, dacl, nullptr);
+    LocalFree(sd);
+    REQUIRE(e == ERROR_SUCCESS);
+}
+
+// A directory on a drive letter nothing is mounted on.
+fs::path unmounted_drive_dir() {
+    const DWORD drives = GetLogicalDrives();
+    for (wchar_t letter = L'Z'; letter > L'D'; --letter) {
+        if (!(drives & (1u << (letter - L'A')))) return std::wstring(1, letter) + L":\\isotone-compat-tmp";
+    }
+    FAIL("every drive letter is in use");
+    return {};
+}
+
+// Runs isotone-compat with `args` and returns its exit code and output.
+struct CliResult {
+    DWORD exit_code = ~DWORD{0};
+    std::string out;
+};
+CliResult run_cli(const std::vector<std::wstring>& args) {
+    std::wstring cmd = L"\"" + fs::path(ISOTONE_COMPAT_EXE).wstring() + L"\"";
+    for (const std::wstring& a : args) cmd += L" \"" + a + L"\"";
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE read_end = nullptr, write_end = nullptr;
+    CliResult r;
+    if (!CreatePipe(&read_end, &write_end, &sa, 0)) return r;
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = write_end;
+    si.hStdError = write_end;
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                        nullptr, &si, &pi);
+    CloseHandle(write_end);
+    if (started) {
+        char buf[4096];
+        DWORD got = 0;
+        while (ReadFile(read_end, buf, sizeof(buf), &got, nullptr) && got > 0) r.out.append(buf, got);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &r.exit_code);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    CloseHandle(read_end);
+    return r;
 }
 
 }  // namespace
@@ -155,7 +337,7 @@ TEST_CASE("an atomic write creates, replaces, and leaves no temporary file") {
     CHECK(get(f) == "second, and longer\n");
     REQUIRE(write_file_atomically(f, "") == ERROR_SUCCESS);
     CHECK(get(f).empty());
-    CHECK_FALSE(fs::exists(s.dir / "Isotone.txt.tmp"));
+    CHECK(no_temporary_files(s.dir));
 }
 
 TEST_CASE("a reader holding the file blocks a replace, and the retry waits it out") {
@@ -172,7 +354,7 @@ TEST_CASE("a reader holding the file blocks a replace, and the retry waits it ou
     const DWORD blocked = write_file_atomically(f, "new", 0);
     CAPTURE(blocked);
     CHECK(blocked != ERROR_SUCCESS);
-    CHECK_FALSE(fs::exists(s.dir / "Isotone.txt.tmp"));
+    CHECK(no_temporary_files(s.dir));
 
     std::thread release([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
@@ -182,7 +364,104 @@ TEST_CASE("a reader holding the file blocks a replace, and the retry waits it ou
     release.join();
     CHECK(waited == ERROR_SUCCESS);
     CHECK(get(f) == "new");
-    CHECK_FALSE(fs::exists(s.dir / "Isotone.txt.tmp"));
+    CHECK(no_temporary_files(s.dir));
+
+    // A reader that allows delete (Isotone's own reads, a scanner) blocks a
+    // replace too, with ERROR_ACCESS_DENIED, and is waited out the same way.
+    held = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+    CHECK(write_file_atomically(f, "blocked", 0) == ERROR_ACCESS_DENIED);
+    std::thread release_again([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        CloseHandle(held);
+    });
+    const DWORD waited_again = write_file_atomically(f, "newer", 1000);
+    release_again.join();
+    CHECK(waited_again == ERROR_SUCCESS);
+    CHECK(get(f) == "newer");
+    CHECK(no_temporary_files(s.dir));
+}
+
+TEST_CASE("atomic writes to one path from several threads at once each land whole") {
+    // They used to share one temporary name: one writer's delete or create
+    // failed while another held it (ERROR_FILE_EXISTS), or renamed it away.
+    Sandbox s;
+    const fs::path f = s.dir / "Isotone.txt";
+    constexpr int kRounds = 200;
+    std::atomic<int> failures{0};
+    std::atomic<DWORD> first_error{ERROR_SUCCESS};
+    const auto writer = [&](char fill) {
+        const std::string content(4096, fill);
+        for (int i = 0; i < kRounds; ++i) {
+            if (const DWORD e = write_file_atomically(f, content); e != ERROR_SUCCESS) {
+                DWORD none = ERROR_SUCCESS;
+                first_error.compare_exchange_strong(none, e);
+                failures++;
+            }
+        }
+    };
+    std::thread a(writer, 'a'), b(writer, 'b'), c(writer, 'c');
+    a.join();
+    b.join();
+    c.join();
+    CAPTURE(first_error.load());
+    CHECK(failures == 0);
+    const std::string last = get(f);
+    CHECK((last == std::string(4096, 'a') || last == std::string(4096, 'b') || last == std::string(4096, 'c')));
+    CHECK(no_temporary_files(s.dir));
+}
+
+TEST_CASE("a replace that can never succeed fails at once instead of retrying") {
+    // MoveFileExW answers ERROR_ACCESS_DENIED for a reader holding the file and
+    // for these alike; only the reader goes away. Waiting out the retry each
+    // time stalls every commit.
+    Sandbox s;
+    const auto timed = [](const fs::path& path) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const DWORD e = write_file_atomically(path, "new", 2000);
+        return std::make_pair(e, std::chrono::steady_clock::now() - t0);
+    };
+    const auto quick = std::chrono::milliseconds(500);
+
+    const fs::path read_only = s.dir / "Isotone.txt";
+    REQUIRE(write_file_atomically(read_only, "old") == ERROR_SUCCESS);
+    REQUIRE(SetFileAttributesW(read_only.c_str(), FILE_ATTRIBUTE_READONLY));
+    auto [e1, t1] = timed(read_only);
+    CHECK(e1 == ERROR_ACCESS_DENIED);
+    CHECK(t1 < quick);
+    CHECK(get(read_only) == "old");
+    SetFileAttributesW(read_only.c_str(), FILE_ATTRIBUTE_NORMAL);
+
+    const fs::path directory = s.dir / "Directory.txt";
+    fs::create_directory(directory);
+    auto [e2, t2] = timed(directory);
+    CHECK(e2 == ERROR_ACCESS_DENIED);
+    CHECK(t2 < quick);
+
+    // An ACL that denies deleting the file, in a directory that denies deleting
+    // its children.
+    const fs::path locked_dir = s.dir / "acl";
+    fs::create_directory(locked_dir);
+    const fs::path locked = locked_dir / "Isotone.txt";
+    REQUIRE(write_file_atomically(locked, "old") == ERROR_SUCCESS);
+    const auto set_dacl = [](const fs::path& path, const wchar_t* sddl) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr));
+        const BOOL ok = SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, sd);
+        LocalFree(sd);
+        REQUIRE(ok);
+    };
+    set_dacl(locked, L"D:P(A;;0x1e01bf;;;WD)");       // everything but DELETE
+    set_dacl(locked_dir, L"D:P(A;;0x1f01bf;;;WD)");   // everything but FILE_DELETE_CHILD
+    auto [e3, t3] = timed(locked);
+    set_dacl(locked_dir, L"D:(A;OICI;FA;;;WD)");
+    set_dacl(locked, L"D:(A;;FA;;;WD)");
+    CHECK(e3 == ERROR_ACCESS_DENIED);
+    CHECK(t3 < quick);
+    CHECK(get(locked) == "old");
+    CHECK(no_temporary_files(locked_dir));
+    CHECK(no_temporary_files(s.dir));
 }
 
 TEST_CASE("an atomic write that cannot land leaves the target as it was") {
@@ -195,10 +474,118 @@ TEST_CASE("an atomic write that cannot land leaves the target as it was") {
     CHECK(write_file_atomically(f, "lost", 50) != ERROR_SUCCESS);
     CloseHandle(held);
     CHECK(get(f) == "keep me");
-    CHECK_FALSE(fs::exists(s.dir / "Isotone.txt.tmp"));
+    CHECK(no_temporary_files(s.dir));
 
     CHECK(write_file_atomically(s.dir / "no-such-dir" / "Isotone.txt", "x") == ERROR_PATH_NOT_FOUND);
     CHECK_FALSE(fs::exists(s.dir / "no-such-dir"));
+}
+
+TEST_CASE("an atomic write changes no name in the target's directory but the target's") {
+    // Equalizer APO reloads for every name that changes in its config directory:
+    // a temporary file created there and renamed over Isotone.txt was two
+    // reloads per write, measured.
+    Sandbox s;
+    const fs::path f = s.dir / "Isotone.txt";
+    for (const std::string when : {"created", "replaced"}) {
+        CAPTURE(when);
+        DirectoryWatch watch(s.dir);
+        REQUIRE(write_file_atomically(f, when) == ERROR_SUCCESS);   // the default temporary directory
+        const auto events = watch.events();
+        CAPTURE(event_text(events));
+        CHECK_FALSE(events.empty());
+        for (const auto& e : events) CHECK(e.name == L"Isotone.txt");
+        CHECK(get(f) == when);
+    }
+    CHECK(no_temporary_files(s.dir));
+}
+
+TEST_CASE("a replaced file keeps its DACL, auto-inherited flag and all") {
+    Sandbox s, temp;
+    set_inheriting_dacl(s.dir, L"D:(A;OICI;FA;;;BU)(A;OICI;FR;;;LS)(A;OICIIO;GA;;;CO)(A;;FA;;;SY)", true);
+    const fs::path f = s.dir / "Isotone.txt";
+    put(f, "old");
+    // One explicit ACE on top of the inherited ones.
+    set_inheriting_dacl(f, L"D:(A;;FR;;;WD)", false);
+    const std::string before = sddl_of(f);
+    CAPTURE(before);
+    REQUIRE(before.find("D:AI(A;;FR;;;WD)") != std::string::npos);
+    REQUIRE(sddl_of(temp.dir) != sddl_of(s.dir));
+
+    REQUIRE(write_file_atomically(f, "new", 200, temp.dir) == ERROR_SUCCESS);
+    CHECK(get(f) == "new");
+    CHECK(sddl_of(f) == before);
+    CHECK(no_temporary_files(temp.dir));
+
+    // A protected DACL stays protected.
+    set_inheriting_dacl(f, L"D:(A;;FA;;;BU)(A;;FR;;;WD)", true);
+    const std::string protected_before = sddl_of(f);
+    REQUIRE(protected_before.find("D:PAI(") != std::string::npos);
+    REQUIRE(write_file_atomically(f, "newer", 200, temp.dir) == ERROR_SUCCESS);
+    CHECK(sddl_of(f) == protected_before);
+}
+
+TEST_CASE("a file an atomic write creates gets the DACL a file created in the directory gets") {
+    // Two directories: one whose DACL is auto-inherited, as Explorer and
+    // installers set them, and one set with SetFileSecurityW, whose children's
+    // ACEs NTFS does not mark inherited.
+    Sandbox s, temp;
+    const wchar_t* const kDacl = L"D:(A;OICI;FA;;;BU)(A;OICI;FR;;;LS)(A;OICIIO;GA;;;CO)(A;;FA;;;SY)(A;CIIO;GA;;;NS)";
+    const fs::path inheriting = s.dir / "inheriting";
+    const fs::path plain = s.dir / "plain";
+    fs::create_directory(inheriting);
+    fs::create_directory(plain);
+    set_inheriting_dacl(inheriting, kDacl, true);
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(kDacl, SDDL_REVISION_1, &sd, nullptr));
+    const BOOL set = SetFileSecurityW(plain.c_str(), DACL_SECURITY_INFORMATION, sd);
+    LocalFree(sd);
+    REQUIRE(set);
+
+    for (const fs::path& dir : {inheriting, plain}) {
+        CAPTURE(sddl_of(dir));
+        put(dir / "direct.txt", "x");
+        const std::string direct = sddl_of(dir / "direct.txt");
+        CAPTURE(direct);
+        REQUIRE(write_file_atomically(dir / "Isotone.txt", "x", 200, temp.dir) == ERROR_SUCCESS);
+        CHECK(sddl_of(dir / "Isotone.txt") == direct);
+    }
+    CHECK(sddl_of(inheriting / "Isotone.txt").find("D:AI(") != std::string::npos);
+    CHECK(no_temporary_files(temp.dir));
+}
+
+TEST_CASE("a temporary directory on another volume falls back to a temporary file next to the target") {
+    Sandbox s;
+    const fs::path f = s.dir / "Isotone.txt";
+    // A drive letter nothing is mounted on has no volume to match.
+    std::vector<fs::path> elsewhere = {unmounted_drive_dir()};
+    // A junction on this volume to a directory on another one that does not
+    // exist: the volume is real and different, and nothing can be created there.
+    const DWORD drives = GetLogicalDrives();
+    const fs::path junction = s.dir / "other-volume";
+    const wchar_t own[4] = {s.dir.native()[0], L':', L'\\', 0};
+    for (wchar_t letter = L'C'; letter <= L'Z'; ++letter) {
+        const wchar_t root[4] = {letter, L':', L'\\', 0};
+        if (!(drives & (1u << (letter - L'A'))) || _wcsicmp(root, own) == 0 || GetDriveTypeW(root) != DRIVE_FIXED) continue;
+        const std::wstring cmd = L"cmd /c mklink /J \"" + junction.wstring() + L"\" \"" + root +
+                                 L"isotone-no-such-directory\" >nul";
+        if (_wsystem(cmd.c_str()) == 0) elsewhere.push_back(junction / "compat-tmp");
+        break;
+    }
+    if (elsewhere.size() < 2) MESSAGE("no other fixed volume; the junction case is not exercised");
+
+    for (const fs::path& temp : elsewhere) {
+        CAPTURE(temp.string());
+        DirectoryWatch watch(s.dir);
+        REQUIRE(write_file_atomically(f, temp.string(), 200, temp) == ERROR_SUCCESS);
+        CHECK(get(f) == temp.string());
+        const auto events = watch.events();
+        CAPTURE(event_text(events));
+        const std::wstring tmp_name = L"Isotone.txt." + std::to_wstring(GetCurrentProcessId()) + L"." +
+                                      std::to_wstring(GetCurrentThreadId()) + L".tmp";
+        CHECK(std::any_of(events.begin(), events.end(), [&](const auto& e) { return e.name == tmp_name; }));
+        CHECK(no_temporary_files(s.dir));
+    }
+    RemoveDirectoryW(junction.c_str());   // the junction only
 }
 
 // ---------------------------------------------------------------------------
@@ -270,10 +657,13 @@ TEST_CASE("every byte of a busy config survives, whatever its line endings and l
     CHECK_FALSE(r.before.has_conditionals);
     CHECK(r.before.includes.size() == 2);
 
+    // `Stage: post-mix` leaves the end of the file out of reach of capture
+    // devices, so the block undoes it before the Include.
     const std::string after = get(s.dir / "config.txt");
-    REQUIRE(after.size() == original.size() + block("\n").size());
+    const std::string appended = block("\n", {"Stage: post-mix capture"});
+    REQUIRE(after.size() == original.size() + appended.size());
     CHECK(after.compare(0, original.size(), original) == 0);
-    CHECK(after.substr(original.size()) == block("\n"));
+    CHECK(after.substr(original.size()) == appended);
 
     bool removed = false;
     REQUIRE(detach_include(s.dir, &removed) == ERROR_SUCCESS);
@@ -538,31 +928,415 @@ TEST_CASE("the file speaks only upstream's commands") {
 
 namespace {
 
-// Runs the commands of one Isotone.txt block the way upstream's FilterEngine
-// does, for the commands Isotone writes, so the text can be checked against the
-// processor without an Equalizer APO install. Semantics as read in upstream at
-// the pinned commit:
-//   Channel  selects channels by name, or all of them (ChannelFilter).
-//   Preamp   gain on the selection (PreampFilter).
-//   Filter   one biquad per selected channel, in place (BiQuadFilter).
-//   Copy     every target computed from the inputs before any is written; a
-//            target that is not a channel becomes a virtual channel starting at
-//            zero; channels that are not targets keep their samples
-//            (CopyFilter, FilterConfiguration::process).
-//   Delay    whole samples, rate * ms / 1000 + 0.5, on the selection (DelayFilter).
-//   If       outputChannelCount == N and sampleRate >= X, the forms Isotone
-//            writes; lines up to the matching EndIf are skipped when false.
-// A channel word is a 1-based number within the device's channel count, or a
-// name, with the SL/RL and SR/RR substitutes (ChannelHelper). A Copy source that
-// names no channel is added as its factor, a constant (CopyFilter::process).
-class UpstreamModel {
+// Upstream Equalizer APO's own code for the parts of a line the model has to
+// understand, ported from its source at the pinned commit
+// (windows/devicetool/upstream/VENDORED.md) and using nothing from core/, so a
+// mistake shared by Isotone's parser, filter design and channel naming shows
+// up as a difference from the processor instead of passing on both sides.
+namespace upstream {
+
+// helpers/ChannelHelper.cpp: channelPosToNameMap, getDefaultChannelMask,
+// getChannelNames.
+int default_channel_mask(int channelCount) {
+    switch (channelCount) {
+        case 1: return 0x4;     // KSAUDIO_SPEAKER_MONO
+        case 2: return 0x3;     // KSAUDIO_SPEAKER_STEREO
+        case 4: return 0x33;    // KSAUDIO_SPEAKER_QUAD
+        case 6: return 0x60F;   // KSAUDIO_SPEAKER_5POINT1_SURROUND
+        case 8: return 0x63F;   // KSAUDIO_SPEAKER_7POINT1_SURROUND
+        default: return 0;
+    }
+}
+
+std::vector<std::string> channel_names(int channelCount, int channelMask) {
+    static const std::map<int, std::string> kPosToName = {
+        {0x1, "L"}, {0x2, "R"}, {0x4, "C"}, {0x8, "LFE"}, {0x10, "RL"}, {0x20, "RR"}, {0x100, "RC"},
+        {0x200, "SL"}, {0x400, "SR"}};
+    std::vector<std::string> channelNames;
+    int c = 1;
+    for (int i = 0; i < 31; i++) {
+        const int channelPos = 1 << i;
+        if (channelMask & channelPos) {
+            const auto it = kPosToName.find(channelPos);
+            channelNames.push_back(it != kPosToName.end() ? it->second : std::to_string(c));
+            c++;
+        }
+    }
+    for (; c <= channelCount; c++) channelNames.push_back(std::to_string(c));
+    return channelNames;
+}
+
+// ChannelHelper::getChannelIndex; -1 for a word that names no channel.
+long channel_index(const std::string& word, const std::vector<std::string>& channelNames) {
+    if (!word.empty() && std::isdigit(static_cast<unsigned char>(word[0]))) {
+        const long channelIndex = std::strtol(word.c_str(), nullptr, 10) - 1;
+        return channelIndex < 0 || channelIndex >= static_cast<long>(channelNames.size()) ? -1 : channelIndex;
+    }
+    auto pos = std::find(channelNames.begin(), channelNames.end(), word);
+    if (pos == channelNames.end()) {
+        if (word == "SL") pos = std::find(channelNames.begin(), channelNames.end(), "RL");
+        else if (word == "SR") pos = std::find(channelNames.begin(), channelNames.end(), "RR");
+        else if (word == "RL") pos = std::find(channelNames.begin(), channelNames.end(), "SL");
+        else if (word == "RR") pos = std::find(channelNames.begin(), channelNames.end(), "SR");
+        else if (word == "SUB") pos = std::find(channelNames.begin(), channelNames.end(), "LFE");
+    }
+    return pos != channelNames.end() ? static_cast<long>(pos - channelNames.begin()) : -1;
+}
+
+// filters/BiQuad.h and BiQuad.cpp.
+class BiQuad {
 public:
-    UpstreamModel(const ChannelLayout& layout, double rate) : rate_(rate) {
-        names_ = apo_channel_names(layout);
-        names_.resize(layout.channels);
+    enum Type { LOW_PASS, HIGH_PASS, BAND_PASS, NOTCH, ALL_PASS, PEAKING, LOW_SHELF, HIGH_SHELF };
+
+    BiQuad(Type type, double dbGain, double freq, double srate, double bandwidthOrQOrS, bool isBandwidthOrS) {
+        constexpr double M_PI_ = 3.14159265358979323846;
+        constexpr double M_LN2_ = 0.693147180559945309417;
+        double A;
+        if (type == PEAKING || type == LOW_SHELF || type == HIGH_SHELF)
+            A = pow(10, dbGain / 40);
+        else
+            A = pow(10, dbGain / 20);
+        double omega = 2 * M_PI_ * freq / srate;
+        double sn = sin(omega);
+        double cs = cos(omega);
+        double alpha;
+
+        if (!isBandwidthOrS)   // Q
+            alpha = sn / (2 * bandwidthOrQOrS);
+        else if (type == LOW_SHELF || type == HIGH_SHELF)   // S
+            alpha = sn / 2 * sqrt((A + 1 / A) * (1 / bandwidthOrQOrS - 1) + 2);
+        else   // BW
+            alpha = sn * sinh(M_LN2_ / 2 * bandwidthOrQOrS * omega / sn);
+
+        double beta = 2 * sqrt(A) * alpha;
+
+        double b0 = 0, b1 = 0, b2 = 0, a0_ = 1, a1 = 0, a2 = 0;
+        switch (type) {
+            case LOW_PASS:
+                b0 = (1 - cs) / 2; b1 = 1 - cs; b2 = (1 - cs) / 2;
+                a0_ = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+                break;
+            case HIGH_PASS:
+                b0 = (1 + cs) / 2; b1 = -(1 + cs); b2 = (1 + cs) / 2;
+                a0_ = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+                break;
+            case BAND_PASS:
+                b0 = alpha; b1 = 0; b2 = -alpha;
+                a0_ = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+                break;
+            case NOTCH:
+                b0 = 1; b1 = -2 * cs; b2 = 1;
+                a0_ = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+                break;
+            case ALL_PASS:
+                b0 = 1 - alpha; b1 = -2 * cs; b2 = 1 + alpha;
+                a0_ = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+                break;
+            case PEAKING:
+                b0 = 1 + (alpha * A); b1 = -2 * cs; b2 = 1 - (alpha * A);
+                a0_ = 1 + (alpha / A); a1 = -2 * cs; a2 = 1 - (alpha / A);
+                break;
+            case LOW_SHELF:
+                b0 = A * ((A + 1) - (A - 1) * cs + beta);
+                b1 = 2 * A * ((A - 1) - (A + 1) * cs);
+                b2 = A * ((A + 1) - (A - 1) * cs - beta);
+                a0_ = (A + 1) + (A - 1) * cs + beta;
+                a1 = -2 * ((A - 1) + (A + 1) * cs);
+                a2 = (A + 1) + (A - 1) * cs - beta;
+                break;
+            case HIGH_SHELF:
+                b0 = A * ((A + 1) + (A - 1) * cs + beta);
+                b1 = -2 * A * ((A - 1) + (A + 1) * cs);
+                b2 = A * ((A + 1) + (A - 1) * cs - beta);
+                a0_ = (A + 1) - (A - 1) * cs + beta;
+                a1 = 2 * ((A - 1) - (A + 1) * cs);
+                a2 = (A + 1) - (A - 1) * cs - beta;
+                break;
+        }
+
+        a0 = b0 / a0_;
+        a[0] = b1 / a0_;
+        a[1] = b2 / a0_;
+        a[2] = a1 / a0_;
+        a[3] = a2 / a0_;
     }
 
-    // Whether `expression` holds on this device; only the forms Isotone writes.
+    double process(double sample) {
+        double result = a0 * sample + a[1] * x2 + a[0] * x1 - a[3] * y2 - a[2] * y1;
+        x2 = x1;
+        x1 = sample;
+        y2 = y1;
+        y1 = result;
+        return result;
+    }
+
+private:
+    double a[4];
+    double a0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+};
+
+// filters/BiQuadFilterFactory.cpp, getFreq.
+double get_freq(const std::string& freqString) {
+    double result;
+    // (U+00A0 removal omitted: Isotone never writes it.)
+    const std::string& s = freqString;
+    if (sscanf_s(s.c_str(), "%lf", &result) == 1) {
+        if (s.length() >= 5 && s.find_first_of("eE") == std::string::npos) {
+            if (s[s.length() - 4] == '.') {
+                // Interpret as thousands separator because of Room EQ Wizard
+                result *= 1000.0;
+            }
+        }
+        return result;
+    }
+    return -1.0;
+}
+
+// What BiQuadFilterFactory::createFilter passes to the BiQuadFilter it creates.
+struct BiQuadFilterSpec {
+    BiQuad::Type type;
+    double dbGain, freq, bandwidthOrQOrS;
+    bool isBandwidthOrS, isCornerFreq;
+};
+
+// BiQuadFilterFactory::createFilter; nothing when upstream creates no filter.
+// The regexes are upstream's, in narrow form, without U+00A0 in regexFreq.
+std::optional<BiQuadFilterSpec> create_filter(const std::string& command, std::string parameters) {
+    static const std::regex regexType(R"(^\s*ON\s+([A-Za-z]+))");
+    static const std::regex regexFreq(R"(\s+Fc\s*([-+0-9.eE]+)\s*H\s*z)");
+    static const std::regex regexGain(R"(\s+Gain\s*([-+0-9.eE]+)\s*dB)");
+    static const std::regex regexQ(R"(\s+Q\s*([-+0-9.eE]+))");
+    static const std::regex regexBW(R"(\s+BW\s+Oct\s*([-+0-9.eE]+))");
+    static const std::regex regexSlope(R"(^\s*([-+0-9.eE]+)\s*dB)");
+    static const std::map<std::string, BiQuad::Type> filterNameToTypeMap = {
+        {"PK", BiQuad::PEAKING},    {"PEQ", BiQuad::PEAKING},    {"Modal", BiQuad::PEAKING},
+        {"LP", BiQuad::LOW_PASS},   {"HP", BiQuad::HIGH_PASS},   {"LPQ", BiQuad::LOW_PASS},
+        {"HPQ", BiQuad::HIGH_PASS}, {"BP", BiQuad::BAND_PASS},   {"LS", BiQuad::LOW_SHELF},
+        {"HS", BiQuad::HIGH_SHELF}, {"LSC", BiQuad::LOW_SHELF},  {"HSC", BiQuad::HIGH_SHELF},
+        {"NO", BiQuad::NOTCH},      {"AP", BiQuad::ALL_PASS}};
+
+    if (command.find("Filter") != 0) return std::nullopt;
+    // Conversion to period as decimal mark, if needed
+    std::replace(parameters.begin(), parameters.end(), ',', '.');
+
+    std::smatch match;
+    if (!std::regex_search(parameters, match, regexType)) return std::nullopt;
+    const std::string typeString = match.str(1);
+    const auto found_type = filterNameToTypeMap.find(typeString);
+    if (found_type == filterNameToTypeMap.end()) return std::nullopt;
+    const BiQuad::Type type = found_type->second;
+    parameters = match.suffix().str();
+
+    double freq = 0;
+    double gain = 0;
+    double bandwidthOrQOrS = 0;
+    bool isBandwidthOrS = false;
+    bool isCornerFreq = false;
+    bool error = false;
+
+    if (std::regex_search(parameters, match, regexFreq)) {
+        freq = get_freq(match.str(1));
+    } else {
+        error = true;
+    }
+
+    if (std::regex_search(parameters, match, regexGain)) {
+        if (!(type == BiQuad::LOW_PASS || type == BiQuad::HIGH_PASS || type == BiQuad::NOTCH || type == BiQuad::ALL_PASS)) {
+            gain = std::strtod(match.str(1).c_str(), nullptr);
+        }
+    } else if (type == BiQuad::PEAKING || type == BiQuad::LOW_SHELF || type == BiQuad::HIGH_SHELF) {
+        error = true;
+    }
+
+    if (std::regex_search(parameters, match, regexQ)) {
+        bandwidthOrQOrS = std::strtod(match.str(1).c_str(), nullptr);
+    }
+
+    if (std::regex_search(parameters, match, regexBW)) {
+        if (!(type == BiQuad::LOW_SHELF || type == BiQuad::HIGH_SHELF)) {
+            bandwidthOrQOrS = std::strtod(match.str(1).c_str(), nullptr);
+            isBandwidthOrS = true;
+        }
+    }
+
+    if (std::regex_search(parameters, match, regexSlope)) {
+        if (type == BiQuad::LOW_SHELF || type == BiQuad::HIGH_SHELF) {
+            bandwidthOrQOrS = std::strtod(match.str(1).c_str(), nullptr);
+            isBandwidthOrS = true;
+        }
+    }
+
+    if (bandwidthOrQOrS == 0) {
+        if (type == BiQuad::PEAKING || type == BiQuad::ALL_PASS) {
+            error = true;
+        } else if (type == BiQuad::LOW_PASS || type == BiQuad::HIGH_PASS || type == BiQuad::BAND_PASS) {
+            bandwidthOrQOrS = std::sqrt(0.5);   // M_SQRT1_2
+        } else if (type == BiQuad::LOW_SHELF || type == BiQuad::HIGH_SHELF) {
+            bandwidthOrQOrS = 0.9;   // found out by experimentation with RoomEQWizard
+            isBandwidthOrS = true;
+        } else if (type == BiQuad::NOTCH) {
+            bandwidthOrQOrS = 30.0;   // found out by experimentation with RoomEQWizard
+        }
+    } else if (type == BiQuad::LOW_SHELF || type == BiQuad::HIGH_SHELF) {
+        if (isBandwidthOrS)
+            // Maximum S is 1 for 12 dB
+            bandwidthOrQOrS /= 12.0;
+        if (typeString[typeString.length() - 1] != 'C') isCornerFreq = true;
+    }
+
+    if (error) return std::nullopt;
+    return BiQuadFilterSpec{type, gain, freq, bandwidthOrQOrS, isBandwidthOrS, isCornerFreq};
+}
+
+// filters/BiQuadFilter.cpp, initialize: the corner frequency shift, then one
+// BiQuad per channel.
+BiQuad make_biquad(const BiQuadFilterSpec& f, double sampleRate) {
+    double biquadFreq = f.freq;
+    if (f.isCornerFreq && (f.type == BiQuad::LOW_SHELF || f.type == BiQuad::HIGH_SHELF)) {
+        double s = f.bandwidthOrQOrS;
+        if (!f.isBandwidthOrS) {   // Q
+            double q = f.bandwidthOrQOrS;
+            double a = pow(10, f.dbGain / 40);
+            s = 1.0 / ((1.0 / (q * q) - 2.0) / (a + 1.0 / a) + 1.0);
+        }
+        // frequency adjustment for DCX2496
+        double centerFreqFactor = pow(10.0, std::abs(f.dbGain) / 80.0 / s);
+        if (f.type == BiQuad::LOW_SHELF)
+            biquadFreq *= centerFreqFactor;
+        else
+            biquadFreq /= centerFreqFactor;
+    }
+    return BiQuad(f.type, f.dbGain, biquadFreq, sampleRate, f.bandwidthOrQOrS, f.isBandwidthOrS);
+}
+
+// filters/DeviceFilterFactory.cpp, matchDevice.
+bool match_device(const std::string& deviceString, const std::string& pattern) {
+    const auto lower = [](std::string v) {
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return v;
+    };
+    std::string value = pattern;
+    value.erase(0, value.find_first_not_of(" \t"));
+    value.erase(value.find_last_not_of(" \t") + 1);
+    value += ";";
+    std::vector<std::vector<std::string>> fullList;
+    std::vector<std::string> currentList;
+    std::string currentWord;
+    for (char c : value) {
+        if (c == ' ' || c == ';') {
+            if (!currentWord.empty()) {
+                currentList.push_back(currentWord);
+                currentWord.clear();
+            }
+            if (c == ';' && !currentList.empty()) {
+                fullList.push_back(currentList);
+                currentList.clear();
+            }
+        } else {
+            currentWord += c;
+        }
+    }
+    const std::string deviceStringNoGuid = std::regex_replace(
+        deviceString, std::regex(R"(\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})"), "");
+    bool matches = false;
+    for (const auto& list : fullList) {
+        matches = true;
+        if (list.size() == 1 && lower(list[0]) == "all") break;
+        for (const std::string& w : list) {
+            const std::string word = lower(w);
+            const std::string& matchString = word.find('{') == std::string::npos ? deviceStringNoGuid : deviceString;
+            if (lower(matchString).find(word) == std::string::npos) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) break;
+    }
+    return matches;
+}
+
+}  // namespace upstream
+
+// Runs a configuration the way upstream's FilterEngine does, for the commands
+// Isotone writes and the lines that decide what applies, so text can be
+// checked against the processor without an Equalizer APO install. Per line,
+// the factories in FilterEngine's order: Device, If, Include, Stage, then the
+// command. Semantics as read in upstream at the pinned commit:
+//   Device   matches by DeviceFilterFactory::matchDevice; skips what follows
+//            until the next Device line, and is reset at the end of a file.
+//   If       IfFilterFactory's true and false counts, per file; an If left open
+//            is closed at the end of its file. Only the forms of expression
+//            Isotone and these tests write are evaluated.
+//   Include  loads the named file (from `files`), restoring the channel
+//            selection afterwards. It comes before Stage, so a file included
+//            under a Stage that does not match is loaded but none of its
+//            commands apply.
+//   Stage    StageFilterFactory: starts as capture || !preMix ||
+//            !postMixInstalled; a Stage line matches if any part names this
+//            instance; kept per file.
+//   Channel  selects channels by name or number, or all of them, virtual
+//            channels included (ChannelFilter, ChannelHelper).
+//   Preamp   float gain on the selection (PreampFilter).
+//   Filter   one upstream BiQuad per selected channel (BiQuadFilterFactory).
+//   Copy     every target computed from the inputs before any is written; a
+//            target that is not a channel becomes a virtual channel starting at
+//            zero; channels that are not targets keep their samples; a source
+//            naming no channel is added as its factor, a constant (CopyFilter,
+//            FilterConfiguration::process).
+//   Delay    whole samples, rate * ms / 1000 + 0.5, on the selection (DelayFilter).
+class UpstreamModel {
+public:
+    struct Instance {
+        bool capture = false;
+        bool pre_mix = false;
+        bool post_mix_installed = true;
+        std::string device = std::string("CABLE Input VB-Audio Virtual Cable ") + kStereo;
+    };
+
+    UpstreamModel(const ChannelLayout& layout, double rate, Instance instance = Instance())
+        : rate_(rate), instance_(std::move(instance)) {
+        const int channels = static_cast<int>(layout.channels);
+        const int mask = layout.speaker_mask != 0 ? static_cast<int>(layout.speaker_mask)
+                                                  : upstream::default_channel_mask(channels);
+        names_ = upstream::channel_names(channels, mask);
+        names_.resize(layout.channels);   // the model's buffers are the device's channels
+    }
+
+    // [channel][frame] in, the device channels out: one file as the whole
+    // configuration.
+    std::vector<std::vector<double>> run(const std::string& text, std::vector<std::vector<double>> x) {
+        return run_config(text, {}, std::move(x));
+    }
+
+    // config.txt, with the files its Include lines name, keyed by the name as written.
+    std::vector<std::vector<double>> run_config(const std::string& config,
+                                                const std::map<std::string, std::string>& files,
+                                                std::vector<std::vector<double>> x) {
+        x_ = std::move(x);
+        frames_ = x_[0].size();
+        virtuals_.clear();
+        selection_.clear();
+        for (size_t c = 0; c < names_.size(); ++c) selection_.push_back(static_cast<long>(c));
+        // startOfConfiguration
+        device_matches_ = true;
+        true_count_ = false_count_ = 0;
+        true_counts_.clear();
+        stage_matches_ = instance_.capture || !instance_.pre_mix || !instance_.post_mix_installed;
+        stage_stack_.clear();
+        load_file(config, files);
+        x_.resize(names_.size());
+        return x_;
+    }
+
+private:
+    static std::string trim(const std::string& s) {
+        const size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return {};
+        return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+    }
+
+    // Whether `expression` holds on this device; only the forms used here.
     bool holds(const std::string& expression) {
         std::istringstream in(expression);
         std::string name, op;
@@ -570,136 +1344,230 @@ public:
         in >> name >> op >> value;
         if (name == "outputChannelCount" && op == "==") return names_.size() == value;
         if (name == "sampleRate" && op == ">=") return rate_ >= value;
+        if (name == "sampleRate" && op == "==") return rate_ == value;
         FAIL("an If the model does not know: " << expression);
         return false;
     }
 
-    // [channel][frame] in, the device channels out.
-    std::vector<std::vector<double>> run(const std::string& block, std::vector<std::vector<double>> x) {
-        const size_t frames = x[0].size();
-        std::vector<long> selection;
-        for (size_t c = 0; c < names_.size(); ++c) selection.push_back(static_cast<long>(c));
-        const std::vector<long> all = selection;
-        int skipping = 0;   // depth of false Ifs
-        std::istringstream in(block);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            const size_t colon = line.find(':');
-            REQUIRE(colon != std::string::npos);
-            const std::string key = line.substr(0, colon);
-            const std::string value = line.substr(colon + 1);
-            std::istringstream words(value);
-            if (key == "If") {
-                if (skipping > 0 || !holds(value)) ++skipping;
-                continue;
-            }
-            if (key == "EndIf") {
-                if (skipping > 0) --skipping;
-                continue;
-            }
-            if (skipping > 0) continue;
-            if (key == "Device") continue;
-            if (key == "Channel") {
-                selection.clear();
-                std::string w;
-                while (words >> w) {
-                    if (w == "all") selection = all;
-                    else if (index(w) >= 0) selection.push_back(index(w));
-                }
-            } else if (key == "Preamp") {
-                double db = 0;
-                words >> db;
-                const double gain = static_cast<float>(std::pow(10.0, db / 20.0));   // upstream's float gain
-                for (long n : selection) for (double& v : x[n]) v *= gain;
-            } else if (key == "Filter" || key.rfind("Filter ", 0) == 0) {
-                const ApoParseResult r = parse_apo_config(line + "\n");
-                REQUIRE(r.state.bands.size() == 1);
-                const BiquadCoeffs k = design(r.state.bands[0], rate_);
-                for (long n : selection) {
-                    double s1 = 0, s2 = 0;
-                    for (double& v : x[n]) {
-                        const double y = k.b0 * v + s1;
-                        s1 = k.b1 * v - k.a1 * y + s2;
-                        s2 = k.b2 * v - k.a2 * y;
-                        v = y;
-                    }
-                }
-            } else if (key == "Copy") {
-                const std::vector<std::vector<double>> input = x;
-                std::string assignment;
-                while (words >> assignment) {
-                    const size_t eq = assignment.find('=');
-                    const std::string target = assignment.substr(0, eq);
-                    std::vector<double> out(frames, 0.0);
-                    std::istringstream sum(assignment.substr(eq + 1));
-                    std::string term;
-                    while (std::getline(sum, term, '+')) {
-                        const size_t star = term.find('*');
-                        std::string factor_text, channel;
-                        if (star != std::string::npos) {
-                            factor_text = term.substr(0, star);
-                            channel = term.substr(star + 1);
-                        } else if (term == "0" || term.find('.') != std::string::npos) {
-                            factor_text = term;
-                        } else {
-                            channel = term;
-                        }
-                        const double factor = factor_text.empty() ? 1.0 : std::stod(factor_text);
-                        const long source = channel.empty() ? -1 : index(channel);
-                        for (size_t f = 0; f < frames; ++f) out[f] += source < 0 ? factor : factor * input[source][f];
-                    }
-                    long t = index(target);
-                    if (t < 0) {
-                        virtuals_.push_back(target);
-                        x.emplace_back(frames, 0.0);
-                        t = static_cast<long>(x.size() - 1);
-                    }
-                    x[t] = out;
-                }
-            } else if (key == "Delay") {
-                double ms = 0;
-                std::string unit;
-                words >> ms >> unit;
-                REQUIRE(unit == "ms");
-                const size_t n = static_cast<size_t>(rate_ * ms / 1000.0 + 0.5);
-                for (long c : selection) {
-                    std::vector<double>& v = x[c];
-                    v.insert(v.begin(), n, 0.0);
-                    v.resize(frames);
+    // IfFilterFactory::createFilter, without the logging.
+    void conditional(const std::string& command, const std::string& parameters) {
+        const std::string expression = trim(parameters);
+        if (command == "If") {
+            if (false_count_ == 0) {
+                if (holds(expression)) {
+                    true_count_++;
+                } else {
+                    false_count_++;
+                    execute_else_ = true;
                 }
             } else {
-                FAIL("a command the model does not know: " << line);
+                false_count_++;
             }
+        } else if (command == "ElseIf") {
+            if (false_count_ == 0) {
+                if (true_count_ != 0) {
+                    false_count_++;
+                    true_count_--;
+                }
+            } else if (false_count_ == 1 && execute_else_ && holds(expression)) {
+                false_count_--;
+                true_count_++;
+                execute_else_ = false;
+            }
+        } else if (command == "Else") {
+            if (false_count_ == 0) {
+                if (true_count_ != 0) {
+                    false_count_++;
+                    true_count_--;
+                }
+            } else if (false_count_ == 1 && execute_else_) {
+                false_count_--;
+                true_count_++;
+                execute_else_ = false;
+            }
+        } else if (command == "EndIf") {
+            if (false_count_ == 0) {
+                if (true_count_ != 0) true_count_--;
+            } else {
+                false_count_--;
+            }
+            if (false_count_ == 0) execute_else_ = false;
         }
-        x.resize(names_.size());
-        return x;
     }
 
-private:
-    // -1 for a word that names no channel.
-    long index(const std::string& name) {
-        if (!name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) {
-            const long n = std::stol(name) - 1;
-            return n >= 0 && n < static_cast<long>(names_.size()) ? n : -1;
+    void load_file(const std::string& text, const std::map<std::string, std::string>& files) {
+        const std::vector<long> saved_selection = selection_;
+        // startOfFile: If, Stage
+        true_counts_.push_back(true_count_);
+        true_count_ = 0;
+        execute_else_ = false;
+        false_count_ = 0;
+        stage_stack_.push_back(stage_matches_);
+
+        std::istringstream in(text);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            const std::string key = trim(line.substr(0, colon));
+            const std::string value = line.substr(colon + 1);
+
+            if (key == "Device") device_matches_ = upstream::match_device(instance_.device, value);
+            if (!device_matches_) continue;
+            if (key == "If" || key == "ElseIf" || key == "Else" || key == "EndIf") conditional(key, value);
+            if (false_count_ > 0) continue;
+            if (key == "Include") {
+                const std::string name = value.substr(std::min(value.find_first_not_of(" \t"), value.size()));
+                const auto file = files.find(name);
+                REQUIRE_MESSAGE(file != files.end(), "an Include the test did not provide: " << name);
+                load_file(file->second, files);
+                continue;
+            }
+            if (key == "Stage") {
+                std::string stage = trim(value);
+                for (char& c : stage) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                stage_matches_ = false;
+                std::istringstream parts(stage);
+                for (std::string part; std::getline(parts, part, ' ');) {
+                    if (part == "pre-mix" && !instance_.capture && instance_.pre_mix) stage_matches_ = true;
+                    if (part == "post-mix" && !instance_.capture && !instance_.pre_mix) stage_matches_ = true;
+                    if (part == "capture" && instance_.capture) stage_matches_ = true;
+                }
+            }
+            if (!stage_matches_) continue;
+            command(key, value, line);
         }
-        const auto find = [&](const std::string& w) -> long {
-            auto it = std::find(names_.begin(), names_.end(), w);
-            if (it != names_.end()) return static_cast<long>(it - names_.begin());
-            auto v = std::find(virtuals_.begin(), virtuals_.end(), w);
-            return v != virtuals_.end() ? static_cast<long>(names_.size() + (v - virtuals_.begin())) : -1;
-        };
-        long i = find(name);
-        if (i < 0 && name == "SL") i = find("RL");
-        if (i < 0 && name == "SR") i = find("RR");
-        if (i < 0 && name == "RL") i = find("SL");
-        if (i < 0 && name == "RR") i = find("SR");
-        return i;
+
+        // endOfFile: Device, If, Stage; then the outer file's channels.
+        device_matches_ = true;
+        false_count_ = 0;
+        true_count_ = true_counts_.back();
+        true_counts_.pop_back();
+        stage_matches_ = stage_stack_.back();
+        stage_stack_.pop_back();
+        selection_ = saved_selection;
+    }
+
+    void command(const std::string& key, const std::string& value, const std::string& line) {
+        std::istringstream words(value);
+        if (key.empty() || key[0] == '#' || key == "Device" || key == "If" || key == "ElseIf" || key == "Else" ||
+            key == "EndIf" || key == "Stage") {
+            return;
+        }
+        if (key == "Channel") {
+            // ChannelFilterFactory upper-cases the words; ChannelFilter resolves them.
+            std::vector<std::string> all_names = names_;
+            all_names.insert(all_names.end(), virtuals_.begin(), virtuals_.end());
+            std::vector<bool> selected(all_names.size(), false);
+            std::string w;
+            while (words >> w) {
+                for (char& c : w) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                if (w == "ALL") {
+                    selected.assign(all_names.size(), true);
+                } else if (const long n = upstream::channel_index(w, all_names); n >= 0) {
+                    selected[n] = true;
+                }
+            }
+            selection_.clear();
+            for (size_t c = 0; c < selected.size(); ++c) {
+                if (selected[c]) selection_.push_back(static_cast<long>(c));
+            }
+        } else if (key == "Preamp") {
+            std::string v = value;
+            std::replace(v.begin(), v.end(), ',', '.');
+            double db = 0;
+            if (sscanf_s(v.c_str(), " %lf dB", &db) != 1) return;
+            const double gain = static_cast<float>(std::pow(10.0, db / 20.0));   // PreampFilter's float gain
+            for (long n : selection_) for (double& s : x_[n]) s *= gain;
+        } else if (key.find("Filter") == 0) {
+            // A line upstream makes no filter of (OFF, a missing Hz) does nothing.
+            const std::optional<upstream::BiQuadFilterSpec> spec = upstream::create_filter(key, value);
+            if (!spec) return;
+            for (long n : selection_) {
+                upstream::BiQuad bq = upstream::make_biquad(*spec, rate_);
+                for (double& s : x_[n]) s = bq.process(s);
+            }
+        } else if (key == "Copy") {
+            const std::vector<std::vector<double>> input = x_;
+            // CopyFilter::initialize resolves every target and source against the
+            // channels there were before the line. A target that resolves to none
+            // is a channel of that name, one per distinct name in the line, which
+            // FilterEngine::addFilters appends.
+            const size_t known = x_.size();
+            std::string assignment;
+            while (words >> assignment) {
+                const size_t eq = assignment.find('=');
+                const std::string target = assignment.substr(0, eq);
+                std::vector<double> out(frames_, 0.0);
+                std::istringstream sum(assignment.substr(eq + 1));
+                std::string term;
+                while (std::getline(sum, term, '+')) {
+                    const size_t star = term.find('*');
+                    std::string factor_text, channel;
+                    if (star != std::string::npos) {
+                        factor_text = term.substr(0, star);
+                        channel = term.substr(star + 1);
+                    } else if (term == "0" || term.find('.') != std::string::npos) {
+                        factor_text = term;
+                    } else {
+                        channel = term;
+                    }
+                    const double factor = factor_text.empty() ? 1.0 : std::stod(factor_text);
+                    const long source = channel.empty() ? -1 : index(channel, known);
+                    for (size_t f = 0; f < frames_; ++f) out[f] += source < 0 ? factor : factor * input[source][f];
+                }
+                long t = index(target, known);
+                if (t < 0) {
+                    const auto added = virtuals_.begin() + static_cast<long>(known - names_.size());
+                    const auto same = std::find(added, virtuals_.end(), target);
+                    if (same != virtuals_.end()) {
+                        t = static_cast<long>(names_.size() + (same - virtuals_.begin()));
+                    } else {
+                        virtuals_.push_back(target);
+                        x_.emplace_back(frames_, 0.0);
+                        t = static_cast<long>(x_.size() - 1);
+                    }
+                }
+                x_[t] = out;
+            }
+        } else if (key == "Delay") {
+            double ms = 0;
+            std::string unit;
+            words >> ms >> unit;
+            REQUIRE(unit == "ms");
+            const size_t n = static_cast<size_t>(rate_ * ms / 1000.0 + 0.5);
+            for (long c : selection_) {
+                std::vector<double>& v = x_[c];
+                v.insert(v.begin(), n, 0.0);
+                v.resize(frames_);
+            }
+        } else {
+            FAIL("a command the model does not know: " << line);
+        }
+    }
+
+    // Among the first `count` channels, virtual ones included.
+    long index(const std::string& name, size_t count) const {
+        std::vector<std::string> all_names = names_;
+        all_names.insert(all_names.end(), virtuals_.begin(), virtuals_.end());
+        all_names.resize(count);
+        return upstream::channel_index(name, all_names);
     }
 
     double rate_;
+    Instance instance_;
     std::vector<std::string> names_;
     std::vector<std::string> virtuals_;
+    std::vector<std::vector<double>> x_;
+    size_t frames_ = 0;
+    std::vector<long> selection_;
+    bool device_matches_ = true;
+    int true_count_ = 0, false_count_ = 0;
+    bool execute_else_ = false;
+    std::vector<int> true_counts_;
+    bool stage_matches_ = true;
+    std::vector<bool> stage_stack_;
 };
 
 }  // namespace
@@ -832,149 +1700,35 @@ TEST_CASE("updating one device keeps every other byte of the file") {
 }
 
 // ---------------------------------------------------------------------------
-// Rate limiting
+// Committing edits
 
-namespace {
-
-struct FakeClock {
-    std::chrono::steady_clock::time_point now{};
-    void advance(int ms) { now += std::chrono::milliseconds(ms); }
-    WriteCoalescer::Clock fn() {
-        return [this] { return now; };
-    }
-};
-
-}  // namespace
-
-TEST_CASE("the first edit goes out at once, then the latest edit per interval") {
-    FakeClock clock;
-    std::vector<std::string> written;
-    WriteCoalescer w([&](const std::string& s) { written.push_back(s); return DWORD{ERROR_SUCCESS}; },
-                     std::chrono::milliseconds(33), clock.fn());
-
-    REQUIRE(w.submit("a") == ERROR_SUCCESS);
-    CHECK(written == std::vector<std::string>{"a"});
-
-    clock.advance(5);
-    w.submit("b");
-    clock.advance(5);
-    w.submit("c");
-    CHECK(written.size() == 1);
-    CHECK(w.has_pending());
-    CHECK(w.time_until_due() == std::chrono::milliseconds(23));
-
-    clock.advance(22);
-    w.poll();
-    CHECK(written.size() == 1);
-    clock.advance(1);
-    w.poll();
-    CHECK(written == std::vector<std::string>{"a", "c"});
-    CHECK_FALSE(w.has_pending());
-}
-
-TEST_CASE("a one-second drag at 1 kHz of edits becomes about 30 writes, ending on the last") {
-    FakeClock clock;
-    std::vector<std::string> written;
-    WriteCoalescer w([&](const std::string& s) { written.push_back(s); return DWORD{ERROR_SUCCESS}; },
-                     std::chrono::milliseconds(33), clock.fn());
-
-    for (int i = 0; i < 1000; ++i) {
-        w.submit("edit " + std::to_string(i));
-        w.poll();
-        clock.advance(1);
-    }
-    // The trailing write lands on the next due poll, with no further edits.
-    for (int i = 0; i < 40 && w.has_pending(); ++i) {
-        clock.advance(1);
-        w.poll();
-    }
-    CAPTURE(written.size());
-    CHECK(written.size() >= 30);
-    CHECK(written.size() <= 32);
-    CHECK(written.back() == "edit 999");
-    CHECK_FALSE(w.has_pending());
-}
-
-TEST_CASE("identical content is not rewritten, and a failed write stays pending") {
-    FakeClock clock;
-    int writes = 0;
-    bool fail = false;
-    WriteCoalescer w(
-        [&](const std::string&) {
-            if (fail) return DWORD{ERROR_SHARING_VIOLATION};
-            ++writes;
-            return DWORD{ERROR_SUCCESS};
-        },
-        std::chrono::milliseconds(33), clock.fn());
-
-    w.submit("same");
-    clock.advance(100);
-    w.submit("same");
-    CHECK(writes == 1);
-
-    fail = true;
-    clock.advance(100);
-    CHECK(w.submit("next") == ERROR_SHARING_VIOLATION);
-    CHECK(w.has_pending());
-    fail = false;
-    // A failed attempt starts the interval too, so a failing sink is not hit on
-    // every edit or poll.
-    int attempts_while_failing = 0;
-    WriteCoalescer counted(
-        [&](const std::string&) {
-            ++attempts_while_failing;
-            return DWORD{ERROR_ACCESS_DENIED};
-        },
-        std::chrono::milliseconds(33), clock.fn());
-    counted.submit("a");
-    counted.submit("b");
-    counted.submit("c");
-    counted.poll();
-    CHECK(attempts_while_failing == 1);
-    clock.advance(34);
-    counted.poll();
-    CHECK(attempts_while_failing == 2);
-
-    CHECK(w.poll() == ERROR_SUCCESS);   // due: the clock has moved past the interval
-    CHECK(writes == 2);
-    CHECK_FALSE(w.has_pending());
-}
-
-TEST_CASE("the writer coalesces live edits on disk and persists at once") {
+TEST_CASE("the writer keeps live edits in memory and persists at once") {
     Sandbox s;
-    FakeClock clock;
-    CompatWriter writer(s.dir, clock.fn());
+    CompatWriter writer(s.dir);
     REQUIRE(writer.load() == ERROR_SUCCESS);
     CHECK(writer.text().empty());
 
     DeviceConfig d = stereo_device();
+    d.sample_rate = 48000.0;
     REQUIRE(writer.apply(d) == ERROR_SUCCESS);
-    CHECK(writer.writes() == 1);
-    CHECK(get(writer.path()) == writer.text());
-
-    clock.advance(10);
-    d.state.preamp_db = -7;
-    REQUIRE(writer.apply(d) == ERROR_SUCCESS);
-    CHECK(writer.writes() == 1);
     CHECK(writer.has_pending());
-    CHECK(get(writer.path()) != writer.text());
+    CHECK_FALSE(fs::exists(writer.path()));
 
-    clock.advance(10);
     d.state.preamp_db = -8;
     REQUIRE(writer.persist(d) == ERROR_SUCCESS);
-    CHECK(writer.writes() == 2);
     CHECK_FALSE(writer.has_pending());
     CHECK(get(writer.path()) == writer.text());
-    CHECK_FALSE(fs::exists(s.dir / "Isotone.txt.tmp"));
+    CHECK(no_temporary_files(s.dir));
 
     // A second writer on the same directory picks up what is there.
-    CompatWriter again(s.dir, clock.fn());
+    CompatWriter again(s.dir);
     REQUIRE(again.load() == ERROR_SUCCESS);
     CHECK(again.text() == writer.text());
 
     // And each keeps the other's devices: a write never reverts a block the
     // other wrote since this one last read the file.
     DeviceConfig other = height_device();
+    other.sample_rate = 48000.0;
     REQUIRE(again.persist(other) == ERROR_SUCCESS);
     d.state.preamp_db = -9;
     REQUIRE(writer.persist(d) == ERROR_SUCCESS);
@@ -986,15 +1740,16 @@ TEST_CASE("the writer coalesces live edits on disk and persists at once") {
 
 TEST_CASE("a live edit still pending when the writer goes away is written") {
     Sandbox s;
-    FakeClock clock;
     DeviceConfig d = stereo_device();
+    d.sample_rate = 48000.0;
     {
-        CompatWriter writer(s.dir, clock.fn());
+        CompatWriter writer(s.dir);
         REQUIRE(writer.load() == ERROR_SUCCESS);
         REQUIRE(writer.apply(d) == ERROR_SUCCESS);
         d.state.preamp_db = -11;
         REQUIRE(writer.apply(d) == ERROR_SUCCESS);
         REQUIRE(writer.has_pending());
+        REQUIRE_FALSE(fs::exists(s.dir / "Isotone.txt"));
     }
     const std::vector<ParsedDevice> back = parse_isotone_file(get(s.dir / "Isotone.txt"), layout_for);
     REQUIRE(back.size() == 1);
@@ -1014,12 +1769,13 @@ std::string utf8_of(const fs::path& p) {
     return s;
 }
 
-// Runs the block for a 5.1 device through the upstream model and the
-// processor, returning the worst sample difference.
-double model_vs_processor(const DeviceConfig& d) {
+// Runs the block for `d` through the upstream model on a device with the layout
+// `played`, and `state` through the processor on that layout, returning the
+// worst sample difference.
+double model_vs_processor(const DeviceConfig& d, const ChannelLayout& played, const EqState& state) {
     constexpr double kRate = 48000.0;
     constexpr size_t kFrames = 24000;
-    const ChannelLayout layout = d.layout;
+    const ChannelLayout layout = played;
     std::vector<std::vector<double>> input(layout.channels, std::vector<double>(kFrames));
     for (uint32_t c = 0; c < layout.channels; ++c) {
         for (size_t f = 0; f < kFrames; ++f) {
@@ -1028,11 +1784,13 @@ double model_vs_processor(const DeviceConfig& d) {
                           0.2 * std::sin(2 * 3.14159265358979 * (1500.0 + 70 * c) * t);
         }
     }
-    UpstreamModel model(layout, kRate);
+    UpstreamModel::Instance device;
+    device.device = "Test device " + d.endpoint_guid;
+    UpstreamModel model(layout, kRate, device);
     const std::vector<std::vector<double>> expected = model.run(format_device_block(d), input);
     Processor p;
     p.initialize(kRate, layout.channels, 480, 64, layout.speaker_mask);
-    p.set_target(d.state);
+    p.set_target(state);
     p.reset();
     std::vector<std::vector<float>> buf(layout.channels, std::vector<float>(480));
     std::vector<float*> ptr(layout.channels);
@@ -1049,6 +1807,9 @@ double model_vs_processor(const DeviceConfig& d) {
     }
     return worst;
 }
+
+// The same, on the device's own layout.
+double model_vs_processor(const DeviceConfig& d) { return model_vs_processor(d, d.layout, d.state); }
 
 }  // namespace
 
@@ -1151,6 +1912,142 @@ TEST_CASE("a block written for one layout plays no DC on a device that reports a
             }
         }
     }
+}
+
+TEST_CASE("a block written for 7.1 plays each speaker's values on that speaker on another layout, as IsoAPO does") {
+    // L R C LFE RL RR SL SR. SL stands in for RL on 5.1 surround, and RL for SL
+    // on 5.1 back and quad, so both land on one channel there.
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {8, 0x63F};
+    d.sample_rate = 48000.0;
+    d.state.bands.push_back(band(FilterType::Peaking, 1000, -6, 1, WidthMode::Q, 1u << 6));
+    d.state.channel_gain_db[7] = -3.0;
+    SpeakerSetup& sp = d.state.speakers;
+    sp.delay_ms[6] = 1.0;
+    sp.delay_ms[4] = 0.5;
+    sp.inverted = (1u << 4) | (1u << 6) | (1u << 7);
+    sp.muted = 1u << 2;
+    sp.lip_sync_ms = 0.25;
+    const std::string block = format_device_block(d);
+    MESSAGE(block);
+    CHECK(block.find("If: outputChannelCount") == std::string::npos);
+
+    for (const ChannelLayout played :
+         {ChannelLayout{8, 0x63F}, ChannelLayout{6, 0x60F}, ChannelLayout{6, 0x3F}, ChannelLayout{4, 0x33},
+          ChannelLayout{2, 0x3}, ChannelLayout{3, 0x7}}) {
+        CAPTURE(played.channels);
+        CAPTURE(played.speaker_mask);
+        // IsoAPO on that layout plays the state remap_channels moves there.
+        EqState moved = d.state;
+        moved.layout_channels = d.layout.channels;
+        moved.layout_speaker_mask = d.layout.speaker_mask;
+        remap_channels(&moved, played);
+        CHECK(model_vs_processor(d, played, moved) < 1e-4);
+
+        // Not vacuous: on stereo only lip sync is left, 12 samples on L and R.
+        std::vector<std::vector<double>> input(played.channels, std::vector<double>(4800));
+        for (uint32_t c = 0; c < played.channels; ++c) {
+            for (size_t f = 0; f < 4800; ++f) input[c][f] = std::sin(0.05 * static_cast<double>(f) + c);
+        }
+        const std::vector<std::vector<double>> out = UpstreamModel(played, 48000.0).run(block, input);
+        if (played.channels == 2) {
+            double err = 0.0;
+            for (uint32_t c = 0; c < 2; ++c) {
+                for (size_t f = 12; f < 4800; ++f) err = std::max(err, std::abs(out[c][f] - input[c][f - 12]));
+            }
+            CHECK(err < 1e-12);
+        }
+        if (played.speaker_mask == 0x60F) {
+            // SL: RL's 0.5 ms and its own 1 ms add, and inverted once.
+            CHECK(moved.speakers.delay_ms[4] == 1.5);
+            CHECK(moved.speakers.inverted == ((1u << 4) | (1u << 5)));
+            CHECK(*std::max_element(out[2].begin(), out[2].end()) == 0.0);
+            CHECK(*std::min_element(out[2].begin(), out[2].end()) == 0.0);
+        }
+    }
+}
+
+TEST_CASE("lip sync and a speaker's delay reach Equalizer APO as the samples the processor rounds their sum to") {
+    // 0.01 ms is 0.48 samples at 48 kHz: rounded apart they are no delay, and
+    // their sum is one sample.
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {2, 0x3};
+    d.sample_rate = 48000.0;
+    d.state.speakers.lip_sync_ms = 0.01;
+    d.state.speakers.delay_ms[0] = 0.01;
+    CAPTURE(format_device_block(d));
+    CHECK(model_vs_processor(d) < 1e-4);
+}
+
+TEST_CASE("a state written for another layout is moved to the device's before it is written") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {6, 0x60F};
+    d.sample_rate = 48000.0;
+    d.state.layout_channels = 8;
+    d.state.layout_speaker_mask = 0x63F;
+    d.state.bands.push_back(band(FilterType::Peaking, 1000, -6, 1, WidthMode::Q, 1u << 6));   // 7.1's SL
+    d.state.speakers.muted = 1u << 7;                                                         // 7.1's SR
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    CHECK(block.find("Channel: SL\n") != std::string::npos);
+    CHECK(block.find("# Isotone: layout 6 0x60f\n") != std::string::npos);
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
+    REQUIRE(parsed.size() == 1);
+    REQUIRE(parsed[0].state.bands.size() == 1);
+    CHECK(parsed[0].state.bands[0].channels == 1u << 4);
+    CHECK(parsed[0].state.speakers.muted == 1u << 5);
+}
+
+TEST_CASE("a block read for another layout moves the speaker setup to that layout's speakers") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {8, 0x63F};
+    d.sample_rate = 48000.0;
+    SpeakerSetup& sp = d.state.speakers;
+    sp.delay_ms[6] = 1.0;        // SL
+    sp.inverted = 1u << 7;       // SR
+    sp.muted = 1u << 2;          // C
+    sp.small_speakers = 1u << 6; // SL
+    const std::string text = update_isotone_file("", d);
+    CAPTURE(text);
+    CHECK(text.find("# Isotone: layout 8 0x63f\n") != std::string::npos);
+
+    const auto on51 = parse_isotone_file(text, [](const std::string&) { return ChannelLayout{6, 0x60F}; });
+    REQUIRE(on51.size() == 1);
+    CHECK(on51[0].warnings.empty());
+    CHECK(on51[0].state.layout_channels == 6);
+    CHECK(on51[0].state.speakers.delay_ms[4] == 1.0);
+    CHECK(on51[0].state.speakers.delay_ms[6] == 0.0);
+    CHECK(on51[0].state.speakers.inverted == 1u << 5);
+    CHECK(on51[0].state.speakers.muted == 1u << 2);
+    CHECK(on51[0].state.speakers.small_speakers == 1u << 4);
+
+    // On its own layout it reads back as written.
+    const auto on71 = parse_isotone_file(text, [&](const std::string&) { return d.layout; });
+    REQUIRE(on71.size() == 1);
+    CHECK(format_speaker_setup(on71[0].state.speakers) == format_speaker_setup(sp));
+
+    // A layout marker that cannot be read is reported, and the values stay as written.
+    std::string bad = text;
+    bad.replace(bad.find("# Isotone: layout 8 0x63f"), 25, "# Isotone: layout eight");
+    const auto unread = parse_isotone_file(bad, [](const std::string&) { return ChannelLayout{6, 0x60F}; });
+    REQUIRE(unread.size() == 1);
+    CHECK(unread[0].warnings.size() == 1);
+    CHECK(unread[0].state.speakers.delay_ms[6] == 1.0);
+}
+
+TEST_CASE("a channel count past what a stream can carry is written as the most it can") {
+    DeviceConfig d;
+    d.endpoint_guid = kStereo;
+    d.layout = {1000000, 0x3};
+    d.sample_rate = 48000.0;
+    d.state.speakers.swap_left_right = true;
+    d.state.speakers.lip_sync_ms = 1.0;
+    const std::string block = format_device_block(d);
+    CHECK(block.find("If: outputChannelCount == 65535\n") != std::string::npos);
 }
 
 TEST_CASE("bands are guarded by the lowest rate they are stable at") {
@@ -1283,10 +2180,21 @@ TEST_CASE("an atomic write does not write through a .tmp name planted as a hard 
     Sandbox s;
     const fs::path victim = s.dir / "victim.txt";
     put(victim, "keep me");
-    REQUIRE(CreateHardLinkW((s.dir / "Isotone.txt.tmp").c_str(), victim.c_str(), nullptr));
+    // The name this thread's write uses, in the temporary directory and, when
+    // that is on another volume, next to the target.
+    const std::wstring tmp_name = L"Isotone.txt." + std::to_wstring(GetCurrentProcessId()) + L"." +
+                                  std::to_wstring(GetCurrentThreadId()) + L".tmp";
+    fs::create_directories(default_temp_dir());
+    REQUIRE(CreateHardLinkW((default_temp_dir() / tmp_name).c_str(), victim.c_str(), nullptr));
     REQUIRE(write_file_atomically(s.dir / "Isotone.txt", "new content") == ERROR_SUCCESS);
     CHECK(get(victim) == "keep me");
     CHECK(get(s.dir / "Isotone.txt") == "new content");
+
+    REQUIRE(CreateHardLinkW((s.dir / tmp_name).c_str(), victim.c_str(), nullptr));
+    REQUIRE(write_file_atomically(s.dir / "Isotone.txt", "newer content", 200, unmounted_drive_dir()) == ERROR_SUCCESS);
+    CHECK(get(victim) == "keep me");
+    CHECK(get(s.dir / "Isotone.txt") == "newer content");
+    CHECK(no_temporary_files(s.dir));
 }
 
 TEST_CASE("detach waits for a writer holding config.txt, then cuts the file it checked") {
@@ -1308,4 +2216,557 @@ TEST_CASE("detach waits for a writer holding config.txt, then cuts the file it c
     CHECK(e == ERROR_SUCCESS);
     CHECK(removed);
     CHECK(get(config) == kOwnerConfig);
+}
+
+// ---------------------------------------------------------------------------
+// Defects found by the 2026-09-13 compat review
+
+namespace {
+
+constexpr char kOther[] = "{22222222-0000-0000-0000-000000000000}";
+
+DeviceConfig preamp_device(const char* guid, double preamp_db) {
+    DeviceConfig d;
+    d.endpoint_guid = guid;
+    d.layout = {2, 0x3};
+    d.sample_rate = 48000.0;
+    d.state.preamp_db = preamp_db;
+    return d;
+}
+
+// The preamp Isotone.txt holds for `guid`, or NaN when it has no block for it.
+double preamp_in(const std::string& text, const std::string& guid) {
+    for (const ParsedDevice& d : parse_isotone_file(text, [](const std::string&) { return ChannelLayout{2, 0x3}; })) {
+        if (d.endpoint_guid == guid) return d.state.preamp_db;
+    }
+    return std::nan("");
+}
+
+// The gain in dB a configuration applies to a stereo DC input in one instance.
+double model_gain_db(const std::string& config, const std::string& isotone_txt, const UpstreamModel::Instance& instance,
+                     double rate = 48000.0) {
+    std::vector<std::vector<double>> input(2, std::vector<double>(64, 0.5));
+    const auto out = UpstreamModel({2, 0x3}, rate, instance)
+                         .run_config(config, {{"Isotone.txt", isotone_txt}}, input);
+    return 20.0 * std::log10(out[0][10] / 0.5);
+}
+
+UpstreamModel::Instance post_mix() { return UpstreamModel::Instance(); }
+UpstreamModel::Instance pre_mix() {
+    UpstreamModel::Instance i;
+    i.pre_mix = true;
+    return i;
+}
+UpstreamModel::Instance capture() {
+    UpstreamModel::Instance i;
+    i.capture = true;
+    return i;
+}
+
+struct FileId {
+    DWORD volume = 0, high = 0, low = 0;
+    bool operator==(const FileId& o) const { return volume == o.volume && high == o.high && low == o.low; }
+};
+FileId file_id(const fs::path& p) {
+    FileId id;
+    HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &info)) {
+        id = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
+    }
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return id;
+}
+
+}  // namespace
+
+TEST_CASE("the rate guard turns off the bands and keeps the preamp") {
+    // Auto preamp makes room for the bands and for routing, which the channel
+    // count guard keeps at every rate. At a rate below the bands' guard the
+    // processor still applies the preamp; so must Equalizer APO.
+    DeviceConfig d = preamp_device(kStereo, -21.0);
+    d.sample_rate = 96000.0;
+    d.state.bands.push_back(band(FilterType::Peaking, 30000, -6, 1, WidthMode::Q));
+    const std::string block = format_device_block(d);
+    CAPTURE(block);
+    REQUIRE(block.find("If: sampleRate >= ") != std::string::npos);
+
+    std::vector<std::vector<double>> input(2, std::vector<double>(4800));
+    for (size_t f = 0; f < 4800; ++f) input[0][f] = input[1][f] = std::sin(2 * 3.14159265358979 * 1000.0 * f / 48000.0);
+    const auto at_48k = UpstreamModel(d.layout, 48000.0).run(block, input);
+    const double gain = static_cast<float>(std::pow(10.0, -21.0 / 20.0));
+    double err = 0.0;
+    for (uint32_t c = 0; c < 2; ++c) {
+        for (size_t f = 0; f < 4800; ++f) err = std::max(err, std::abs(at_48k[c][f] - input[c][f] * gain));
+    }
+    CHECK(err < 1e-6);
+
+    // Bypass still turns the preamp off with the bands.
+    d.state.bypass = true;
+    const auto bypassed = UpstreamModel(d.layout, 48000.0).run(format_device_block(d), input);
+    err = 0.0;
+    for (uint32_t c = 0; c < 2; ++c) {
+        for (size_t f = 0; f < 4800; ++f) err = std::max(err, std::abs(bypassed[c][f] - input[c][f]));
+    }
+    CHECK(err == 0.0);
+    const auto parsed = parse_isotone_file(update_isotone_file("", d), [&](const std::string&) { return d.layout; });
+    REQUIRE(parsed.size() == 1);
+    CHECK(parsed[0].warnings.empty());
+    CHECK(parsed[0].state.bypass);
+    CHECK(parsed[0].state.preamp_db == -21.0);
+    CHECK(parsed[0].state.bands.size() == 1);
+}
+
+TEST_CASE("an Include under a Stage or an open If is not attached, and attach appends where it applies") {
+    Sandbox s;
+    const std::string isotone_txt = update_isotone_file("", preamp_device(kStereo, -6.0));
+    const auto config = [&] { return get(s.dir / "config.txt"); };
+
+    SUBCASE("an Include under Stage: capture is not attached for render devices, and attach refuses") {
+        const std::string text = "Stage: capture\r\nInclude: Isotone.txt\r\n";
+        put(s.dir / "config.txt", text);
+        CHECK(model_gain_db(text, isotone_txt, post_mix()) == doctest::Approx(0.0));
+        CHECK(model_gain_db(text, isotone_txt, capture()) == doctest::Approx(-6.0).epsilon(1e-6));
+        const ConfigInspection i = inspect_config(s.dir);
+        CHECK_FALSE(i.isotone_included);
+        CHECK(i.isotone_included_conditionally);
+        // Appending would include it twice for capture devices.
+        const AttachResult r = attach_include(s.dir);
+        CHECK(r.error == ERROR_ALREADY_EXISTS);
+        CHECK_FALSE(r.appended);
+        CHECK(config() == text);
+    }
+
+    SUBCASE("an Include under a Stage no instance matches is no include at all") {
+        const std::string text = "Stage: nowhere\r\nInclude: Isotone.txt\r\n";
+        put(s.dir / "config.txt", text);
+        const ConfigInspection i = inspect_config(s.dir);
+        CHECK_FALSE(i.isotone_included);
+        CHECK_FALSE(i.isotone_included_conditionally);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + block("\r\n", {"Stage: post-mix capture"}));
+        for (const auto& instance : {post_mix(), capture()}) {
+            CHECK(model_gain_db(config(), isotone_txt, instance) == doctest::Approx(-6.0).epsilon(1e-6));
+        }
+        CHECK(model_gain_db(config(), isotone_txt, pre_mix()) == doctest::Approx(0.0));
+        CHECK(inspect_config(s.dir).isotone_included);
+    }
+
+    SUBCASE("a Stage line left at the end of config.txt is undone before the Include") {
+        const std::string text = "Stage: pre-mix\r\nPreamp: -3 dB\r\n";
+        put(s.dir / "config.txt", text);
+        // Appended as before, the Include would apply in pre-mix only.
+        CHECK(model_gain_db(text + block("\r\n"), isotone_txt, post_mix()) == doctest::Approx(0.0));
+        const AttachResult r = attach_include(s.dir);
+        REQUIRE(r.error == ERROR_SUCCESS);
+        REQUIRE(r.appended);
+        CHECK(r.before.stage_changed_at_end);
+        CHECK(config() == text + block("\r\n", {"Stage: post-mix capture"}));
+        CHECK(model_gain_db(config(), isotone_txt, post_mix()) == doctest::Approx(-6.0).epsilon(1e-6));
+        CHECK(model_gain_db(config(), isotone_txt, capture()) == doctest::Approx(-6.0).epsilon(1e-6));
+        // Not a second time in the pre-mix instance: only the user's own line.
+        CHECK(model_gain_db(config(), isotone_txt, pre_mix()) == doctest::Approx(-3.0).epsilon(1e-6));
+        const ConfigInspection after = inspect_config(s.dir);
+        CHECK(after.isotone_included);
+        CHECK(after.attached_by_isotone);
+        CHECK_FALSE(attach_include(s.dir).appended);
+        bool removed = false;
+        REQUIRE(detach_include(s.dir, &removed) == ERROR_SUCCESS);
+        CHECK(removed);
+        CHECK(config() == text);
+    }
+
+    SUBCASE("Ifs left open at the end of config.txt are closed before the Include") {
+        const std::string text = "If: sampleRate == 44100\r\nPreamp: -3 dB\r\nIf: sampleRate == 44100\r\n"
+                                 "EndIf:\r\nIf: outputChannelCount == 2\r\n";
+        put(s.dir / "config.txt", text);
+        CHECK(model_gain_db(text + block("\r\n"), isotone_txt, post_mix()) == doctest::Approx(0.0));
+        CHECK(inspect_config(s.dir).open_ifs == 2);
+        const AttachResult r = attach_include(s.dir);
+        REQUIRE(r.appended);
+        CHECK(config() == text + block("\r\n", {"EndIf:", "EndIf:"}));
+        CHECK(model_gain_db(config(), isotone_txt, post_mix()) == doctest::Approx(-6.0).epsilon(1e-6));
+        CHECK(model_gain_db(config(), isotone_txt, post_mix(), 44100.0) == doctest::Approx(-9.0).epsilon(1e-6));
+        CHECK(inspect_config(s.dir).isotone_included);
+        bool removed = false;
+        REQUIRE(detach_include(s.dir, &removed) == ERROR_SUCCESS);
+        CHECK(removed);
+        CHECK(config() == text);
+    }
+
+    SUBCASE("a Stage line only some devices reach makes a later Include conditional") {
+        const std::string text = "Device: Speakers\r\nStage: capture\r\nDevice: all\r\nInclude: Isotone.txt\r\n";
+        put(s.dir / "config.txt", text);
+        const ConfigInspection i = inspect_config(s.dir);
+        CHECK_FALSE(i.isotone_included);
+        CHECK(i.isotone_included_conditionally);
+        CHECK(attach_include(s.dir).error == ERROR_ALREADY_EXISTS);
+    }
+
+    SUBCASE("a Stage line that reaches what no Stage line would, and closed Ifs, get the three-line block") {
+        const std::string text = "Stage: post-mix capture\r\nIf: sampleRate == 44100\r\nEndIf:\r\n";
+        put(s.dir / "config.txt", text);
+        REQUIRE(attach_include(s.dir).appended);
+        CHECK(config() == text + block("\r\n"));
+    }
+}
+
+TEST_CASE("two writers in two threads never lose each other's blocks") {
+    // Each writer re-reads the file after every persist: its own block must be
+    // the one it just wrote, whatever the other did in between.
+    Sandbox s;
+    constexpr int kRounds = 300;
+    struct Result {
+        int failures = 0, lost = 0;
+        DWORD first_error = ERROR_SUCCESS;
+    };
+    const auto writer = [&](const char* guid, Result* result) {
+        CompatWriter w(s.dir);
+        if (const DWORD e = w.load(); e != ERROR_SUCCESS) {
+            result->failures++;
+            result->first_error = e;
+            return;
+        }
+        for (int round = 1; round <= kRounds; ++round) {
+            const double db = -0.01 * round;
+            if (const DWORD e = w.persist(preamp_device(guid, db)); e != ERROR_SUCCESS) {
+                if (result->failures++ == 0) result->first_error = e;
+                continue;
+            }
+            std::string text;
+            if (read_file_bytes(s.dir / "Isotone.txt", &text) != ERROR_SUCCESS ||
+                !(std::abs(preamp_in(text, guid) - db) < 1e-9)) {
+                result->lost++;
+            }
+        }
+    };
+    Result a, b;
+    std::thread ta(writer, kStereo, &a);
+    std::thread tb(writer, kOther, &b);
+    ta.join();
+    tb.join();
+    CAPTURE(a.first_error);
+    CAPTURE(b.first_error);
+    CHECK(a.failures == 0);
+    CHECK(b.failures == 0);
+    CHECK(a.lost == 0);
+    CHECK(b.lost == 0);
+    const std::string text = get(s.dir / "Isotone.txt");
+    CHECK(preamp_in(text, kStereo) == doctest::Approx(-0.01 * kRounds));
+    CHECK(preamp_in(text, kOther) == doctest::Approx(-0.01 * kRounds));
+    CHECK(no_temporary_files(s.dir));
+}
+
+TEST_CASE("a writer in this process and isotone-compat apply in others never lose each other's blocks") {
+    Sandbox s;
+    Sandbox inputs;
+    std::atomic<bool> done{false};
+    std::atomic<int> rounds{0}, failures{0}, lost{0};
+    std::thread in_process([&] {
+        CompatWriter w(s.dir);
+        if (w.load() != ERROR_SUCCESS) {
+            failures++;
+            return;
+        }
+        for (int round = 1; !done; ++round) {
+            const double db = -0.01 * round;
+            if (w.persist(preamp_device(kStereo, db)) != ERROR_SUCCESS) {
+                failures++;
+                continue;
+            }
+            std::string text;
+            if (read_file_bytes(s.dir / "Isotone.txt", &text) != ERROR_SUCCESS ||
+                !(std::abs(preamp_in(text, kStereo) - db) < 1e-9)) {
+                lost++;
+            }
+            rounds = round;
+        }
+    });
+    int cli_failures = 0, cli_lost = 0;
+    std::string first_output;
+    constexpr int kRuns = 25;
+    for (int k = 1; k <= kRuns; ++k) {
+        const fs::path in = inputs.dir / ("in-" + std::to_string(k) + ".txt");
+        put(in, "Preamp: -" + std::to_string(k) + " dB\n");
+        const CliResult r = run_cli({L"apply", L"--root", s.dir.wstring(), L"--device", L"{22222222-0000-0000-0000-000000000000}",
+                                     L"--channels", L"2", L"--rate", L"48000", in.wstring()});
+        if (r.exit_code != 0 || r.out.find("\"ok\":true") == std::string::npos) {
+            if (cli_failures++ == 0) first_output = r.out;
+            continue;
+        }
+        std::string text;
+        if (read_file_bytes(s.dir / "Isotone.txt", &text) != ERROR_SUCCESS || preamp_in(text, kOther) != -k) {
+            cli_lost++;
+        }
+    }
+    done = true;
+    in_process.join();
+    CAPTURE(first_output);
+    CHECK(cli_failures == 0);
+    CHECK(cli_lost == 0);
+    CHECK(failures == 0);
+    CHECK(lost == 0);
+    CHECK(rounds > 0);
+    CHECK(preamp_in(get(s.dir / "Isotone.txt"), kOther) == -kRuns);
+    CHECK(no_temporary_files(s.dir));
+}
+
+TEST_CASE("a write the file no longer holds is written again, whoever changed the file") {
+    Sandbox s;
+    CompatWriter ui(s.dir);
+    REQUIRE(ui.load() == ERROR_SUCCESS);
+    const DeviceConfig x = preamp_device(kStereo, -3.0);
+    REQUIRE(ui.persist(x) == ERROR_SUCCESS);
+
+    // isotone-compat apply, another writer, sets -9 dB.
+    {
+        CompatWriter cli(s.dir);
+        REQUIRE(cli.load() == ERROR_SUCCESS);
+        REQUIRE(cli.persist(preamp_device(kStereo, -9.0)) == ERROR_SUCCESS);
+    }
+    REQUIRE(preamp_in(get(ui.path()), kStereo) == -9.0);
+    REQUIRE(ui.persist(x) == ERROR_SUCCESS);
+    CHECK(preamp_in(get(ui.path()), kStereo) == -3.0);
+
+    // The file deleted.
+    REQUIRE(DeleteFileW(ui.path().c_str()));
+    REQUIRE(ui.persist(x) == ERROR_SUCCESS);
+    CHECK(preamp_in(get(ui.path()), kStereo) == -3.0);
+
+    // And a file that already holds it is not replaced, which would make
+    // Equalizer APO reload for nothing.
+    const FileId before = file_id(ui.path());
+    REQUIRE(ui.persist(x) == ERROR_SUCCESS);
+    CHECK(file_id(ui.path()) == before);
+}
+
+TEST_CASE("the owner of a writer can learn that the last live edit did not reach the file") {
+    Sandbox s;
+    DeviceConfig d = preamp_device(kStereo, -3.0);
+    CompatWriter writer(s.dir);
+    REQUIRE(writer.load() == ERROR_SUCCESS);
+    REQUIRE(writer.persist(d) == ERROR_SUCCESS);
+    d.state.preamp_db = -11.0;
+    REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+    REQUIRE(writer.has_pending());
+
+    // Equalizer APO (or a scanner) holds the file for longer than a write waits.
+    const auto hold = [&] {
+        HANDLE h = CreateFileW(writer.path().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        return h;
+    };
+    HANDLE held = hold();
+    const DWORD e = writer.flush();
+    CloseHandle(held);
+    CHECK(e != ERROR_SUCCESS);
+    CHECK(writer.has_pending());
+    CHECK(writer.flush() == ERROR_SUCCESS);
+    CHECK_FALSE(writer.has_pending());
+    CHECK(preamp_in(get(writer.path()), kStereo) == -11.0);
+
+    // A persist that fails stays pending too.
+    held = hold();
+    d.state.preamp_db = -12.0;
+    const DWORD persisted = writer.persist(d);
+    CloseHandle(held);
+    CHECK(persisted != ERROR_SUCCESS);
+    CHECK(writer.has_pending());
+    CHECK(writer.flush() == ERROR_SUCCESS);
+    CHECK_FALSE(writer.has_pending());
+    CHECK(preamp_in(get(writer.path()), kStereo) == -12.0);
+}
+
+namespace {
+
+uint64_t last_write(const fs::path& p) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    REQUIRE(GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &data));
+    return (uint64_t{data.ftLastWriteTime.dwHighDateTime} << 32) | data.ftLastWriteTime.dwLowDateTime;
+}
+
+}  // namespace
+
+TEST_CASE("a live edit changes nothing on disk until it is committed, then is written once") {
+    // Every write makes Equalizer APO rebuild every filter chain from rest:
+    // measured, a delayed channel goes silent and a bass band swells each time.
+    Sandbox s;
+    CompatWriter writer(s.dir);
+    REQUIRE(writer.load() == ERROR_SUCCESS);
+    DeviceConfig d = preamp_device(kStereo, -1.0);
+    REQUIRE(writer.persist(d) == ERROR_SUCCESS);   // creates Isotone.txt and the lock
+
+    // What one write looks like in the directory, for comparison.
+    std::vector<DirectoryWatch::Event> one_write;
+    {
+        DirectoryWatch watch(s.dir);
+        d.state.preamp_db = -2.0;
+        REQUIRE(writer.persist(d) == ERROR_SUCCESS);
+        one_write = watch.events();
+    }
+    CAPTURE(event_text(one_write));
+    REQUIRE_FALSE(one_write.empty());
+
+    const FileId id = file_id(writer.path());
+    const uint64_t time = last_write(writer.path());
+    const std::string on_disk = get(writer.path());
+    {
+        DirectoryWatch watch(s.dir);
+        for (double db : {-3.0, -4.0, -5.0}) {
+            d.state.preamp_db = db;
+            REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+        }
+        CHECK(writer.has_pending());
+        const auto events = watch.events();
+        CAPTURE(event_text(events));
+        CHECK(events.empty());
+    }
+    CHECK(file_id(writer.path()) == id);
+    CHECK(last_write(writer.path()) == time);
+    CHECK(get(writer.path()) == on_disk);
+
+    DirectoryWatch watch(s.dir);
+    d.state.preamp_db = -6.0;
+    REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+    d.state.preamp_db = -7.0;
+    REQUIRE(writer.persist(d) == ERROR_SUCCESS);
+    const auto events = watch.events();
+    CAPTURE(event_text(events));
+    CHECK(events == one_write);
+    CHECK_FALSE(writer.has_pending());
+    CHECK(preamp_in(get(writer.path()), kStereo) == -7.0);
+}
+
+TEST_CASE("flush writes a pending live edit, and nothing when none is pending") {
+    Sandbox s;
+    CompatWriter writer(s.dir);
+    REQUIRE(writer.load() == ERROR_SUCCESS);
+    DeviceConfig d = preamp_device(kStereo, -1.0);
+    REQUIRE(writer.persist(d) == ERROR_SUCCESS);
+    d.state.preamp_db = -4.0;
+    REQUIRE(writer.apply(d) == ERROR_SUCCESS);
+    REQUIRE(preamp_in(get(writer.path()), kStereo) == -1.0);
+
+    REQUIRE(writer.flush() == ERROR_SUCCESS);
+    CHECK_FALSE(writer.has_pending());
+    CHECK(preamp_in(get(writer.path()), kStereo) == -4.0);
+
+    DirectoryWatch watch(s.dir);
+    REQUIRE(writer.flush() == ERROR_SUCCESS);
+    CHECK(watch.events().empty());
+}
+
+TEST_CASE("a writer refuses a device whose channel count or rate was not set") {
+    Sandbox s;
+    CompatWriter writer(s.dir);
+    REQUIRE(writer.load() == ERROR_SUCCESS);
+
+    // Balance's speaker mute on the right channel.
+    DeviceConfig unset;
+    unset.endpoint_guid = kStereo;
+    unset.state.speakers.muted = 1u << 1;
+    CHECK(writer.persist(unset) == ERROR_INVALID_PARAMETER);
+    CHECK(writer.apply(unset) == ERROR_INVALID_PARAMETER);
+    DeviceConfig no_rate = unset;
+    no_rate.layout = {2, 0x3};
+    CHECK(writer.persist(no_rate) == ERROR_INVALID_PARAMETER);
+    DeviceConfig no_layout = unset;
+    no_layout.sample_rate = 48000.0;
+    CHECK(writer.persist(no_layout) == ERROR_INVALID_PARAMETER);
+    CHECK_FALSE(fs::exists(writer.path()));
+
+    // What a default would do: ChannelLayout's 7.1 writes the routing for 8
+    // channels, which a stereo device never plays.
+    DeviceConfig guessed = no_layout;
+    guessed.layout = ChannelLayout{};
+    guessed.state.speakers.swap_left_right = true;
+    std::vector<std::vector<double>> input(2, std::vector<double>(64, 0.5));
+    input[1].assign(64, 0.25);
+    CHECK(UpstreamModel({2, 0x3}, 48000.0).run(format_device_block(guessed), input)[0][10] == 0.5);
+
+    // A channel count no stream can have.
+    DeviceConfig too_many = no_layout;
+    too_many.layout = {kMaxApoChannels + 1, 0x3};
+    CHECK(writer.apply(too_many) == ERROR_INVALID_PARAMETER);
+    CHECK(writer.persist(too_many) == ERROR_INVALID_PARAMETER);
+    CHECK_FALSE(fs::exists(writer.path()));
+
+    DeviceConfig set = no_layout;
+    set.layout = {2, 0x3};
+    CHECK(writer.persist(set) == ERROR_SUCCESS);
+    CHECK(UpstreamModel({2, 0x3}, 48000.0).run(get(writer.path()), input)[1][10] == 0.0);
+}
+
+TEST_CASE("isotone-compat takes paths outside the ANSI code page and writes UTF-8 JSON") {
+    Sandbox s;
+    // Escapes, not literal characters: the compiler reads this file as the ANSI
+    // code page, which would turn literal UTF-8 into characters it does have.
+    const fs::path root = s.dir / L"\u03A9\u65E5\u672C-caf\u00E9";
+    fs::create_directories(root);
+    put(root / "config.txt", "");
+    const fs::path input = root / L"in-\u03A9.txt";
+    put(input, "Preamp: -4 dB\n");
+
+    const CliResult applied = run_cli({L"apply", L"--root", root.wstring(), L"--device", L"{798436D2-8C71-4834-9248-00CCBAACA00A}",
+                                       L"--channels", L"2", L"--rate", L"48000", input.wstring()});
+    CAPTURE(applied.out);
+    CHECK(applied.exit_code == 0);
+    REQUIRE(fs::exists(root / "Isotone.txt"));
+    CHECK(preamp_in(get(root / "Isotone.txt"), kStereo) == -4.0);
+    std::string escaped;
+    for (char c : utf8_of(root / "Isotone.txt")) escaped += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    CHECK(applied.out.find(escaped) != std::string::npos);
+    CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, applied.out.data(), static_cast<int>(applied.out.size()),
+                              nullptr, 0) > 0);
+
+    const CliResult inspected = run_cli({L"inspect", L"--root", root.wstring()});
+    CAPTURE(inspected.out);
+    CHECK(inspected.exit_code == 0);
+    CHECK(inspected.out.find("\"ok\":true") != std::string::npos);
+}
+
+TEST_CASE("the discontinuity flag on the first packet after Start is not a glitch") {
+    CHECK_FALSE(counts_as_glitch(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, true));
+    CHECK(counts_as_glitch(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, false));
+    CHECK(counts_as_glitch(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY | AUDCLNT_BUFFERFLAGS_SILENT, false));
+    CHECK_FALSE(counts_as_glitch(AUDCLNT_BUFFERFLAGS_SILENT, false));
+    CHECK_FALSE(counts_as_glitch(0, false));
+}
+
+TEST_CASE("loopback start gives up after its timeout, and reading while it stops is safe") {
+    // No endpoint has this ID, so no audio device is opened.
+    const std::string missing = "{00000000-0000-0000-0000-00000000f00d}";
+    {
+        LoopbackCapture capture;
+        const auto t0 = std::chrono::steady_clock::now();
+        const HRESULT hr = capture.start(missing, 0);
+        CHECK(hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+        CHECK_FALSE(capture.running());
+    }
+    // The abandoned thread finds no device and ends after its owner is gone.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    LoopbackCapture capture;
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> reads{0};
+    std::thread reader([&] {
+        std::vector<float> buf(size_t{64} * kMaxChannels);
+        AudioRingCursor cursor;
+        uint32_t channels = 0;
+        while (!stop) {
+            capture.read(&cursor, buf.data(), 64, &channels);
+            capture.running();
+            capture.discontinuities();
+            reads++;
+        }
+    });
+    int failed = 0;
+    for (int i = 0; i < 200; ++i) failed += FAILED(capture.start(missing)) ? 1 : 0;
+    stop = true;
+    reader.join();
+    CHECK(failed == 200);
+    CHECK(reads > 0);
 }

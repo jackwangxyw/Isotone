@@ -49,6 +49,11 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
         throw RegistryException(L"Error while creating registry key " + key +
                                 L": access denied (dry run: Administrators may not create subkeys here)");
     }
+    if (operations_.size() == kill_at_) throw SimulatedKill{};
+    if (const auto it = fail_at_.find(operations_.size()); it != fail_at_.end()) {
+        fail_at_.erase(it);
+        throw RegistryException(L"dry run: injected failure of " + operation + L" " + key + L"\\" + valuename);
+    }
     operations_.push_back({operation, key, valuename, data});
     if (operation == L"grant Administrators KEY_ALL_ACCESS") {
         made_writable_.insert(k);
@@ -114,8 +119,13 @@ bool admins_may_create_subkeys(const std::wstring& key) {
     if (status != ERROR_SUCCESS) return true;
     PSID admins = nullptr;
     ConvertStringSidToSidW(L"S-1-5-32-544", &admins);
-    const ACCESS_MASK wanted = KEY_CREATE_SUB_KEY;
-    const ACCESS_MASK grants = KEY_CREATE_SUB_KEY | KEY_ALL_ACCESS | KEY_WRITE | GENERIC_ALL | GENERIC_WRITE;
+    // An ACE counts only if it carries KEY_CREATE_SUB_KEY itself, or a generic
+    // right that maps to it. KEY_READ, KEY_SET_VALUE and READ_CONTROL do not.
+    GENERIC_MAPPING registry_mapping = {KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS};
+    const auto carries_create = [&](ACCESS_MASK mask) {
+        MapGenericMask(&mask, &registry_mapping);
+        return (mask & KEY_CREATE_SUB_KEY) != 0;
+    };
     bool allowed = dacl == nullptr, denied = false;
     for (DWORD i = 0; dacl != nullptr && admins != nullptr && i < dacl->AceCount; ++i) {
         LPVOID ace = nullptr;
@@ -124,10 +134,10 @@ bool admins_may_create_subkeys(const std::wstring& key) {
         if ((header->AceFlags & INHERIT_ONLY_ACE) != 0) continue;
         if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
             auto* a = static_cast<ACCESS_ALLOWED_ACE*>(ace);
-            if (EqualSid(static_cast<PSID>(&a->SidStart), admins) && (a->Mask & grants) != 0) allowed = true;
+            if (EqualSid(static_cast<PSID>(&a->SidStart), admins) && carries_create(a->Mask)) allowed = true;
         } else if (header->AceType == ACCESS_DENIED_ACE_TYPE) {
             auto* d = static_cast<ACCESS_DENIED_ACE*>(ace);
-            if (EqualSid(static_cast<PSID>(&d->SidStart), admins) && (d->Mask & wanted) != 0) denied = true;
+            if (EqualSid(static_cast<PSID>(&d->SidStart), admins) && carries_create(d->Mask)) denied = true;
         }
     }
     if (admins != nullptr) LocalFree(admins);
@@ -139,7 +149,8 @@ bool admins_may_create_subkeys(const std::wstring& key) {
 
 bool DryRunRegistry::create_would_be_denied(const std::wstring& key) const {
     const std::wstring k = normalize(key);
-    if (created_.count(k) || really_exists(key)) return false;
+    // A key this dry run deleted is created again, not opened.
+    if (created_.count(k) || (!deleted(k) && really_exists(key))) return false;
     // The nearest ancestor that exists, in the registry or in this dry run.
     std::wstring parent = key;
     for (;;) {
@@ -148,7 +159,7 @@ bool DryRunRegistry::create_would_be_denied(const std::wstring& key) const {
         parent = parent.substr(0, slash);
         const std::wstring np = normalize(parent);
         if (made_writable_.count(np) || created_.count(np)) return false;
-        if (really_exists(parent)) return !admins_may_create_subkeys(parent);
+        if (!deleted(np) && really_exists(parent)) return !admins_may_create_subkeys(parent);
     }
 }
 
@@ -181,6 +192,22 @@ bool DryRunRegistry::readValue(const std::wstring& key, const std::wstring& valu
     const auto it = values_.find(value_id(key, valuename));
     if (it != values_.end() && !it->second.removed) { *result = it->second.data; return true; }
     return false;
+}
+
+bool DryRunRegistry::readMultiValue(const std::wstring& key, const std::wstring& valuename,
+                                    std::vector<std::wstring>* result) {
+    const auto it = values_.find(value_id(key, valuename));
+    if (it == values_.end() || it->second.removed) return false;
+    result->clear();
+    const std::wstring& data = it->second.data;
+    size_t start = 0;
+    while (!data.empty() && start <= data.size()) {
+        const size_t bar = data.find(L'|', start);
+        result->push_back(data.substr(start, bar == std::wstring::npos ? std::wstring::npos : bar - start));
+        if (bar == std::wstring::npos) break;
+        start = bar + 1;
+    }
+    return true;
 }
 
 bool DryRunRegistry::valueType(const std::wstring& key, const std::wstring& valuename, unsigned long* type,
