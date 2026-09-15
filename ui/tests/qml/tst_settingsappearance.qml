@@ -153,6 +153,13 @@ Item {
                 atLeast(Theme.border, Theme.pop, 1.2, set.name + " border on pop")
                 atLeast(Theme.track, Theme.background, 1.1, set.name + " track on background")
                 atLeast(Theme.segmentedSelected, Theme.track, 1.05, set.name + " segmented selected on track")
+                // Taken from the custom colours, not Light's or Dark's greys: between the background and the text.
+                for (const token of ["surface", "gridMinor", "muted", "track", "selectedColumn", "border"]) {
+                    const c = Qt.color(Theme[token]), bg = Qt.color(set.background), tx = Qt.color(set.text)
+                    for (const ch of ["r", "g", "b"])
+                        verify(c[ch] >= Math.min(bg[ch], tx[ch]) - 1 / 255 && c[ch] <= Math.max(bg[ch], tx[ch]) + 1 / 255,
+                               set.name + " " + token + " " + c + " is not between " + set.background + " and " + set.text)
+                }
             }
             // Start from Dark: the derived tokens are Dark's, near enough.
             waitForRendering(page)
