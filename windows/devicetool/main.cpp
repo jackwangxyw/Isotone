@@ -9,7 +9,7 @@
 //   isotone-devicetool status    <endpoint>
 //   isotone-devicetool install   <endpoint> [--mode mfx|efx|gfx] [--replace-equalizerapo] [--dry-run]
 //   isotone-devicetool uninstall <endpoint> [--dry-run]
-//   isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]
+//   isotone-devicetool repair    [<endpoint>] [--mode mfx|efx|gfx] [--dry-run]
 //   isotone-devicetool test      <endpoint>
 //   isotone-devicetool enable-enhancements <endpoint> [--dry-run]
 //   isotone-devicetool restart-audio [--dry-run]
@@ -206,7 +206,7 @@ int usage(const std::string& command, const std::string& reason) {
                  "  isotone-devicetool status    <endpoint>\n"
                  "  isotone-devicetool install   <endpoint> [--mode mfx|efx|gfx] [--replace-equalizerapo] [--dry-run]\n"
                  "  isotone-devicetool uninstall <endpoint> [--dry-run]\n"
-                 "  isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]\n"
+                 "  isotone-devicetool repair    [<endpoint>] [--mode mfx|efx|gfx] [--dry-run]\n"
                  "  isotone-devicetool test      <endpoint>\n"
                  "  isotone-devicetool enable-enhancements <endpoint> [--dry-run]\n"
                  "  isotone-devicetool restart-audio [--dry-run]\n"
@@ -2018,12 +2018,19 @@ int cmd_uninstall(const Endpoint& e, bool dry_run) {
     return 0;
 }
 
-int cmd_repair(std::optional<DeviceAPOInfo::InstallMode> mode, bool dry_run) {
+// Every render endpoint, or only `only` when given (the UI repairs the output it
+// shows, so another endpoint's refusal or recorded mode does not decide it).
+int cmd_repair(const std::optional<Endpoint>& only, std::optional<DeviceAPOInfo::InstallMode> mode, bool dry_run) {
+    if (only && only->input) return fail("repair", "capture endpoints are not supported: IsoAPO is an output EQ");
     std::vector<std::wstring> guids;
-    try {
-        guids = RegistryHelper::enumSubKeys(std::wstring(kMMDevices) + L"\\Render");
-    } catch (RegistryException& ex) {
-        return fail("repair", utf8(ex.getMessage()));
+    if (only) {
+        guids.push_back(only->guid);
+    } else {
+        try {
+            guids = RegistryHelper::enumSubKeys(std::wstring(kMMDevices) + L"\\Render");
+        } catch (RegistryException& ex) {
+            return fail("repair", utf8(ex.getMessage()));
+        }
     }
     // Upstream's install writes its .reg backup to the working directory.
     const std::wstring backups = backup_directory();
@@ -3729,9 +3736,13 @@ int dispatch(int argc, wchar_t** wargv) {
         if (std::find(found_command->second.begin(), found_command->second.end(), f) == found_command->second.end())
             return usage(command, command + " does not take " + f);
     }
-    const bool takes_endpoint = command != "list" && command != "repair" && command != "restart-audio" && command != "serve";
+    // repair: one endpoint, or none for every render endpoint.
+    const bool takes_endpoint = command != "list" && command != "restart-audio" && command != "serve" &&
+                                (command != "repair" || args.size() == 2);
     if (args.size() != (takes_endpoint ? 2u : 1u))
-        return usage(command, takes_endpoint ? command + " takes one endpoint" : command + " takes no endpoint");
+        return usage(command, command == "repair"      ? "repair takes one endpoint or none"
+                              : takes_endpoint ? command + " takes one endpoint"
+                                               : command + " takes no endpoint");
     if (command == "serve") {
         if (pipe_text.empty() || parent_text.empty()) return usage(command, "serve needs --pipe and --parent");
         return cmd_serve(pipe_text, parent_text);
@@ -3813,7 +3824,7 @@ int dispatch(int argc, wchar_t** wargv) {
     }
 
     if (command == "list") return cmd_list();
-    if (command == "repair") return cmd_repair(mode, dry_run);
+    if (command == "repair") return cmd_repair(takes_endpoint ? std::optional<Endpoint>(endpoint) : std::nullopt, mode, dry_run);
     if (command == "status") return cmd_status(endpoint);
     if (command == "install") return cmd_install(endpoint, mode, replace_eapo, dry_run);
     if (command == "uninstall") return cmd_uninstall(endpoint, dry_run);

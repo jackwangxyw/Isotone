@@ -97,7 +97,29 @@ TEST_CASE("attach keeping Peace appends the block once") {
     CHECK(box.read() == std::string(kConfig) + kBlock);
 }
 
-TEST_CASE("attach removing Peace drops its include, then appends the block, once") {
+TEST_CASE("attach removing Peace keeps Peace when the attach fails") {
+    Sandbox box;
+    // Isotone.txt already included for one device only: attach_include refuses.
+    const std::string config = "Include: peace.txt\r\nDevice: Speakers\r\nInclude: Isotone.txt\r\n";
+    box.write(config);
+    const AttachOutcome a = attach_config(box.dir, true);
+    CHECK(a.error == ERROR_ALREADY_EXISTS);
+    CHECK_FALSE(a.appended);
+    CHECK_FALSE(a.peace_removed);
+    CHECK(box.read() == config);
+}
+
+TEST_CASE("the preview reads a Peace include after a UTF-8 BOM as the compat library does") {
+    Sandbox box;
+    box.write("\xEF\xBB\xBFInclude: peace.txt\r\nPreamp: -1 dB\r\n");
+    const AttachPreview p = preview_attach(box.dir);
+    REQUIRE(p.error == ERROR_SUCCESS);
+    REQUIRE(p.peace.size() == 2);
+    CHECK(p.peace[0] == isotone::compat::inspect_config(box.dir).peace_included);
+    CHECK((without_peace_includes(box.read()) != box.read()) == isotone::compat::inspect_config(box.dir).peace_included);
+}
+
+TEST_CASE("attach removing Peace appends the block, then drops its include, once") {
     Sandbox box;
     AttachOutcome a = attach_config(box.dir, true);
     CHECK(a.error == ERROR_SUCCESS);

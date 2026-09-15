@@ -97,19 +97,19 @@ AttachPreview preview_attach(const fs::path& config_dir) {
 
 AttachOutcome attach_config(const fs::path& config_dir, bool remove_peace) {
     AttachOutcome o;
-    if (remove_peace) {
-        const fs::path config = config_dir / "config.txt";
-        std::string bytes;
-        if ((o.error = isotone::compat::read_file_bytes(config, &bytes)) != ERROR_SUCCESS) return o;
-        const std::string kept = without_peace_includes(bytes);
-        if (kept != bytes) {
-            if ((o.error = isotone::compat::write_file_atomically(config, kept)) != ERROR_SUCCESS) return o;
-            o.peace_removed = true;
-        }
-    }
     const isotone::compat::AttachResult r = isotone::compat::attach_include(config_dir);
     o.error = r.error;
     o.appended = r.appended;
+    // Peace goes only once Isotone is attached: a failed attach leaves config.txt as it was.
+    if (o.error != ERROR_SUCCESS || !remove_peace) return o;
+    const fs::path config = config_dir / "config.txt";
+    std::string bytes;
+    if ((o.error = isotone::compat::read_file_bytes(config, &bytes)) != ERROR_SUCCESS) return o;
+    const std::string kept = without_peace_includes(bytes);
+    if (kept != bytes) {
+        if ((o.error = isotone::compat::write_file_atomically(config, kept)) != ERROR_SUCCESS) return o;
+        o.peace_removed = true;
+    }
     return o;
 }
 

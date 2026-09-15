@@ -24,19 +24,25 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 
 #include <mmdeviceapi.h>
 #include <objbase.h>
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 #include "apppaths.h"
+#include "appsettings.h"
+#include "devicesmodel.h"
 #include "devicestatus.h"
 #include "devicetoolcontroller.h"
 #include "devicetoolrunner.h"
 #include "eapo_install.h"
+#include "equalizerapoconfig.h"
+#include "outputs.h"
 
 namespace fs = std::filesystem;
 
@@ -189,13 +195,14 @@ TEST_CASE("each action runs devicetool's remedy for the state") {
     CHECK(op("not_installed", "install") == "install: install {407cef09-cb03-4063-a26f-2ff82a1c0e4a}");
     CHECK(op("installed", "uninstall") == "uninstall: uninstall " + cable);
     CHECK(op("installed", "test") == "test: test " + cable);
-    CHECK(op("derived-detached", "repair") == "repair: repair");
+    // Repair names the output: another endpoint's refusal or mode must not decide it.
+    CHECK(op("derived-detached", "repair") == "repair: repair " + cable);
     // The record predates the install mode: repair takes the mode an install would pick.
-    CHECK(op("derived-detached-no-mode", "repair") == "repair: repair --mode mfx");
+    CHECK(op("derived-detached-no-mode", "repair") == "repair: repair " + cable + " --mode mfx");
     CHECK(op("derived-alongside", "removeEapo") == "replace: install " + cable + " --replace-equalizerapo");
     CHECK(op("derived-replaced", "takeBack") == "replace: install {6cd5cc5c-be4c-4f7a-8090-20f6cb934c21} --replace-equalizerapo");
     CHECK(op("derived-replaced", "keepEapo") == "uninstall: uninstall {6cd5cc5c-be4c-4f7a-8090-20f6cb934c21}");
-    CHECK(op("derived-interrupted", "undo") == "repair: repair");
+    CHECK(op("derived-interrupted", "undo") == "repair: repair " + cable);
     CHECK(op("derived-enhancements-off", "enableEnhancements") == "repair: enable-enhancements " + cable);
     // After the Replace dialog's choice of IsoAPO.
     CHECK(op("eapo", "replaceWithIsoApo") == "replace: install {6cd5cc5c-be4c-4f7a-8090-20f6cb934c21} --replace-equalizerapo");
@@ -231,6 +238,322 @@ TEST_CASE("Settings Outputs plans each engine choice") {
     CHECK(plan("derived-replaced", "Off") == "uninstall " + steam + "; remove block; -> removed");
     CHECK(plan("derived-detached", "Off") == "uninstall " + cable + "; -> removed");
     CHECK(planChange(facts("installed"), QStringLiteral("IsoAPO")).value(QStringLiteral("guid")).toString() == kCable);
+    // Off is kept only where Equalizer APO stays on the output.
+    const auto off = [](const char* file, const char* want) {
+        return planChange(facts(file), QString::fromLatin1(want)).value(QStringLiteral("off")).toBool();
+    };
+    CHECK(off("eapo", "Off"));
+    CHECK(off("derived-alongside", "Off"));
+    CHECK_FALSE(off("installed", "Off"));
+    CHECK_FALSE(off("eapo", "IsoAPO"));
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes: shared helpers
+
+namespace {
+
+// A sandbox Equalizer APO config directory, and settings in a directory of their own.
+struct ConfigBox {
+    fs::path dir;
+    QTemporaryDir data;
+    QString previous_compat, previous_data;
+    explicit ConfigBox(const std::string& config) {
+        dir = fs::temp_directory_path() /
+              ("isotone-review-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+        fs::create_directories(dir);
+        REQUIRE_FALSE(isotone::compat::is_live_install_path(dir));
+        write("config.txt", config);
+        previous_compat = AppPaths::compatConfigDir();
+        previous_data = AppPaths::dataDir();
+        AppPaths::setCompatConfigDir(QString::fromStdWString(dir.wstring()));
+        AppPaths::setDataDir(data.path());
+    }
+    ~ConfigBox() {
+        AppPaths::setCompatConfigDir(previous_compat);
+        AppPaths::setDataDir(previous_data);
+        std::error_code ignored;
+        fs::remove_all(dir, ignored);
+    }
+    void write(const char* name, const std::string& bytes) const { std::ofstream(dir / name, std::ios::binary) << bytes; }
+    std::string read(const char* name) const {
+        std::stringstream s;
+        s << std::ifstream(dir / name, std::ios::binary).rdbuf();
+        return s.str();
+    }
+};
+
+const QString kSteam = QStringLiteral("{6cd5cc5c-be4c-4f7a-8090-20f6cb934c21}");
+const char kSteamBlock[] = "Device: {6cd5cc5c-be4c-4f7a-8090-20f6cb934c21}\r\nChannel: all\r\nPreamp: -3 dB\r\n";
+
+// Forwards to a runner the test keeps, so its calls can be read after the controller is gone.
+struct Forward : DevicetoolRunner {
+    std::shared_ptr<ScriptedRunner> r;
+    explicit Forward(std::shared_ptr<ScriptedRunner> runner) : r(std::move(runner)) {}
+    DWORD start() override { return r->start(); }
+    bool started() const override { return r->started(); }
+    DevicetoolResult run(const std::vector<std::wstring>& args) override { return r->run(args); }
+    DevicetoolResult runDirect(const std::vector<std::wstring>& args) override { return r->runDirect(args); }
+    void cancel() override { r->cancel(); }
+};
+
+}  // namespace
+
+TEST_CASE("an Equalizer APO output whose config.txt does not include Isotone.txt is Not attached, with Attach") {
+    DeviceFacts f = facts("eapo");
+    f.attached = false;
+    CHECK(text(statusKey(f)) == "not_attached");
+    CHECK(text(statusLabel(statusKey(f))) == "Not attached");
+    CHECK(text(statusDot(statusKey(f))) == "warn");
+    CHECK(text(actions(f)) == "attach|test");
+    CHECK_FALSE(working(f));
+    CHECK(operation(f, QStringLiteral("attach")).isEmpty());   // the Attach dialog
+    // Only Equalizer APO outputs.
+    DeviceFacts native = facts("installed");
+    native.attached = false;
+    CHECK(text(statusKey(native)) == "installed");
+}
+
+TEST_CASE("Devices reads config.txt's include and Off, and says when what Outputs lists changed") {
+    ConfigBox box("Include: peace.txt\r\n");
+    QFile status(QStringLiteral(ISOTONE_UI_TEST_DATA "/status-eapo.json"));
+    REQUIRE(status.open(QIODevice::ReadOnly));
+    box.write("script.json", "{\"devices\":[" + status.readAll().toStdString() + "]}");
+    // Scripted from the start: no read of the machine on another thread.
+    const QByteArray previous = qgetenv("ISOTONE_FAKE_DEVICETOOL");
+    qputenv("ISOTONE_FAKE_DEVICETOOL", QString::fromStdWString((box.dir / "script.json").wstring()).toUtf8());
+    DevicesModel model;
+    qunsetenv("ISOTONE_FAKE_DEVICETOOL");
+    if (!previous.isEmpty()) qputenv("ISOTONE_FAKE_DEVICETOOL", previous);
+    QSignalSpy outputs(&model, &DevicesModel::outputsChanged);
+    CHECK(text(model.row(kSteam).value(QStringLiteral("status")).toString()) == "not_attached");
+
+    model.refresh();
+    CHECK(outputs.count() == 0);   // nothing changed
+
+    box.write("config.txt", "Include: peace.txt\r\nInclude: Isotone.txt\r\n");
+    model.refresh();
+    CHECK(text(model.row(kSteam).value(QStringLiteral("status")).toString()) == "active");
+    CHECK(outputs.count() == 1);
+
+    setEqualizerApoOutputOff(kSteam, true);
+    model.refresh();
+    CHECK(text(model.row(kSteam).value(QStringLiteral("now")).toString()) == "Off");
+    CHECK(outputs.count() == 2);
+}
+
+TEST_CASE("Outputs lists an Equalizer APO output only while config.txt includes Isotone.txt and it is not Off") {
+    ConfigBox box("Include: peace.txt\r\n");
+    // COM stays initialized for Outputs; uninitialized only if this call did it.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct Uninit {
+        HRESULT hr;
+        ~Uninit() {
+            if (SUCCEEDED(hr)) CoUninitialize();
+        }
+    } uninit{com};
+    std::vector<isotone::devices::Endpoint> endpoints;
+    REQUIRE(SUCCEEDED(isotone::devices::enumerate_render_endpoints(&endpoints)));
+    QStringList eapo;
+    for (const isotone::devices::Endpoint& e : endpoints)
+        if (e.state == DEVICE_STATE_ACTIVE && e.format.present && e.engine.backend == isotone::devices::Backend::equalizerapo)
+            eapo << QString::fromStdWString(e.guid);
+    if (eapo.isEmpty()) {
+        MESSAGE("SKIPPED: no active output with Equalizer APO here");
+        return;
+    }
+    const auto listed = [](const Outputs& o, const QString& guid) {
+        for (const Outputs::Output& out : o.outputs())
+            if (QString::fromStdWString(out.guid) == guid) return true;
+        return false;
+    };
+    Outputs outputs;
+    for (const QString& g : eapo) CHECK_MESSAGE(!listed(outputs, g), g.toStdString());
+
+    box.write("config.txt", "Include: peace.txt\r\nInclude: Isotone.txt\r\n");
+    outputs.refresh();
+    for (const QString& g : eapo) CHECK_MESSAGE(listed(outputs, g), g.toStdString());
+
+    setEqualizerApoOutputOff(eapo.first(), true);
+    outputs.refresh();
+    CHECK_FALSE(listed(outputs, eapo.first()));
+    for (qsizetype i = 1; i < eapo.size(); ++i) CHECK(listed(outputs, eapo[i]));
+    MESSAGE(eapo.size() << " Equalizer APO outputs checked");
+}
+
+TEST_CASE("Off on an Equalizer APO output is kept before its block goes, and Equalizer APO undoes it") {
+    ConfigBox box("Include: Isotone.txt\r\n");
+    box.write("Isotone.txt", kSteamBlock);
+    // AppSettings reads what the controller keeps.
+    AppSettings settings;
+
+    Controller k;
+    k.runner->setStarted(true);
+    bool off_when_signalled = false;
+    QObject::connect(&k.c, &DevicetoolController::outputChoicesChanged,
+                     [&] { off_when_signalled = equalizerApoOutputOff(kSteam); });
+    QSignalSpy choices(&k.c, &DevicetoolController::outputChoicesChanged);
+    k.c.apply({planChange(facts("eapo"), QStringLiteral("Off"))});
+    // At once, before the worker removes the block.
+    CHECK(choices.count() == 1);
+    CHECK(off_when_signalled);
+    k.watch.settle();
+    CHECK(text(k.c.rowStatus().value(kSteam).toString()) == "removed");
+    CHECK(box.read("Isotone.txt").find("6cd5cc5c") == std::string::npos);
+    CHECK(equalizerApoOutputOff(kSteam));
+    CHECK(settings.value(QStringLiteral("outputs/off/") + kSteam).toBool());
+    CHECK_FALSE(equalizerApoOutputListed(kSteam, true));
+
+    DeviceFacts now = facts("eapo");
+    now.isotone_off = true;
+    CHECK(text(nowEngine(now)) == "Off");
+    const QVariantMap back = planChange(now, QStringLiteral("Equalizer APO"));
+    CHECK(back.value(QStringLiteral("commands")).toList().isEmpty());   // no IsoAPO to uninstall
+    CHECK(back.value(QStringLiteral("attach")).toBool());
+    CHECK(back.value(QStringLiteral("changed")).toBool());
+    k.c.apply({back});
+    k.watch.settle();
+    CHECK_FALSE(equalizerApoOutputOff(kSteam));
+    CHECK(equalizerApoOutputListed(kSteam, true));
+    CHECK(choices.count() == 2);
+}
+
+TEST_CASE("Off goes back when its apply is declined") {
+    ConfigBox box("Include: Isotone.txt\r\n");
+    box.write("Isotone.txt", kSteamBlock);
+    Controller k;
+    k.runner->setStart(ERROR_CANCELLED);
+    QSignalSpy choices(&k.c, &DevicetoolController::outputChoicesChanged);
+    // derived-alongside: IsoAPO to uninstall, so approval is asked.
+    k.c.apply({planChange(facts("derived-alongside"), QStringLiteral("Off"))});
+    CHECK(equalizerApoOutputOff(kCable));
+    k.watch.settle();
+    CHECK(text(k.c.phase()) == "declined");
+    CHECK_FALSE(equalizerApoOutputOff(kCable));
+    CHECK(choices.count() == 2);
+}
+
+TEST_CASE("a repair that fails after changing the output restarts audio all the same") {
+    Controller k;
+    k.runner->setStarted(true);
+    k.runner->answer("repair", {ERROR_SUCCESS, 1,
+                                "{\"command\":\"repair\",\"ok\":false,\"fx_properties_changed\":true,\"repaired\":[{\"guid\":\"{798436d2-8c71-4834-9248-00ccbaaca00a}\",\"ok\":false,\"undid_interrupted\":\"install\",\"error\":\"Equalizer APO is on this endpoint again\"}]}",
+                                0});
+    k.c.run(QStringLiteral("repair"), kCable, {QStringLiteral("repair"), kCable});
+    k.watch.settle();
+    CHECK(text(k.watch.phases) == "running|restarting|failed");
+    CHECK(calls(*k.runner) == "repair " + kCable.toStdString() + " ; restart-audio");
+    CHECK(text(k.c.reason()) == "Equalizer APO is on this endpoint again.");
+    CHECK(k.c.details().contains(QStringLiteral("isotone-devicetool repair")));   // Copy details: the repair's
+}
+
+TEST_CASE("Retry after a failed test runs the test again, not the change") {
+    Controller k;
+    k.runner->setStarted(true);
+    k.runner->answer("test", {ERROR_SUCCESS, 1, "{\"command\":\"test\",\"ok\":false,\"reason\":\"audio client initialization failed\"}", 0});
+    k.runner->answer("test", ok());
+    k.c.run(QStringLiteral("install"), kCable, {QStringLiteral("install"), kCable});
+    k.watch.settle();
+    REQUIRE(text(k.c.phase()) == "failed");
+    CHECK(text(k.c.kind()) == "test");
+    k.watch.phases.clear();
+    k.c.retry();
+    k.watch.settle();
+    CHECK(text(k.watch.phases) == "running|done");
+    CHECK(text(k.c.kind()) == "test");
+    const std::string cable = kCable.toStdString();
+    CHECK(calls(*k.runner) == "install " + cable + " ; restart-audio ; direct:test " + cable + " ; direct:test " + cable);
+}
+
+TEST_CASE("restart-audio answering busy is busy, and Retry restarts and tests without changing again") {
+    const std::string cable = kCable.toStdString();
+    const ScriptedRunner::Answer busy{ERROR_SUCCESS, 4, "{\"command\":\"restart-audio\",\"ok\":false,\"error\":\"busy\",\"reason\":\"another devicetool run held the machine lock for 60000 ms\"}", 0};
+
+    SUBCASE("an operation") {
+        Controller k;
+        k.runner->setStarted(true);
+        k.runner->answer("restart-audio", busy);
+        k.runner->answer("restart-audio", ok());
+        k.c.run(QStringLiteral("install"), kCable, {QStringLiteral("install"), kCable});
+        k.watch.settle();
+        CHECK(text(k.watch.phases) == "running|restarting|busy");
+        CHECK(calls(*k.runner) == "install " + cable + " ; restart-audio");
+        k.watch.phases.clear();
+        k.c.retry();
+        k.watch.settle();
+        CHECK(text(k.watch.phases) == "running|restarting|testing|done");
+        CHECK(text(k.c.kind()) == "install");
+        CHECK(calls(*k.runner) == "install " + cable + " ; restart-audio ; restart-audio ; direct:test " + cable);
+    }
+    SUBCASE("an apply, whose rows stay") {
+        Controller k;
+        k.runner->setStarted(true);
+        k.runner->answer("restart-audio", busy);
+        k.runner->answer("restart-audio", ok());
+        const std::string anker = "{407cef09-cb03-4063-a26f-2ff82a1c0e4a}";
+        k.c.apply({planChange(facts("not_installed"), QStringLiteral("IsoAPO"))});
+        k.watch.settle();
+        CHECK(text(k.c.phase()) == "busy");
+        CHECK(text(k.c.rowStatus().value(QString::fromStdString(anker)).toString()) == "installed");
+        k.c.retry();
+        k.watch.settle();
+        CHECK(text(k.c.phase()) == "done");
+        CHECK(text(k.c.rowStatus().value(QString::fromStdString(anker)).toString()) == "installed");
+        CHECK(calls(*k.runner) == "install " + anker + " ; restart-audio ; restart-audio ; direct:test " + anker);
+    }
+}
+
+TEST_CASE("closing while applying stops between plans, and restarts and tests nothing") {
+    auto runner = std::make_shared<ScriptedRunner>();
+    runner->setStarted(true);
+    runner->answer("install", {ERROR_SUCCESS, 0, "{\"ok\":true}", -1});   // held until cancel
+    {
+        DevicetoolController c(std::make_unique<Forward>(runner));
+        c.apply({planChange(facts("not_installed"), QStringLiteral("IsoAPO")), planChange(facts("installed"), QStringLiteral("Off"))});
+        QElapsedTimer t;
+        t.start();
+        while (runner->calls().empty() && t.elapsed() < 5000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        REQUIRE(runner->calls().size() == 1);
+    }   // the destructor, as closing the app runs it
+    CHECK(calls(*runner) == "install {407cef09-cb03-4063-a26f-2ff82a1c0e4a}");
+}
+
+TEST_CASE("the config steps refuse an empty config directory and touch nothing") {
+    ConfigBox box("Include: peace.txt\r\n");
+    box.write("Isotone.txt", kSteamBlock);
+    // Relative to the working directory is where an empty path would land.
+    const fs::path cwd = fs::current_path();
+    fs::current_path(box.dir);
+    const QString attach = attachConfigStep({});
+    const QString remove = removeBlockStep({}, kSteam);
+    fs::current_path(cwd);
+    CHECK(text(attach) == text(windowsMessage(ERROR_PATH_NOT_FOUND)));
+    CHECK(text(remove) == text(windowsMessage(ERROR_PATH_NOT_FOUND)));
+    CHECK(box.read("config.txt") == "Include: peace.txt\r\n");
+    CHECK(box.read("Isotone.txt") == kSteamBlock);
+}
+
+TEST_CASE("a fake devicetool refuses to run without a sandbox config directory, and follows the environment") {
+    const QByteArray previous = qgetenv("ISOTONE_FAKE_DEVICETOOL");
+    const bool was_set = qEnvironmentVariableIsSet("ISOTONE_FAKE_DEVICETOOL");
+    const QString compat = AppPaths::compatConfigDir();
+
+    qunsetenv("ISOTONE_FAKE_DEVICETOOL");
+    AppPaths::setCompatConfigDir(QString());
+    CHECK_FALSE(fakeDevicetool());
+    CHECK(fakeDevicetoolRefusal().isEmpty());
+
+    qputenv("ISOTONE_FAKE_DEVICETOOL", "script.json");
+    CHECK(fakeDevicetool());
+    CHECK_FALSE(fakeDevicetoolRefusal().isEmpty());
+    AppPaths::setCompatConfigDir(QStringLiteral("C:\\sandbox"));
+    CHECK(fakeDevicetoolRefusal().isEmpty());
+
+    AppPaths::setCompatConfigDir(compat);
+    if (was_set)
+        qputenv("ISOTONE_FAKE_DEVICETOOL", previous);
+    else
+        qunsetenv("ISOTONE_FAKE_DEVICETOOL");
 }
 
 TEST_CASE("an endpoint read in process maps as devicetool status maps it, on every present output here") {
@@ -434,6 +757,10 @@ TEST_CASE("apply runs every plan in order, attaches, removes, restarts audio onc
     { std::ofstream(box / "Isotone.txt", std::ios::binary) << "Device: {6cd5cc5c-be4c-4f7a-8090-20f6cb934c21}\r\nChannel: all\r\nPreamp: -3 dB\r\n"; }
     const QString previous = AppPaths::compatConfigDir();
     AppPaths::setCompatConfigDir(QString::fromStdWString(box.wstring()));
+    // Off is kept in settings: a directory of this test's.
+    QTemporaryDir data;
+    const QString previous_data = AppPaths::dataDir();
+    AppPaths::setDataDir(data.path());
 
     Controller k;
     QStringList history;
@@ -474,6 +801,7 @@ TEST_CASE("apply runs every plan in order, attaches, removes, restarts audio onc
     CHECK(config.str().find("Include: peace.txt") != std::string::npos);   // Settings Outputs keeps Peace
     CHECK(isotone_file.str().find("6cd5cc5c") == std::string::npos);
 
+    AppPaths::setDataDir(previous_data);
     AppPaths::setCompatConfigDir(previous);
     fs::remove_all(box);
 }

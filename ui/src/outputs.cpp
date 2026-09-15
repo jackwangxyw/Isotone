@@ -13,6 +13,7 @@
 #include "device_watcher.h"
 #include "devices.h"
 #include "engine_probe.h"
+#include "equalizerapoconfig.h"
 #include "shared_mapping.h"
 #include "speakers.h"
 
@@ -44,11 +45,14 @@ void Outputs::refresh() {
     std::vector<isotone::devices::Endpoint> endpoints;
     if (FAILED(isotone::devices::enumerate_render_endpoints(&endpoints))) return;
     std::vector<Output> found;
+    // Devices work package: an Equalizer APO output only while config.txt includes Isotone.txt and it is not turned Off.
+    const bool attached = equalizerApoAttached();
     for (const isotone::devices::Endpoint& e : endpoints) {
         if (e.state != DEVICE_STATE_ACTIVE || !e.format.present) continue;
         const bool native = e.engine.backend == isotone::devices::Backend::native &&
                             e.engine.isoapo_state == isotone::devices::IsoApoState::installed;
-        const bool eapo = e.engine.backend == isotone::devices::Backend::equalizerapo;
+        const bool eapo = e.engine.backend == isotone::devices::Backend::equalizerapo &&
+                          equalizerApoOutputListed(QString::fromStdWString(e.guid), attached);
         if (!native && !eapo) continue;
         Output o;
         o.guid = e.guid;

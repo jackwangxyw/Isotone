@@ -15,9 +15,10 @@ Rectangle {
     readonly property var labels: ({
         test: "Test", uninstall: "Uninstall", replace: "Replace with IsoAPO", repair: "Repair",
         removeEapo: "Remove Equalizer APO", takeBack: "Take back", keepEapo: "Keep Equalizer APO",
-        undo: "Undo", copyDiagnostics: "Copy diagnostics", enableEnhancements: "Turn on enhancements", install: "Install"
+        undo: "Undo", copyDiagnostics: "Copy diagnostics", enableEnhancements: "Turn on enhancements", install: "Install",
+        attach: "Attach"
     })
-    readonly property var primary: ["replace", "repair", "removeEapo", "takeBack", "undo", "enableEnhancements", "install"]
+    readonly property var primary: ["replace", "repair", "removeEapo", "takeBack", "undo", "enableEnhancements", "install", "attach"]
 
     height: column.implicitHeight + 44
     radius: 14
@@ -80,7 +81,7 @@ Rectangle {
         DetailRow { label: "Format"; value: root.device.format || "" }
         DetailRow {
             objectName: "detailConfig"
-            visible: root.device.status === "active"
+            visible: root.device.status === "active" || root.device.status === "not_attached"
             label: "Config"
             value: root.device.config || "config.txt"
         }

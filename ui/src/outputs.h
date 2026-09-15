@@ -3,6 +3,8 @@
 //
 // The outputs in the sidebar: render endpoints whose engine works (IsoAPO
 // installed, or Equalizer APO in a slot), active (owner's decision, 2026-09-14).
+// Equalizer APO outputs only while config.txt includes Isotone.txt and Settings
+// Outputs has not turned them Off (equalizerapoconfig.h).
 // Refreshed on device notifications; the current output's engine is probed off
 // the UI thread every few seconds for its status dot.
 

@@ -19,6 +19,8 @@
 //   busy        exit 4, another devicetool run holds the machine lock; Retry
 //   declined    approval declined; Retry
 // kind: install, repair, uninstall, replace, test, approval, apply.
+// Retry runs what failed: the change, or after it only the restart and tests
+// (restart-audio busy), or only the test that failed.
 //
 // Restart Windows only emits restartWindowsRequested; the app connects it
 // (main.cpp), tests cannot reach a reboot.
@@ -33,6 +35,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -44,6 +47,13 @@
 QString reasonSentence(QString s);
 // Windows' own sentence for an error code.
 QString windowsMessage(DWORD error);
+
+// Settings Outputs' steps on Equalizer APO's config directory `dir`: attach
+// (Peace kept), and removing the output's block from Isotone.txt. Empty, or the
+// reason; an empty `dir` (no ConfigPath) is refused with "The system cannot find
+// the path specified.", never read as the working directory.
+QString attachConfigStep(const std::filesystem::path& dir);
+QString removeBlockStep(const std::filesystem::path& dir, const QString& guid);
 
 class DevicetoolController : public QObject {
     Q_OBJECT
@@ -104,6 +114,11 @@ signals:
     // A devicetool change or test ended: engines may have changed.
     void finished(const QString& kind, const QString& guid);
     void restartWindowsRequested();
+    // apply changed an output's Off setting (equalizerapoconfig.h), before any
+    // plan runs, and again if a plan that changed it does not succeed: Outputs
+    // must be read again at once (Main.qml), so the session stops writing an
+    // output turned Off before its block is removed.
+    void outputChoicesChanged();
 
 private:
     struct Request {
@@ -111,6 +126,9 @@ private:
         QString guid;
         QStringList args;
         QVariantList plans;
+        // The change is done: only restart-audio, then test these.
+        bool restart_only = false;
+        QStringList tests;
     };
     enum class Outcome { ok, busy, failed, restart_failed };
 
@@ -119,13 +137,16 @@ private:
     void loop();
     // On the worker. publish() queues a change of state to the GUI thread.
     void publish(std::function<void(DevicetoolController*)> change);
+    bool stopping();  // the app is closing: change nothing more
     bool approve();   // false when declined or failed, with the phase set
     // Runs one command and keeps its details; `reason` on busy or failed.
     Outcome command(const std::vector<std::wstring>& args, bool direct, DevicetoolResult* result, QString* reason);
     void fail(Outcome outcome, const QString& reason);
     Outcome restartAndTest(const QStringList& tests, QString* reason, QString* failed_test);
     void operate(const Request& request);
-    void applyPlans(const Request& request, bool changes);
+    // `restore`: the Off settings start() changed, as they were, by GUID.
+    void applyPlans(const Request& request, bool changes, const QVariantMap& restore);
+    void restoreChoices(const QVariantMap& restore);
 
     std::unique_ptr<DevicetoolRunner> runner_;
     std::thread worker_;

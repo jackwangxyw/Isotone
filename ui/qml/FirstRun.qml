@@ -159,7 +159,9 @@ Rectangle {
                     Text { objectName: "wizardWaiting"; text: "Waiting for administrator approval"; font.family: Theme.font; font.pixelSize: 13; color: Theme.muted; anchors.verticalCenter: parent.verticalCenter }
                 }
                 Row {
-                    visible: root.step === 2 && (Devicetool.phase === "reboot" || Devicetool.phase === "failed")
+                    // Ready with a failure, or an approval that failed on Outputs (a decline shows nothing).
+                    visible: Devicetool.kind === "apply" && (root.step === 2 && (Devicetool.phase === "reboot" || Devicetool.phase === "failed" || Devicetool.phase === "busy")
+                                                             || root.step === 0 && Devicetool.phase === "failed")
                     spacing: 8
                     anchors.verticalCenter: parent.verticalCenter
                     Icon {
@@ -171,13 +173,14 @@ Rectangle {
                     Text {
                         objectName: "wizardResult"
                         anchors.verticalCenter: parent.verticalCenter
-                        text: Devicetool.phase === "reboot" ? "Audio did not restart" : Devicetool.reason
+                        text: Devicetool.phase === "reboot" ? "Audio did not restart" : Devicetool.phase === "busy" ? "Another install is running" : Devicetool.reason
                         font.family: Theme.font
                         font.pixelSize: 13
                         color: Theme.text
                     }
                 }
                 Button { objectName: "wizardRestart"; visible: root.step === 2 && Devicetool.phase === "reboot"; text: "Restart Windows"; onClicked: Devicetool.restartWindows() }
+                Button { objectName: "wizardRetry"; visible: root.step === 2 && Devicetool.phase === "busy"; text: "Retry"; onClicked: Devicetool.retry() }
 
                 Button { objectName: "wizardSkip"; visible: root.step === 0; kind: "ghost"; text: "Skip"; onClicked: root.close() }
                 Button {
