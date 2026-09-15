@@ -1923,12 +1923,19 @@ and the remedy, 11 of the format builder, 4 of the layout commands (two of
 which passed a first version of the test, which was then tightened). ctest 7
 of 7, the APO self test, transport and reference checks pass.
 
-**Not verified, needs the owner:** the approval prompt and its decline; a real
-`restart-audio` (cuts all audio for a few seconds); a real `enable-enhancements`
-(CABLE Input's flag is absent, so it would change nothing unless enhancements
-are first turned off in Sound settings); a real `set-layout` on CABLE Input,
-unelevated first (0x80070005 means it needs elevation), then back to stereo;
-whether open streams are invalidated by it. **Found, not investigated:**
+**Run live by the owner the same evening** (results in `%USERPROFILE%\isotone-live`):
+`layouts` on CABLE Input listed all four layouts; `set-layout 7.1`, from a
+window the owner opened unelevated, returned S_OK with the device format, mix
+format and property all 8 channels, mask `0x63F`, and `status` agreed; `set-layout
+stereo` put back 2 channels, 24-bit, 48 kHz, mask `0x3`, float32 mix, and `status`
+agreed; `restart-audio` from an administrator window restarted AudioSrv in 0.34 s,
+running before and after. So `SetDeviceFormat` needs no elevation (as far as the
+owner's window was unelevated, which the tool does not record).
+
+**Still not verified:** the approval prompt and its decline; a real
+`enable-enhancements` (CABLE Input's flag is absent, so it would change nothing
+unless enhancements are first turned off in Sound settings); whether open streams
+are invalidated by `set-layout`. **Found, not investigated:**
 `roundtrip` on the Headset endpoint `{136126fa-...}` fails with "the prepared
 install hosts the APO in its slot", with the committed build as well.
 
@@ -1966,6 +1973,101 @@ restored).
 **Tests:** `core_tests` 205 cases on MSVC 19.51 and GCC 16.1 (warnings as errors),
 ctest 6 of 6 with `transport_tests`, the APO self test, the transport check and
 the reference check pass.
+
+## 2026-09-14: Stage 4 begins: the Equalizer view, connected
+
+Qt 6.11.2 (MSVC 2022 kit; 6.12 LTS ships 2026-09-30 and is a rebuild away), built
+with `-DISOTONE_BUILD_UI=ON`, off by default so CI is unchanged. Layout under
+`ui/`: `backend/` without Qt (spectrum analysis, the state an output gets,
+`DeviceLink`), `src/` (the band model `EqSession`, `Outputs`, `ResponseGraph`),
+`qml/`, `fonts/` (Instrument Sans 400/500/600, OFL, from the project's GitHub).
+Qt's headers raise C4702 under `/WX`; that warning is off for the UI targets.
+
+**The Main board** renders at 1440 x 900 matching `Main.png` (same curve, bells,
+handles, readout at 3.2 kHz -1.7 dB from the core), with the owner's changes. The
+graph draws with QPainter from `magnitude_db`/`band_magnitude_db` (no preamp);
+measured 3.4 ms mean, 4.2 ms worst per paint with the live spectrum at 60 paints
+a second, so the scene-graph renderer is not needed yet.
+
+**Connected to outputs.** `Outputs` lists working outputs (`windows/devices`),
+refreshes on device notifications, and probes IsoAPO outputs off the UI thread.
+Edits go through `DeviceLink`: native writes the region under the seqlock on every
+edit; Equalizer APO applies during a drag and persists once on release, on a
+worker thread. The balance becomes the channel trims and speaker mute. Selecting
+an output loads what it plays (the region, the saved state, or its Isotone.txt
+block). The spectrum reads the ring (native) or loopback (Equalizer APO), mixes to
+mono, FFT 8192 Hann, smoothed in power (20 ms attack, 300 ms release), on its own
+0 to -90 dBFS scale, and disappears 500 ms after audio stops.
+
+Found while building it: IsoAPO's region exists only while a stream plays, so an
+edit made while idle reached nothing and the next stream started from the saved
+state. `DeviceLink` now reports a region it finds again and the session writes
+its state to it at once.
+
+**Band strip scrolling** (owner's report: neither a horizontal wheel nor a drag
+scrolled): a QML test reproduced three failures (horizontal wheel, dragging the
+columns, dragging the thumb) before the fix. `WheelHandler` takes only the
+vertical axis by default, the Flickable was not interactive, and the thumb had no
+drag. Fixed with a wheel area over the columns, an interactive Flickable whose
+gain sliders keep their drags (`preventStealing`), and a draggable track.
+
+**Live, on CABLE Input** (IsoAPO) to CABLE Output: the app started with
+`--output {cable} --add-band 1000,-6` while the cable was idle; once a stream
+started the band played, matching the peaking response on both channels to
+0.0001 dB at 250 Hz, 1 kHz and 4 kHz (-0.2216, -6.0000, -0.2119 dB against
+baseline); after the app exited, the next stream was flat again (no saved state).
+A 1 kHz tone at -12 dBFS showed as a peak near -14 dBFS on the spectrum (the band
+at 2 kHz takes 1.3 dB at 1 kHz).
+
+**Tests:** `ui_tests` (doctest, 7 cases: FFT, a sine's level, release and channel
+mixing, balance both ways, `DeviceLink` against a Local\ region and a sandbox
+Equalizer APO directory, loading back); `ui_qml_tests` (Qt Quick Test, 9 cases:
+the band strip's scrolling and that a slider drag sets gain instead). Both run in
+the UI build only.
+
+**Every filter type, live** (same day, owner's request): a scratch tool wrote each
+state through the UI's write path (`state_for_output`, `DeviceLink::commit`) to
+IsoAPO on CABLE Input while a silent stream held the region open, read it back,
+and `isotone-measure` measured CABLE Input to CABLE Output at the 31 third-octave
+points against the core's `magnitude_db` and `phase_deg` (what the graph draws).
+One band on the right channel only, so channel 0 stayed flat and channel 1's
+phase relative to it is the filter's: peak (Q and bandwidth), low and high shelf
+(Q, and dB slope with the corner shift), low pass, high pass, band pass, notch,
+all pass. Then on both channels: a peak, the 12-band Main board preset with
+preamp, preamp with balance -0.5, a disabled band, bypass. Worst magnitude error
+0.0013 dB (band pass at 20 kHz), worst phase error 0.002 degrees, over every point
+not below -50 dB (phase: -40 dB). One window, low pass at 20 kHz (-88 dB, not
+compared), failed on a capture glitch after retakes. Flat again afterwards within
+0.0003 dB; the live Equalizer APO files were byte-identical before and after. The
+app then loaded each state from the region and drew it; the screenshots show
+every type's curve as expected.
+
+Found in those screenshots and fixed: a bandwidth or dB slope was labelled as a Q
+("Q 1.50", "Q 12.00"), and a scroll on such a band set Q mode with that number,
+changing the sound at once. `setQ` is now `setWidth`, which keeps the band's unit
+(Q in the view's 0.1 to 50, the others held where the processor holds them), and
+the column shows "Q 1.41", "1.50 oct" or "12.0 dB/oct". `ui_model_tests` (new,
+doctest on `EqSession`) failed before the fix; breaking the mode, the label or the
+limit each fails it again. Also new in `ui_tests`: every type, on both channels
+and the right one, through `DeviceLink` to a Local\ region and to a sandbox
+Isotone.txt, loads back with the same magnitude and phase (1e-3 and 1e-6); dropping
+the width mode from the param block, or writing a bandwidth as Q in the text, fails
+it.
+
+Not fixed, for the owner: types without gain (low pass, high pass, band pass,
+notch, all pass) still show a gain slider and "+0.0 dB" that change nothing; the
+graph draws channel 0's composite only, so a band on the right channel alone
+leaves a flat curve with its handle at 0 dB until the L / R view exists.
+
+The QML tests failed on the desktop platform later that evening with the band
+strip 0 px wide: its Row was never laid out, because the window was not being
+drawn (the same binary passed offscreen; the display state was not checked).
+They now run offscreen unless `QT_QPA_PLATFORM` is set.
+
+**Writing to Equalizer APO outputs:** editing one writes `Isotone.txt` in Equalizer
+APO's config directory, which reloads every Equalizer APO device; Equalizer APO
+applies the block only once `config.txt` includes it (attach, not built in the UI
+yet).
 
 ---
 

@@ -68,3 +68,10 @@ if(WIN32 AND MSVC)
     add_subdirectory(windows/measure)
     add_subdirectory(windows/devices)
 endif()
+
+# The UI needs Qt 6.11 with its MSVC kit: pass
+# -DISOTONE_BUILD_UI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.11.2/msvc2022_64.
+option(ISOTONE_BUILD_UI "Build the Qt Quick UI" OFF)
+if(ISOTONE_BUILD_UI AND WIN32 AND MSVC)
+    add_subdirectory(ui)
+endif()

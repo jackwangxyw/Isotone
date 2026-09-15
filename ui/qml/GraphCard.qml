@@ -1,0 +1,183 @@
+import QtQuick
+import Isotone
+
+// The graph card: the response graph with draggable numbered handles and the
+// hover readout. Drag a handle for frequency and gain, scroll on it for Q.
+Rectangle {
+    id: root
+    property bool spectrumOn: true
+    // Where the readout is; negative for none.
+    property real hoverFrequency: -1
+
+    radius: 18
+    color: Theme.plot
+    height: 14 + 404 + 4
+
+    ResponseGraph {
+        id: graph
+        x: 10
+        y: 14
+        width: parent.width - 20
+        height: 404
+        session: EqSession
+        fontFamily: Theme.font
+        spectrumVisible: root.spectrumOn
+        perBandColours: Theme.perBandColours
+        bandColours: Theme.bandColours
+        accent: Theme.accent
+        gridMajor: Theme.gridMajor
+        gridMinor: Theme.gridMinor
+        zeroLine: Theme.zero
+        labelColour: Theme.muted
+        spectrumFill: Theme.spectrumFill
+        spectrumEdge: Theme.spectrumEdge
+        bell: Theme.bell
+        fillEdgeAlpha: Theme.fillEdgeAlpha
+        fillMidAlpha: Theme.fillMidAlpha
+
+        MouseArea {
+            anchors.fill: parent
+            onDoubleClicked: (mouse) => {
+                if (mouse.x >= graph.plotLeft && mouse.x <= graph.plotLeft + graph.plotWidth)
+                    EqSession.addBand(graph.frequencyAt(mouse.x), graph.dbAt(mouse.y))
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            onPositionChanged: (mouse) => {
+                const inside = mouse.x >= graph.plotLeft && mouse.x <= graph.plotLeft + graph.plotWidth
+                root.hoverFrequency = inside ? graph.frequencyAt(mouse.x) : -1
+            }
+            onExited: root.hoverFrequency = -1
+        }
+
+        // Hover readout: a dashed line and the composite at that frequency.
+        Item {
+            id: readout
+            visible: root.hoverFrequency > 0
+            // xOf and compositeAt are not properties: the conditions on revision and
+            // plotWidth make the bindings re-run when the curve or the size changes.
+            // (A comma expression does not: the compiled binding drops the unused read.)
+            readonly property real lineX: graph.revision >= 0 && graph.plotWidth > 0 ? graph.xOf(root.hoverFrequency) : 0
+            readonly property real db: graph.revision >= 0 ? graph.compositeAt(root.hoverFrequency) : 0
+            anchors.fill: parent
+            Repeater {
+                model: Math.ceil(graph.plotHeight / 7)
+                delegate: Rectangle {
+                    required property int index
+                    x: Math.round(readout.lineX)
+                    y: graph.plotTop + index * 7
+                    width: 1
+                    height: Math.min(3, graph.plotTop + graph.plotHeight - y)
+                    color: Theme.muted
+                }
+            }
+            Rectangle {
+                x: readout.lineX + 10
+                y: graph.plotTop + 10
+                width: chipText.implicitWidth + 20
+                height: 26
+                radius: 6
+                color: Theme.surface
+                border.color: Theme.gridMajor
+                Text {
+                    id: chipText
+                    x: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.StyledText
+                    font.family: Theme.font
+                    font.pixelSize: 12
+                    color: Theme.text
+                    text: {
+                        const f = root.hoverFrequency
+                        const hz = f >= 1000 ? Number((f / 1000).toPrecision(2)) + " kHz" : Math.round(f) + " Hz"
+                        return hz + "&nbsp;&nbsp;<font color='" + Theme.muted + "'>" + Theme.signed(readout.db, 1) + " dB</font>"
+                    }
+                }
+            }
+        }
+
+        Repeater {
+            model: EqSession
+            delegate: Item {
+                id: handle
+                required property int index
+                required property real frequency
+                required property real gain
+                required property real q
+                required property int position
+                required property int colorIndex
+                required property bool selected
+                readonly property color colour: Theme.bandColour(colorIndex)
+                readonly property real radius: selected ? 14 : 12
+                // Re-evaluated when the curve or the size changes, as the readout's.
+                readonly property real cx: graph.revision >= 0 && graph.plotWidth > 0 ? graph.xOf(frequency) : 0
+                readonly property real cy: graph.revision >= 0 && graph.plotHeight > 0 ? graph.yOf(graph.compositeAt(frequency)) : 0
+
+                x: cx - 20
+                y: cy - 20
+                width: 40
+                height: 40
+                z: selected ? 2 : 1
+                opacity: EqSession.eqOn && !EqSession.muted ? 1 : 0.4
+
+                Rectangle {
+                    visible: handle.selected
+                    anchors.centerIn: parent
+                    width: 40
+                    height: 40
+                    radius: 20
+                    color: "transparent"
+                    border.width: 2
+                    border.color: Qt.rgba(handle.colour.r, handle.colour.g, handle.colour.b, 0.45)
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: handle.radius * 2 + 2
+                    height: width
+                    radius: width / 2
+                    color: handle.colour
+                    border.width: 2
+                    border.color: Theme.plot
+                    Text {
+                        anchors.centerIn: parent
+                        anchors.verticalCenterOffset: 0.5
+                        text: handle.position
+                        font.family: Theme.font
+                        font.pixelSize: handle.position < 10 ? 12 : 11
+                        font.weight: Font.DemiBold
+                        color: Theme.textOnAccent
+                    }
+                }
+
+                MouseArea {
+                    anchors.centerIn: parent
+                    width: handle.radius * 2 + 4
+                    height: width
+                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                    property real startDb
+                    property real startGain
+                    onPressed: (mouse) => {
+                        EqSession.select(handle.index)
+                        const p = mapToItem(graph, mouse.x, mouse.y)
+                        startDb = graph.dbAt(p.y)
+                        startGain = handle.gain
+                    }
+                    onPositionChanged: (mouse) => {
+                        if (!pressed) return
+                        const p = mapToItem(graph, mouse.x, mouse.y)
+                        EqSession.setFrequency(handle.index, graph.frequencyAt(p.x))
+                        EqSession.setGain(handle.index, startGain + graph.dbAt(p.y) - startDb)
+                    }
+                    onReleased: EqSession.finishEdit()
+                    onWheel: (wheel) => {
+                        EqSession.select(handle.index)
+                        EqSession.setWidth(handle.index, handle.q * (wheel.angleDelta.y > 0 ? 1.08 : 1 / 1.08))
+                    }
+                }
+            }
+        }
+    }
+}

@@ -112,8 +112,8 @@ audio and tests.
   raise no device notification: re-read the engine after devicetool exits.
 - Speaker layout (the Speakers view's picker): `supported_speaker_layouts` and
   `set_speaker_layout` in `windows/devices/speaker_layout.h`, called from the UI
-  directly (whether `SetDeviceFormat` needs elevation is not yet measured; if it
-  does, `set-layout` runs through the session). The picker offers only the
+  directly: `SetDeviceFormat` worked from an unelevated window on CABLE Input
+  (2026-09-14), so no approval prompt. The picker offers only the
   supported layouts. A format change raises `DeviceWatcher`'s `format_changed`.
 - Tray presence for device auto-switch (plan 7.6).
 
