@@ -47,6 +47,8 @@ class EqSession : public QAbstractListModel {
     Q_PROPERTY(int viewChannel READ viewChannel WRITE setViewChannel NOTIFY viewChanged)
     // Surround: the channels the graph shows (the Showing picker), 0 for every speaker.
     Q_PROPERTY(int showingMask READ showingMask WRITE setShowingMask NOTIFY viewChanged)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY historyChanged)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY historyChanged)
 
 public:
     enum Role {
@@ -119,7 +121,8 @@ public:
     // speaker role (remap_channels).
     void useTarget(const isotone::ui::OutputTarget& target);
     // Replaces what is edited with `state` (flat when null), as useOutput does
-    // with what the output plays. Writes nothing to the output.
+    // with what the output plays. Writes nothing to the output. Starts the undo
+    // history again.
     void loadState(const isotone::EqState* state);
 
     Q_INVOKABLE void select(int row);
@@ -144,10 +147,14 @@ public:
     // A drag or a typed value is done: commits it to the output, and re-sorts
     // by frequency if that is the order.
     Q_INVOKABLE void finishEdit();
-    // FOUNDATION STUBS, the presets work package implements them: every committed
-    // edit is a step.
-    Q_INVOKABLE void undo() {}
-    Q_INVOKABLE void redo() {}
+    // Every committed edit is a step: a drag, a typed value, a toggle, adding or
+    // deleting a band, a preset loaded. The history is the current output's.
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
+    // Undoes step `step` (bandDeleted's) only while it is the last one.
+    Q_INVOKABLE bool undoStep(int step);
+    bool canUndo() const { return !undo_.empty(); }
+    bool canRedo() const { return !redo_.empty(); }
     // A typed value in `unit`'s base unit, or NaN when the text is not one.
     Q_INVOKABLE double parseValue(const QString& text, Unit unit) const;
 
@@ -165,6 +172,17 @@ public:
     isotone::EqState savedState() const;
     // Where the saved state files are; persisted_state_dir(false) unless a test moves it.
     void setSavedStateDir(const std::wstring& dir) { saved_state_dir_ = dir; }
+    // Presets. Edits `target` from now on, starting from what it plays (useOutput's work).
+    explicit EqSession(std::unique_ptr<isotone::ui::DeviceLink> link, QObject* parent = nullptr);
+    // Bands, preamp and Auto, for the output's layout (presetstore.h).
+    isotone::EqState eqPart() const;
+    // Replaces bands, preamp and Auto with `eq`'s, moved to the output's layout;
+    // balance, mute, trims, bypass and the speaker setup stay. One step, committed.
+    void setEqPart(const isotone::EqState& eq);
+    // As setEqPart, but no step and nothing written: the output already plays it.
+    void adoptEqPart(const isotone::EqState& eq);
+    // Writes the output's saved state (native) and what it plays.
+    void saveToOutput();
 
 signals:
     void countChanged();
@@ -177,8 +195,31 @@ signals:
     void viewChanged();
     // A speaker setup change could not be saved; a Win32 error code.
     void speakerSaveFailed(int error);
+    void historyChanged();
+    // Another output is edited.
+    void targetChanged();
+    // An edit was committed, or the state was replaced (load, undo).
+    void committed();
+    // `position` is the band's 1-based place; `step` its undo step.
+    void bandDeleted(int position, int step);
 
 private:
+    struct Snapshot {
+        isotone::EqState state;
+        double balance = 0.0;
+    };
+    struct Step {
+        Snapshot before, after;
+        uint32_t selected_before = 0, selected_after = 0;
+        int id = 0;
+    };
+    // Makes what changed since the last step a step. False when nothing did.
+    bool record();
+    void restore(const Snapshot& s, uint32_t selected);
+    void resetHistory();
+    void replaceEq(const isotone::EqState& eq);
+    void write();    // what is edited, to the output
+
     std::vector<size_t> displayOrder() const;
     void rebuildOrder();
     uint32_t nextBandId() const;
@@ -212,4 +253,9 @@ private:
     qint64 last_frame_ms_ = -1000000;
     qint64 last_update_ms_ = 0;
     bool spectrum_active_ = false;
+
+    std::vector<Step> undo_, redo_;
+    Snapshot baseline_;               // as of the last step
+    uint32_t baseline_selected_ = 0;  // the band selected before the edit in progress
+    int next_step_ = 1;
 };

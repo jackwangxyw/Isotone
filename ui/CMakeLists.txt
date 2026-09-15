@@ -49,10 +49,18 @@ qt_add_library(isotone_ui STATIC
     src/speakers.h
     src/speakerstore.cpp
     src/speakerstore.h
+    # Presets work package.
+    src/presetstore.cpp
+    src/presetstore.h
+    src/importpreview.cpp
+    src/importpreview.h
+    src/curvepreview.cpp
+    src/curvepreview.h
 )
 
 # Before qt_add_qml_module, which reads it.
 set_source_files_properties(qml/Theme.qml qml/UiState.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/PresetActions.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_qml_module(isotone_ui
     URI Isotone
@@ -94,6 +102,13 @@ qt_add_qml_module(isotone_ui
         qml/ShowingPicker.qml
         qml/LayoutDialog.qml
         qml/NewGroupDialog.qml
+        qml/PresetActions.qml
+        qml/PresetPrompts.qml
+        qml/UnsavedDialog.qml
+        qml/SaveAsDialog.qml
+        qml/ImportDialog.qml
+        qml/ExportDialog.qml
+        qml/DropOverlay.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -118,7 +133,7 @@ if(ISOTONE_BUILD_TESTS)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
     add_test(NAME ui_tests COMMAND ui_tests)
 
-    add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp)
+    add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp)
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_model_tests PRIVATE /wd5285)   # doctest, as in core/tests

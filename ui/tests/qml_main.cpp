@@ -26,6 +26,8 @@ static const bool kPlatformChosen = [] {
         QDir(dir).removeRecursively();
         qputenv("ISOTONE_DATA_DIR", dir.toUtf8());
     }
+    // tst_export reads back the file it wrote.
+    qputenv("QML_XHR_ALLOW_FILE_READ", "1");
     return true;
 }();
 

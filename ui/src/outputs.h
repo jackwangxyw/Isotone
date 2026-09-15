@@ -56,6 +56,7 @@ public:
     QString currentName() const;
     QString currentActivity() const;
     const Output* current() const;
+    const std::vector<Output>& outputs() const { return outputs_; }
 
     Q_INVOKABLE void select(int row);
     // By endpoint GUID, any form canonical_endpoint_guid takes. False if it is not a working output.

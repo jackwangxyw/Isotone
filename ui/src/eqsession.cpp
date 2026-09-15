@@ -64,10 +64,12 @@ constexpr double kAutoPreampMatchDb = 0.01;
 }  // namespace
 
 EqSession::EqSession(QObject* parent)
-    : QAbstractListModel(parent),
-      link_(std::make_unique<isotone::ui::DeviceLink>(L"Global\\", AppPaths::compatConfigDir().toStdWString())),
-      audio_(size_t{8192} * isotone::kMaxChannels) {
+    : EqSession(std::make_unique<isotone::ui::DeviceLink>(L"Global\\", AppPaths::compatConfigDir().toStdWString()), parent) {}
+
+EqSession::EqSession(std::unique_ptr<isotone::ui::DeviceLink> link, QObject* parent)
+    : QAbstractListModel(parent), link_(std::move(link)), audio_(size_t{8192} * isotone::kMaxChannels) {
     state_.auto_preamp = true;
+    baseline_.state = state_;
     preset_name_ = QStringLiteral("Untitled");
     rebuildOrder();
     clock_.start();
@@ -199,6 +201,7 @@ void EqSession::useTarget(const isotone::ui::OutputTarget& target) {
     // Start from what the output plays.
     isotone::EqState loaded;
     loadState(link_->load_current(&loaded) ? &loaded : nullptr);
+    emit targetChanged();
 }
 
 void EqSession::loadState(const isotone::EqState* state) {
@@ -230,6 +233,7 @@ void EqSession::loadState(const isotone::EqState* state) {
     selected_id_ = state_.bands.empty() ? 0 : state_.bands.front().id;
     rebuildOrder();
     endResetModel();
+    resetHistory();
     emit countChanged();
     emit selectionChanged();
     emit stateChanged();
@@ -242,6 +246,12 @@ void EqSession::push() {
 }
 
 void EqSession::commit() {
+    record();
+    write();
+    emit committed();
+}
+
+void EqSession::write() {
     if (target_.backend == isotone::ui::Backend::none) return;
     link_->commit(engineState());
 }
@@ -257,7 +267,7 @@ void EqSession::readSpectrum() {
         last_frame_ms_ = now;
     }
     // An engine that started playing since the last edit gets the current state.
-    if (link_->take_region_opened()) commit();
+    if (link_->take_region_opened()) write();
     const bool active = now - last_frame_ms_ < kSpectrumTimeoutMs;
     if (active) analyzer_.update(rate, std::max<qint64>(1, now - last_update_ms_) / 1000.0);
     last_update_ms_ = now;
@@ -322,6 +332,7 @@ void EqSession::select(int row) {
     if (b == nullptr || b->id == selected_id_) return;
     const int previous = selectedRow();
     selected_id_ = b->id;
+    baseline_selected_ = b->id;   // the band an edit that follows is undone onto
     if (previous >= 0) emit dataChanged(index(previous), index(previous), {SelectedRole});
     emit dataChanged(index(row), index(row), {SelectedRole});
     emit selectionChanged();
@@ -453,6 +464,7 @@ void EqSession::deleteBand(int row) {
     updateAutoPreamp();
     commit();
     emit curveChanged();
+    emit bandDeleted(row + 1, undo_.empty() ? 0 : undo_.back().id);
 }
 
 void EqSession::finishEdit() {
@@ -559,6 +571,150 @@ void EqSession::editSpeakers(const std::function<void(isotone::EqState*)>& edit)
     emit curveChanged();
 }
 
+// ---------------------------------------------------------------------------
+// Undo and redo, and a preset's EQ
+
+namespace {
+
+bool same_band(const isotone::Band& a, const isotone::Band& b) {
+    return a.id == b.id && a.type == b.type && a.fc == b.fc && a.gain_db == b.gain_db && a.width == b.width &&
+           a.width_mode == b.width_mode && a.shelf_corner == b.shelf_corner && a.channels == b.channels &&
+           a.enabled == b.enabled;
+}
+
+bool same_state(const isotone::EqState& a, const isotone::EqState& b) {
+    if (a.bypass != b.bypass || a.preamp_db != b.preamp_db || a.auto_preamp != b.auto_preamp || a.mute != b.mute ||
+        a.layout_channels != b.layout_channels || a.layout_speaker_mask != b.layout_speaker_mask ||
+        a.bands.size() != b.bands.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.bands.size(); ++i)
+        if (!same_band(a.bands[i], b.bands[i])) return false;
+    const isotone::SpeakerSetup& x = a.speakers;
+    const isotone::SpeakerSetup& y = b.speakers;
+    for (uint32_t c = 0; c < isotone::kMaxChannels; ++c) {
+        if (a.channel_gain_db[c] != b.channel_gain_db[c] || x.delay_ms[c] != y.delay_ms[c]) return false;
+    }
+    return x.inverted == y.inverted && x.muted == y.muted && x.lip_sync_ms == y.lip_sync_ms &&
+           x.swap_left_right == y.swap_left_right && x.swap_front_rear == y.swap_front_rear && x.upmix == y.upmix &&
+           x.bass_management == y.bass_management && x.crossover_hz == y.crossover_hz &&
+           x.small_speakers == y.small_speakers && x.lfe_lowpass_hz == y.lfe_lowpass_hz;
+}
+
+// The history a session keeps.
+constexpr size_t kMaxSteps = 500;
+
+}  // namespace
+
+bool EqSession::record() {
+    const uint32_t selected_before = baseline_selected_;
+    baseline_selected_ = selected_id_;
+    if (balance_ == baseline_.balance && same_state(state_, baseline_.state)) return false;
+    Step step;
+    step.before = baseline_;
+    step.after = Snapshot{state_, balance_};
+    step.selected_before = selected_before;
+    step.selected_after = selected_id_;
+    step.id = next_step_++;
+    undo_.push_back(std::move(step));
+    if (undo_.size() > kMaxSteps) undo_.erase(undo_.begin());
+    redo_.clear();
+    baseline_ = Snapshot{state_, balance_};
+    emit historyChanged();
+    return true;
+}
+
+void EqSession::resetHistory() {
+    undo_.clear();
+    redo_.clear();
+    baseline_ = Snapshot{state_, balance_};
+    baseline_selected_ = selected_id_;
+    emit historyChanged();
+}
+
+void EqSession::restore(const Snapshot& s, uint32_t selected) {
+    beginResetModel();
+    state_ = s.state;
+    balance_ = s.balance;
+    const bool present = std::any_of(state_.bands.begin(), state_.bands.end(),
+                                     [&](const isotone::Band& b) { return b.id == selected; });
+    selected_id_ = present ? selected : state_.bands.empty() ? 0 : state_.bands.front().id;
+    rebuildOrder();
+    endResetModel();
+    baseline_ = Snapshot{state_, balance_};
+    baseline_selected_ = selected_id_;
+    write();
+    emit countChanged();
+    emit selectionChanged();
+    emit stateChanged();
+    emit curveChanged();
+    emit historyChanged();
+    emit committed();
+}
+
+void EqSession::undo() {
+    record();   // an edit not yet committed is a step of its own
+    if (undo_.empty()) return;
+    Step step = std::move(undo_.back());
+    undo_.pop_back();
+    const Snapshot before = step.before;
+    const uint32_t selected = step.selected_before;
+    redo_.push_back(std::move(step));
+    restore(before, selected);
+}
+
+void EqSession::redo() {
+    if (redo_.empty()) return;
+    Step step = std::move(redo_.back());
+    redo_.pop_back();
+    const Snapshot after = step.after;
+    const uint32_t selected = step.selected_after;
+    undo_.push_back(std::move(step));
+    restore(after, selected);
+}
+
+bool EqSession::undoStep(int step) {
+    if (undo_.empty() || undo_.back().id != step) return false;
+    undo();
+    return true;
+}
+
+isotone::EqState EqSession::eqPart() const {
+    isotone::EqState eq;
+    eq.bands = state_.bands;
+    eq.preamp_db = state_.preamp_db;
+    eq.auto_preamp = state_.auto_preamp;
+    eq.layout_channels = target_.layout.channels;
+    eq.layout_speaker_mask = target_.layout.speaker_mask;
+    return eq;
+}
+
+void EqSession::replaceEq(const isotone::EqState& eq) {
+    isotone::EqState moved = eq;
+    isotone::remap_channels(&moved, isotone::ChannelLayout{target_.layout.channels, target_.layout.speaker_mask});
+    beginResetModel();
+    state_.bands = std::move(moved.bands);
+    std::set<uint32_t> seen;
+    uint32_t next = 1;
+    for (const isotone::Band& b : state_.bands) next = std::max(next, b.id + 1);
+    for (isotone::Band& b : state_.bands) {
+        if (b.id == 0 || !seen.insert(b.id).second) {
+            b.id = next++;
+            seen.insert(b.id);
+        }
+    }
+    state_.preamp_db = eq.preamp_db;
+    state_.auto_preamp = eq.auto_preamp;
+    updateAutoPreamp();
+    selected_id_ = state_.bands.empty() ? 0 : state_.bands.front().id;
+    rebuildOrder();
+    endResetModel();
+    emit countChanged();
+    emit selectionChanged();
+    emit stateChanged();
+    emit curveChanged();
+}
+
 void EqSession::setLiveOverrides(const isotone::ui::LiveOverrides& overrides) {
     if (overrides.solo_muted == overrides_.solo_muted && overrides.test_tones == overrides_.test_tones) return;
     overrides_ = overrides;
@@ -571,4 +727,27 @@ isotone::EqState EqSession::engineState() const {
     isotone::EqState s = savedState();
     isotone::ui::apply_live_overrides(overrides_, &s);
     return s;
+}
+
+void EqSession::setEqPart(const isotone::EqState& eq) {
+    replaceEq(eq);
+    commit();
+}
+
+void EqSession::adoptEqPart(const isotone::EqState& eq) {
+    replaceEq(eq);
+    resetHistory();
+}
+
+void EqSession::saveToOutput() {
+    switch (target_.backend) {
+        case isotone::ui::Backend::native:
+            link_->save(isotone::ui::state_for_output(state_, balance_, target_.layout));
+            break;
+        case isotone::ui::Backend::equalizer_apo:
+            write();   // Isotone.txt is what it starts with
+            break;
+        case isotone::ui::Backend::none:
+            break;
+    }
 }

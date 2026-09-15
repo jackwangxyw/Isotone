@@ -22,6 +22,12 @@ namespace {
 // an open per frame for nothing.
 constexpr ULONGLONG kReopenIntervalMs = 1000;
 
+// A region outside Global\ is a test's (IsoAPO-selftest's): its saved state is
+// the self test's too, as isotone-shm pairs them, never a real device's file.
+std::wstring saved_state_path(const std::wstring& region_namespace, const std::wstring& guid) {
+    return isotone::win::persisted_state_path(isotone::win::persisted_state_dir(region_namespace != L"Global\\"), guid);
+}
+
 // A GUID is ASCII.
 std::string narrow(const std::wstring& w) {
     std::string s;
@@ -109,8 +115,7 @@ DWORD DeviceLink::save(const EqState& state) {
     if (target_.backend != Backend::native) return ERROR_NOT_SUPPORTED;
     ParamBlock block{};
     to_param_block(state, &block);
-    const std::wstring path =
-        isotone::win::persisted_state_path(isotone::win::persisted_state_dir(false), target_.guid);
+    const std::wstring path = saved_state_path(namespace_, target_.guid);
     if (path.empty()) return ERROR_INVALID_NAME;
     const DWORD error = isotone::win::write_persisted_state(path, block);
     if (error != ERROR_SUCCESS) return error;
@@ -128,8 +133,7 @@ bool DeviceLink::load_current(EqState* out) {
             from_param_block(block, out);
             return true;
         }
-        const std::wstring path =
-            isotone::win::persisted_state_path(isotone::win::persisted_state_dir(false), target_.guid);
+        const std::wstring path = saved_state_path(namespace_, target_.guid);
         if (!path.empty() && isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded) {
             from_param_block(block, out);
             return true;
