@@ -18,8 +18,6 @@
 namespace {
 
 constexpr double kSampleRate = 48000.0;
-constexpr double kFMin = 20.0, kFMax = 20000.0;
-const double kDecades = std::log(kFMax / kFMin);
 
 QString minus_sign(QString s) { return s.replace(QLatin1Char('-'), QChar(0x2212)); }
 
@@ -56,13 +54,69 @@ void ResponseGraph::geometryChange(const QRectF& now, const QRectF& before) {
     }
 }
 
-double ResponseGraph::xOf(double hz) const { return kLeft + plotWidth() * std::log(hz / kFMin) / kDecades; }
+void ResponseGraph::setRangeDb(double db) {
+    if (db == range_db_ || !(db > 0)) return;
+    range_db_ = db;
+    emit rangeChanged();
+    curveChanged();
+}
+
+void ResponseGraph::setMinHz(double hz) {
+    if (hz == min_hz_ || !(hz > 0)) return;
+    min_hz_ = hz;
+    emit rangeChanged();
+    curveChanged();
+}
+
+void ResponseGraph::setMaxHz(double hz) {
+    if (hz == max_hz_ || !(hz > 0)) return;
+    max_hz_ = hz;
+    emit rangeChanged();
+    curveChanged();
+}
+
+std::vector<ResponseGraph::GridLine> ResponseGraph::gridLines(double min_hz, double max_hz) {
+    std::vector<GridLine> lines;
+    const double lo = min_hz * (1 - 1e-9), hi = max_hz * (1 + 1e-9);
+    for (double decade = std::pow(10.0, std::floor(std::log10(min_hz))); decade <= hi; decade *= 10.0) {
+        for (int m : {1, 2, 3, 4, 5, 6, 8}) {
+            const double f = std::round(m * decade * 1e6) / 1e6;
+            if (f >= lo && f <= hi) lines.push_back({f, m == 1 || m == 2 || m == 5});
+        }
+    }
+    if (lines.size() >= 3) return lines;
+    // Narrower than that: even steps of the power of ten under the span, major every fifth.
+    lines.clear();
+    const double step = std::pow(10.0, std::floor(std::log10(max_hz - min_hz)));
+    for (double n = std::ceil(lo / step); n * step <= hi; n += 1.0) lines.push_back({n * step, std::fmod(n, 5.0) == 0.0});
+    return lines;
+}
+
+std::vector<double> ResponseGraph::labelFrequencies(double min_hz, double max_hz) {
+    const std::vector<GridLine> lines = gridLines(min_hz, max_hz);
+    std::vector<double> major, all;
+    for (const GridLine& l : lines) {
+        all.push_back(l.hz);
+        if (l.major) major.push_back(l.hz);
+    }
+    if (major.size() >= 3) return major;
+    if (all.size() >= 2) return all;
+    std::vector<double> ends{min_hz};
+    for (double f : all)
+        if (f > min_hz && f < max_hz) ends.push_back(f);
+    ends.push_back(max_hz);
+    return ends;
+}
+
+double ResponseGraph::xOf(double hz) const {
+    return kLeft + plotWidth() * std::log(hz / min_hz_) / std::log(drawnMaxHz() / min_hz_);
+}
 
 double ResponseGraph::yOf(double db) const { return kTop + plotHeight() / 2.0 - db * (plotHeight() / 2.0) / range_db_; }
 
 double ResponseGraph::frequencyAt(double x) const {
     const double t = std::clamp((x - kLeft) / plotWidth(), 0.0, 1.0);
-    return kFMin * std::exp(t * kDecades);
+    return min_hz_ * std::exp(t * std::log(drawnMaxHz() / min_hz_));
 }
 
 double ResponseGraph::dbAt(double y) const { return (kTop + plotHeight() / 2.0 - y) * range_db_ / (plotHeight() / 2.0); }
@@ -108,16 +162,10 @@ void ResponseGraph::paint(QPainter* p) {
     p->setRenderHint(QPainter::Antialiasing, true);
 
     // Grid: every 1-2-5 decade line major, the rest minor.
-    const double grid_lines[] = {20, 30, 40, 50, 60, 80, 100, 200, 300, 400, 500, 600, 800,
-                                 1000, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 20000};
-    const auto major = [](double f) {
-        for (double m : {20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0})
-            if (f == m) return true;
-        return false;
-    };
-    for (double f : grid_lines) {
-        p->setPen(QPen(major(f) ? grid_major_ : grid_minor_, 1.0));
-        const double x = std::round(xOf(f)) + 0.5;
+    const double max_hz = drawnMaxHz();
+    for (const GridLine& line : gridLines(min_hz_, max_hz)) {
+        p->setPen(QPen(line.major ? grid_major_ : grid_minor_, 1.0));
+        const double x = std::round(xOf(line.hz)) + 0.5;
         p->drawLine(QPointF(x, kTop), QPointF(x, kTop + ph));
     }
 
@@ -127,11 +175,17 @@ void ResponseGraph::paint(QPainter* p) {
     p->setFont(font);
     const QFontMetricsF fm(font);
     p->setPen(label_colour_);
-    for (double f : {20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0}) {
+    // At the plot's edges a label is aligned inside it; one that would touch the
+    // previous label is left out.
+    double previous_right = -1e9;
+    for (double f : labelFrequencies(min_hz_, max_hz)) {
         const QString label = f >= 1000 ? QStringLiteral("%1k").arg(f / 1000) : QString::number(f);
         const double tw = fm.horizontalAdvance(label);
-        const double x = f == 20 ? xOf(f) : f == 20000 ? xOf(f) - tw : xOf(f) - tw / 2;
+        const double at = xOf(f);
+        const double x = at <= kLeft + 1 ? at : at >= kLeft + pw - 1 ? at - tw : at - tw / 2;
+        if (x < previous_right + 8) continue;
         p->drawText(QPointF(x, h - 10), label);
+        previous_right = x + tw;
     }
     const double step = range_db_ >= 20 ? 12.0 : 6.0;
     for (double level = -std::floor(range_db_ / step) * step; level <= range_db_; level += step) {
@@ -146,7 +200,8 @@ void ResponseGraph::paint(QPainter* p) {
 
     const size_t n = static_cast<size_t>(std::max(64.0, pw));
     std::vector<double> freqs(n);
-    for (size_t i = 0; i < n; ++i) freqs[i] = kFMin * std::exp(kDecades * static_cast<double>(i) / static_cast<double>(n - 1));
+    const double decades = std::log(max_hz / min_hz_);
+    for (size_t i = 0; i < n; ++i) freqs[i] = min_hz_ * std::exp(decades * static_cast<double>(i) / static_cast<double>(n - 1));
     const auto x_at = [&](size_t i) { return kLeft + pw * static_cast<double>(i) / static_cast<double>(n - 1); };
 
     const bool muted = session_ && session_->state().mute;
@@ -167,6 +222,18 @@ void ResponseGraph::paint(QPainter* p) {
         area.closeSubpath();
         p->fillPath(area, spectrum_fill_);
         p->strokePath(edge, QPen(spectrum_edge_, 1.0));
+        // Peak hold: the spectrum's edge colour at twice its opacity, no fill.
+        if (peak_hold_ && session_->spectrumPeakLevels(freqs.data(), n, spectrum.data())) {
+            QPainterPath peak;
+            for (size_t i = 0; i < n; ++i) {
+                const double v = std::min(0.0, spectrum[i]);
+                const QPointF pt(x_at(i), std::min(kTop + ph, kTop + ph * (-v / 90.0)));
+                i == 0 ? peak.moveTo(pt) : peak.lineTo(pt);
+            }
+            QColor c = spectrum_edge_;
+            c.setAlphaF(std::min(1.0f, c.alphaF() * 2.0f));
+            p->strokePath(peak, QPen(c, 1.0));
+        }
     }
     if (!session_) return;
 

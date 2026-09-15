@@ -9,12 +9,21 @@
 //   --click <x>,<y>[,right]   click there once the window has drawn (repeatable, in order)
 //   --data-dir <dir>          settings and presets there instead of %APPDATA%\Isotone
 //   --compat-dir <dir>        Equalizer APO outputs write Isotone.txt there, not in its install
+//   --tray                    start hidden in the tray (launch at sign-in with Start in the tray)
+//   --key <keys>              press keys ("Ctrl+M") after the clicks (repeatable, in order)
+//
+// One instance per user and data directory: a second launch shows the running
+// window and exits (singleinstance.h). A screenshot run is always its own, and
+// registers no global hotkeys and no tray icon.
 
 #include <QCommandLineParser>
+#include <QSystemTrayIcon>
 #include <QFont>
 #include <QFontDatabase>
 #include <QApplication>
 #include <QImage>
+#include <QKeyEvent>
+#include <QKeySequence>
 #include <QMouseEvent>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
@@ -23,9 +32,17 @@
 #include "apppaths.h"
 #include "eqsession.h"
 #include "outputs.h"
+// Settings
+#include "globalhotkeys.h"
+#include "logomark.h"
+#include "presets.h"
+#include "shortcutregistry.h"
+#include "singleinstance.h"
+#include "traymenu.h"
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 int main(int argc, char* argv[]) {
     // A screenshot is compared pixel for pixel with the 1440 x 900 boards, so it
@@ -53,10 +70,27 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption compat_dir(QStringLiteral("compat-dir"), QStringLiteral("Write Equalizer APO outputs to <dir>."), QStringLiteral("dir"));
     parser.addOption(data_dir);
     parser.addOption(compat_dir);
+    const QCommandLineOption tray(QStringLiteral("tray"), QStringLiteral("Start in the tray."));
+    parser.addOption(tray);
+    const QCommandLineOption key(QStringLiteral("key"), QStringLiteral("Press <keys> after the clicks."), QStringLiteral("keys"));
+    parser.addOption(key);
     parser.process(app);
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
     if (parser.isSet(compat_dir)) AppPaths::setCompatConfigDir(parser.value(compat_dir));
+
+    // Settings: one instance; the tray keeps the app running with the window closed.
+    const bool checking = parser.isSet(screenshot);
+    const bool start_hidden = parser.isSet(tray) && !checking;
+    SingleInstance instance(SingleInstance::nameFor(AppPaths::dataDir()));
+    if (!checking) {
+        if (instance.notifyRunning(!start_hidden)) return 0;
+        if (!instance.listen()) {
+            std::fprintf(stderr, "another Isotone holds %s and did not answer\n", qPrintable(SingleInstance::nameFor(AppPaths::dataDir())));
+            return 1;
+        }
+    }
+    QApplication::setQuitOnLastWindowClosed(false);
 
     for (const char* face : {"Regular", "Medium", "SemiBold"}) {
         const QString path = QStringLiteral(":/qt/qml/Isotone/fonts/InstrumentSans-%1.ttf").arg(QLatin1String(face));
@@ -73,8 +107,32 @@ int main(int argc, char* argv[]) {
     QQmlApplicationEngine engine;
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
                      Qt::QueuedConnection);
+    if (start_hidden) engine.setInitialProperties({{QStringLiteral("visible"), false}});
     engine.loadFromModule("Isotone", "Main");
     if (engine.rootObjects().isEmpty()) return 1;
+
+    // Settings: global hotkeys, the tray icon and its menu, a later launch's request.
+    auto* root_window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
+    const auto show_window = [root_window] {
+        if (root_window->windowState() & Qt::WindowMinimized)
+            root_window->showNormal();
+        else
+            root_window->show();
+        root_window->raise();
+        root_window->requestActivate();
+    };
+    auto* shortcuts = engine.singletonInstance<ShortcutRegistry*>("Isotone", "ShortcutRegistry");
+    std::unique_ptr<GlobalHotkeys> hotkeys;
+    if (!checking) hotkeys = std::make_unique<GlobalHotkeys>(shortcuts);
+    TrayMenu tray_menu(engine.singletonInstance<EqSession*>("Isotone", "EqSession"),
+                       engine.singletonInstance<Outputs*>("Isotone", "Outputs"),
+                       engine.singletonInstance<Presets*>("Isotone", "Presets"), shortcuts);
+    QSystemTrayIcon tray_icon(logo_mark_icon());
+    tray_menu.attach(&tray_icon);
+    if (!checking) tray_icon.show();
+    QObject::connect(&tray_menu, &TrayMenu::openRequested, &app, show_window);
+    QObject::connect(&tray_menu, &TrayMenu::quitRequested, &app, &QCoreApplication::quit);
+    QObject::connect(&instance, &SingleInstance::showRequested, &app, show_window);
 
     if (parser.isSet(output)) {
         auto* outputs = engine.singletonInstance<Outputs*>("Isotone", "Outputs");
@@ -104,6 +162,18 @@ int main(int argc, char* argv[]) {
             const Qt::MouseButton button = parts.size() > 2 && parts[2] == QLatin1String("right") ? Qt::RightButton : Qt::LeftButton;
             QMouseEvent press(QEvent::MouseButtonPress, at, window->mapToGlobal(at), button, button, Qt::NoModifier);
             QMouseEvent release(QEvent::MouseButtonRelease, at, window->mapToGlobal(at), button, Qt::NoButton, Qt::NoModifier);
+            QGuiApplication::sendEvent(window, &press);
+            QGuiApplication::sendEvent(window, &release);
+        });
+    }
+    const QStringList keys = parser.values(key);
+    for (qsizetype i = 0; i < keys.size(); ++i) {
+        QTimer::singleShot(static_cast<int>(800 + 100 * (clicks.size() + i)), &app, [window, spec = keys[i]] {
+            const QKeySequence sequence = QKeySequence::fromString(spec, QKeySequence::PortableText);
+            if (sequence.isEmpty()) return;
+            const QKeyCombination c = sequence[0];
+            QKeyEvent press(QEvent::KeyPress, c.key(), c.keyboardModifiers());
+            QKeyEvent release(QEvent::KeyRelease, c.key(), c.keyboardModifiers());
             QGuiApplication::sendEvent(window, &press);
             QGuiApplication::sendEvent(window, &release);
         });

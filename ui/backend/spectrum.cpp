@@ -35,17 +35,28 @@ void fft(std::vector<std::complex<double>>& x) {
     }
 }
 
-SpectrumAnalyzer::SpectrumAnalyzer(double release_ms, double attack_ms)
-    : history_(kFftSize, 0.0f), window_(kFftSize), work_(kFftSize), smoothed_(kFftSize / 2 + 1, kFloorDb), power_(kFftSize / 2 + 1, 0.0),
-      release_ms_(release_ms), attack_ms_(attack_ms) {
-    for (size_t i = 0; i < kFftSize; ++i)
-        window_[i] = 0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(i) / static_cast<double>(kFftSize));
+SpectrumAnalyzer::SpectrumAnalyzer(double release_ms, double attack_ms) : release_ms_(release_ms), attack_ms_(attack_ms) {
+    set_fft_size(kFftSize);
+}
+
+void SpectrumAnalyzer::set_fft_size(size_t n) {
+    fft_size_ = n;
+    history_.assign(n, 0.0f);
+    work_.assign(n, {});
+    window_.resize(n);
+    for (size_t i = 0; i < n; ++i) window_[i] = 0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(i) / static_cast<double>(n));
+    smoothed_.assign(n / 2 + 1, kFloorDb);
+    power_.assign(n / 2 + 1, 0.0);
+    peak_.assign(n / 2 + 1, kFloorDb);
+    write_ = 0;
+    filled_ = 0;
 }
 
 void SpectrumAnalyzer::reset() {
     std::fill(history_.begin(), history_.end(), 0.0f);
     std::fill(smoothed_.begin(), smoothed_.end(), kFloorDb);
     std::fill(power_.begin(), power_.end(), 0.0);
+    std::fill(peak_.begin(), peak_.end(), kFloorDb);
     write_ = 0;
     filled_ = 0;
 }
@@ -56,20 +67,21 @@ void SpectrumAnalyzer::push(const float* interleaved, size_t frames, uint32_t ch
         double sum = 0.0;
         for (uint32_t c = 0; c < channels; ++c) sum += interleaved[f * channels + c];
         history_[write_] = static_cast<float>(sum / channels);
-        write_ = (write_ + 1) % kFftSize;
+        write_ = (write_ + 1) % fft_size_;
     }
-    filled_ = std::min(kFftSize, filled_ + frames);
+    filled_ = std::min(fft_size_, filled_ + frames);
 }
 
 void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
     sample_rate_ = sample_rate;
-    if (filled_ < kFftSize) return;
-    for (size_t i = 0; i < kFftSize; ++i) work_[i] = {history_[(write_ + i) % kFftSize] * window_[i], 0.0};
+    if (filled_ < fft_size_) return;
+    for (size_t i = 0; i < fft_size_; ++i) work_[i] = {history_[(write_ + i) % fft_size_] * window_[i], 0.0};
     fft(work_);
     // A full-scale sine gives |X| = N/2 * (window mean 0.5): scale so it reads 0 dB.
-    const double scale = 2.0 / (static_cast<double>(kFftSize) * 0.5);
+    const double scale = 2.0 / (static_cast<double>(fft_size_) * 0.5);
     const double release = 1.0 - std::exp(-elapsed_s * 1000.0 / release_ms_);
     const double attack = 1.0 - std::exp(-elapsed_s * 1000.0 / attack_ms_);
+    const double fall = kPeakFallDbPerSecond * elapsed_s;
     // Smoothed in power, as a meter's ballistics are, then shown in dB.
     const double floor_power = std::pow(10.0, kFloorDb / 10.0);
     for (size_t b = 0; b < smoothed_.size(); ++b) {
@@ -78,12 +90,17 @@ void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
         double& p = power_[b];
         p += (power - p) * (power > p ? attack : release);
         smoothed_[b] = 10.0 * std::log10(std::max(p, floor_power));
+        peak_[b] = std::max(smoothed_[b], peak_[b] - fall);
     }
 }
 
-void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db) const {
-    const double bin_hz = sample_rate_ / static_cast<double>(kFftSize);
-    const size_t last = smoothed_.size() - 1;
+void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db) const { sample(smoothed_, freqs, n, out_db); }
+
+void SpectrumAnalyzer::peak_levels_at(const double* freqs, size_t n, double* out_db) const { sample(peak_, freqs, n, out_db); }
+
+void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db) const {
+    const double bin_hz = sample_rate_ / static_cast<double>(fft_size_);
+    const size_t last = bins.size() - 1;
     for (size_t i = 0; i < n; ++i) {
         const double centre = freqs[i] / bin_hz;
         // The span halfway to each neighbouring display point.
@@ -93,13 +110,14 @@ void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db) 
         const size_t end = static_cast<size_t>(std::floor(hi));
         if (end >= first + 1 && end <= last) {
             double peak = kFloorDb;
-            for (size_t b = first; b <= end; ++b) peak = std::max(peak, smoothed_[b]);
+            for (size_t b = first; b <= end; ++b) peak = std::max(peak, bins[b]);
             out_db[i] = peak;
         } else {
             const size_t b0 = std::min(last - 1, static_cast<size_t>(std::floor(centre)));
             const double t = std::clamp(centre - static_cast<double>(b0), 0.0, 1.0);
-            out_db[i] = smoothed_[b0] + (smoothed_[b0 + 1] - smoothed_[b0]) * t;
+            out_db[i] = bins[b0] + (bins[b0 + 1] - bins[b0]) * t;
         }
+        out_db[i] += tilt_ * std::log2(freqs[i] / 1000.0);
     }
 }
 

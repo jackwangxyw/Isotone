@@ -12,6 +12,8 @@
 #include <QQmlEngine>
 #include <QtQuickTest>
 
+#include <windows.h>
+
 // Offscreen unless the caller picks a platform: on the desktop a window is laid
 // out only while Windows lets it draw, and with the display off (seen
 // 2026-09-14) positioners never ran and the band strip measured 0 px wide.
@@ -23,6 +25,9 @@ static const bool kPlatformChosen = [] {
         QDir(dir).removeRecursively();
         qputenv("ISOTONE_DATA_DIR", dir.toUtf8());
     }
+    // Settings: launch at sign-in writes a test key of this run's, never the real Run key.
+    if (!qEnvironmentVariableIsSet("ISOTONE_RUN_KEY"))
+        qputenv("ISOTONE_RUN_KEY", QStringLiteral("Software\\Isotone-tests\\Run-%1").arg(QCoreApplication::applicationPid()).toUtf8());
     return true;
 }();
 
@@ -35,6 +40,13 @@ public slots:
         QFont font(QStringLiteral("Instrument Sans"));
         font.setPixelSize(13);
         QGuiApplication::setFont(font);
+    }
+    // Settings: the run's test key goes when the tests end.
+    void cleanupTestCase() {
+        const std::wstring key = qEnvironmentVariable("ISOTONE_RUN_KEY").toStdWString();
+        if (key.rfind(L"Software\\Isotone-tests\\", 0) != 0) return;
+        RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+        RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Isotone-tests");   // only when no other run's key is in it
     }
 };
 

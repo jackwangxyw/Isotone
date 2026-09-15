@@ -15,6 +15,7 @@ Rectangle {
 
     ResponseGraph {
         id: graph
+        objectName: "responseGraph"
         x: 10
         y: 14
         width: parent.width - 20
@@ -34,6 +35,11 @@ Rectangle {
         bell: Theme.bell
         fillEdgeAlpha: Theme.fillEdgeAlpha
         fillMidAlpha: Theme.fillMidAlpha
+        // Settings, General: graph ranges and peak hold.
+        rangeDb: GeneralSettings.gainRange
+        minHz: GeneralSettings.minHz
+        maxHz: GeneralSettings.maxHz
+        peakHoldVisible: GeneralSettings.peakHold
 
         MouseArea {
             anchors.fill: parent
@@ -103,6 +109,7 @@ Rectangle {
             model: EqSession
             delegate: Item {
                 id: handle
+                objectName: "handle"
                 required property int index
                 required property real frequency
                 required property real gain
@@ -117,8 +124,11 @@ Rectangle {
                 readonly property real cy: graph.revision >= 0 && graph.plotHeight > 0 ? graph.yOf(graph.handleDb(index)) : 0
                 readonly property bool onView: graph.revision >= 0 && graph.onView(index)
 
+                // Settings, General: a band outside the frequency range has no handle,
+                // and one beyond the gain range sits on the plot's edge.
+                visible: frequency >= graph.minHz && frequency <= graph.maxHz
                 x: cx - 20
-                y: cy - 20
+                y: Math.max(graph.plotTop, Math.min(graph.plotTop + graph.plotHeight, cy)) - 20
                 width: 40
                 height: 40
                 z: selected ? 2 : 1

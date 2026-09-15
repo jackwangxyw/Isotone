@@ -86,6 +86,24 @@ void Outputs::refresh() {
                                       now->layout.sample_rate != before_layout.sample_rate);
     if (current_guid_ != previous || format_moved) emit currentChanged();
     emit currentActivityChanged();
+
+    // Settings, General: the default output moved.
+    std::wstring default_guid;
+    for (const isotone::devices::Endpoint& e : endpoints)
+        if (e.state == DEVICE_STATE_ACTIVE && e.default_console) default_guid = e.guid;
+    const bool moved = refreshed_ && default_guid != default_guid_;
+    default_guid_ = default_guid;
+    refreshed_ = true;
+    if (moved) emit defaultOutputChanged();
+}
+
+bool Outputs::selectDefault() {
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+        if (outputs_[i].guid != default_guid_) continue;
+        select(static_cast<int>(i));
+        return true;
+    }
+    return false;
 }
 
 int Outputs::rowCount(const QModelIndex& parent) const { return parent.isValid() ? 0 : static_cast<int>(outputs_.size()); }

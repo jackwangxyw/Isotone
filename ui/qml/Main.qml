@@ -28,9 +28,44 @@ Window {
 
     // A shortcut, not a key handler: a field being typed in keeps Delete for its text.
     Shortcut {
-        sequence: StandardKey.Delete
-        enabled: UiState.view === "eq"
+        sequence: ShortcutRegistry.revision >= 0 ? ShortcutRegistry.sequence("delete") : ""   // Settings, Shortcuts
+        enabled: UiState.view === "eq" && !ShortcutRegistry.capturing
         onActivated: EqSession.deleteBand(EqSession.selectedRow)
+    }
+
+    // Settings: shortcuts, the selected band's keys, following the default output.
+    AppShortcuts {}
+    BandKeys {
+        session: EqSession
+        active: UiState.view === "eq"
+    }
+    DefaultOutputFollower {}
+
+    // Settings, General, closing the window: to the tray, or quit. With unsaved
+    // changes the presets package's UnsavedDialog asks first.
+    onClosing: (close) => {
+        close.accepted = false
+        window.requestClose()
+    }
+    function requestClose() {
+        if (Presets.modified) {
+            // INTEGRATION (presets package): UnsavedDialog, "Save changes to <name>
+            // before closing?" with Cancel / Don't save / Save. It gets `closing: true`
+            // and `afterClose`, and calls afterClose() once Save has saved or Don't
+            // save has put the output back to its saved preset; Cancel closes only
+            // the dialog.
+            const unsaved = Qt.createComponent("Isotone", "UnsavedDialog")
+            if (unsaved.status === Component.Ready) {
+                UiState.openDialog(unsaved, { closing: true, afterClose: window.finishClose })
+                return
+            }
+            console.warn("UnsavedDialog is not in this build; closing without asking")
+        }
+        finishClose()
+    }
+    function finishClose() {
+        if (GeneralSettings.keepInTray) window.hide()
+        else Qt.quit()
     }
 
     Row {

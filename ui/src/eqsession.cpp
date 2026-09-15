@@ -243,6 +243,21 @@ bool EqSession::spectrumLevels(const double* freqs, size_t n, double* out_db) co
     return true;
 }
 
+// Settings, General, Spectrum.
+bool EqSession::spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const {
+    if (!spectrum_active_) return false;
+    analyzer_.peak_levels_at(freqs, n, out_db);
+    return true;
+}
+
+void EqSession::setSpectrumOptions(int fftSize, double releaseMs, double tiltDbPerOct) {
+    if ((fftSize == 4096 || fftSize == 8192 || fftSize == 16384) && static_cast<size_t>(fftSize) != analyzer_.fft_size())
+        analyzer_.set_fft_size(static_cast<size_t>(fftSize));
+    if (std::isfinite(releaseMs) && releaseMs > 0) analyzer_.set_release_ms(releaseMs);
+    if (std::isfinite(tiltDbPerOct)) analyzer_.set_tilt(tiltDbPerOct);
+    emit spectrumChanged();
+}
+
 // ---------------------------------------------------------------------------
 // Edits
 
@@ -310,7 +325,7 @@ void EqSession::setFrequency(int row, double hz) {
     bandChanged(row, {FrequencyRole});
 }
 
-void EqSession::setWidth(int row, double width) {
+void EqSession::setWidth(int row, double width, bool commitNow) {
     if (bandAt(row) == nullptr || !std::isfinite(width)) return;
     isotone::Band& b = state_.bands[order_[static_cast<size_t>(row)]];
     if (b.width_mode == isotone::WidthMode::Q) {
@@ -321,7 +336,7 @@ void EqSession::setWidth(int row, double width) {
         b.width = isotone::effective_band(b).width;
     }
     bandChanged(row, {QRole, WidthLabelRole});
-    commit();   // a wheel step is a whole edit
+    if (commitNow) commit();   // a wheel step is a whole edit
 }
 
 void EqSession::setEnabled(int row, bool on) {
