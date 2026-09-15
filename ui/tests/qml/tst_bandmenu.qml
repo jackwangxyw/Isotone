@@ -102,6 +102,8 @@ Item {
             mouseClick(toggle)
             compare(role(0, EqSession.EnabledRole), false)
             verify(!toggle.checked)
+            const column = findChild(strip, "typeName").parent.parent.parent   // Row, Column, BandColumn
+            compare(column.opacity, 0.5, "a disabled band's column is faded")
         }
 
         function test_duplicate_closes_and_adds_a_band() {
