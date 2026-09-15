@@ -4,20 +4,23 @@
 // isotone: the UI. For checks:
 //   --screenshot <file.png>   render the window once it has drawn, save it, exit
 //   --output <endpoint>       edit this output instead of the default one
-//   --add-band <hz>,<db>      add a band as the Add band button does
+//   --add-band <hz>,<db>      add a band as the Add band button does (repeatable)
 //   --quit-after <seconds>    exit on its own
 //   --click <x>,<y>[,right]   click there once the window has drawn (repeatable, in order)
+//   --data-dir <dir>          settings and presets there instead of %APPDATA%\Isotone
+//   --compat-dir <dir>        Equalizer APO outputs write Isotone.txt there, not in its install
 
 #include <QCommandLineParser>
 #include <QFont>
 #include <QFontDatabase>
-#include <QGuiApplication>
+#include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QTimer>
 
+#include "apppaths.h"
 #include "eqsession.h"
 #include "outputs.h"
 
@@ -30,7 +33,8 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--screenshot") == 0) qputenv("QT_ENABLE_HIGHDPI_SCALING", "0");
     }
-    QGuiApplication app(argc, argv);
+    // QApplication, not QGuiApplication: the tray icon is a Qt Widgets class.
+    QApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("Isotone"));
 
     QCommandLineParser parser;
@@ -45,7 +49,14 @@ int main(int argc, char* argv[]) {
     parser.addOption(quit_after);
     const QCommandLineOption click(QStringLiteral("click"), QStringLiteral("Click at <x,y[,right]>."), QStringLiteral("x,y"));
     parser.addOption(click);
+    const QCommandLineOption data_dir(QStringLiteral("data-dir"), QStringLiteral("Keep settings and presets in <dir>."), QStringLiteral("dir"));
+    const QCommandLineOption compat_dir(QStringLiteral("compat-dir"), QStringLiteral("Write Equalizer APO outputs to <dir>."), QStringLiteral("dir"));
+    parser.addOption(data_dir);
+    parser.addOption(compat_dir);
     parser.process(app);
+    // Before any singleton exists: they read these when created.
+    if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
+    if (parser.isSet(compat_dir)) AppPaths::setCompatConfigDir(parser.value(compat_dir));
 
     for (const char* face : {"Regular", "Medium", "SemiBold"}) {
         const QString path = QStringLiteral(":/qt/qml/Isotone/fonts/InstrumentSans-%1.ttf").arg(QLatin1String(face));
@@ -72,8 +83,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-    if (parser.isSet(add_band)) {
-        const QStringList parts = parser.value(add_band).split(QLatin1Char(','));
+    for (const QString& spec : parser.values(add_band)) {
+        const QStringList parts = spec.split(QLatin1Char(','));
         auto* session = engine.singletonInstance<EqSession*>("Isotone", "EqSession");
         if (parts.size() != 2 || !session) return 1;
         session->addBand(parts[0].toDouble(), parts[1].toDouble());

@@ -1,13 +1,15 @@
 import QtQuick
 import Isotone
 
-// Sidebar, open (248 px): logo, navigation, working outputs, Settings.
+// Sidebar: open (248 px) with logo, navigation, working outputs and Settings;
+// collapsed (72 px) to an icon rail whose Outputs button opens the same list as
+// a popover (outputsRequested, in window coordinates).
 Rectangle {
     id: root
-    property string current: "eq"
-    signal navigate(string view)
+    readonly property bool open: AppSettings.sidebarOpen
+    signal outputsRequested(real x, real y)
 
-    width: 248
+    width: open ? 248 : 72
     color: Theme.plot
 
     Rectangle {
@@ -22,75 +24,82 @@ Rectangle {
         property string view
         property string icon
         property string label
-        readonly property bool on: root.current === view
-        width: parent.width
-        height: 38
-        radius: 10
-        color: on ? Theme.surface : "transparent"
+        readonly property bool on: UiState.view === view
+        objectName: "nav_" + view
+        width: AppSettings.sidebarOpen ? parent.width : 44
+        height: AppSettings.sidebarOpen ? 38 : 44
+        radius: AppSettings.sidebarOpen ? 8 : 10
+        anchors.horizontalCenter: AppSettings.sidebarOpen ? undefined : parent.horizontalCenter
+        color: on ? Theme.surface : navArea.containsMouse ? Qt.alpha(Theme.surface, 0.5) : "transparent"
         Row {
-            x: 10
+            x: AppSettings.sidebarOpen ? 12 : (parent.width - 20) / 2
             anchors.verticalCenter: parent.verticalCenter
             spacing: 12
-            Icon { name: item.icon; size: 18; colour: item.on ? Theme.text : Theme.muted; anchors.verticalCenter: parent.verticalCenter }
+            Icon { name: item.icon; size: AppSettings.sidebarOpen ? 18 : 20; colour: item.on ? Theme.text : Theme.muted; anchors.verticalCenter: parent.verticalCenter }
             Text {
+                visible: AppSettings.sidebarOpen
                 text: item.label
                 font.family: Theme.font
                 font.pixelSize: 14
-                color: item.on ? Theme.text : Theme.muted
+                color: item.on ? Theme.text : Qt.alpha(Theme.text, 0.82)
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.navigate(item.view) }
+        MouseArea { id: navArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: UiState.view = item.view }
+    }
+
+    // Logo, and the panel toggle (beside the name when open, under the mark when collapsed).
+    Rectangle {
+        id: logo
+        x: root.open ? 26 : (root.width - width) / 2
+        y: 24
+        width: 28
+        height: 28
+        radius: 7
+        color: Theme.dark ? Theme.knob : "#1b2025"
+        Icon { name: "logo"; size: 16; strokeWidth: 2.2; colour: Theme.dark ? "#121519" : "#fcfdff"; anchors.centerIn: parent }
+    }
+    Text {
+        visible: root.open
+        anchors.left: logo.right
+        anchors.leftMargin: 12
+        anchors.verticalCenter: logo.verticalCenter
+        text: "Isotone"
+        font.family: Theme.font
+        font.pixelSize: 17
+        font.weight: Font.DemiBold
+        font.letterSpacing: -0.17
+        color: Theme.text
+    }
+    Rectangle {
+        objectName: "sidebarToggle"
+        x: root.open ? root.width - 16 - width : (root.width - width) / 2
+        y: root.open ? logo.y : logo.y + logo.height + 16
+        width: root.open ? 28 : 44
+        height: root.open ? 28 : 44
+        radius: root.open ? 6 : 10
+        color: toggleArea.containsMouse ? Theme.surface : "transparent"
+        Icon { name: "panel"; size: 18; anchors.centerIn: parent }
+        MouseArea { id: toggleArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: AppSettings.sidebarOpen = !AppSettings.sidebarOpen }
     }
 
     Column {
-        x: 16
-        y: 22
-        width: parent.width - 32
-        spacing: 0
-
-        Item {
-            width: parent.width
-            height: 32
-            Rectangle {
-                id: logo
-                x: 10
-                width: 28
-                height: 28
-                radius: 9
-                anchors.verticalCenter: parent.verticalCenter
-                color: Theme.text
-                Icon { name: "logo"; size: 16; strokeWidth: 2.2; colour: Theme.background; anchors.centerIn: parent }
-            }
-            Text {
-                anchors.left: logo.right
-                anchors.leftMargin: 10
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Isotone"
-                font.family: Theme.font
-                font.pixelSize: 17
-                font.weight: Font.DemiBold
-                color: Theme.text
-            }
-            Item {
-                width: 32
-                height: 32
-                anchors.right: parent.right
-                anchors.rightMargin: 4
-                Icon { name: "panel"; size: 18; anchors.centerIn: parent }
-            }
-        }
-        Item { width: 1; height: 22 }
+        x: root.open ? 16 : 14
+        y: root.open ? 80 : 128
+        width: parent.width - (root.open ? 32 : 28)
+        spacing: root.open ? 2 : 8
         NavItem { view: "eq"; icon: "eq"; label: "Equalizer" }
-        NavItem { view: "ear"; icon: "ear"; label: "EQ by ear" }
+        NavItem { view: "speakers"; icon: "speakers"; label: "Speakers"; visible: EqSession.outputChannels > 2 }
         NavItem { view: "devices"; icon: "devices"; label: "Devices" }
     }
 
+    // Open: the outputs list and Settings.
     Column {
+        visible: root.open
         x: 16
         width: parent.width - 32
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 22
+        anchors.bottomMargin: 16
         spacing: 0
 
         Text {
@@ -98,63 +107,49 @@ Rectangle {
             bottomPadding: 8
             text: "Outputs"
             font.family: Theme.font
-            font.pixelSize: 12
+            font.pixelSize: 13
+            font.weight: Font.Medium
             color: Theme.muted
         }
-        Repeater {
-            model: Outputs
-            delegate: Rectangle {
-                id: row
-                required property int index
-                required property string name
-                required property string backendLabel
-                required property string activity
-                required property bool current
-                width: parent.width
-                height: 54
-                radius: 10
-                color: current ? Theme.surface : "transparent"
-                Column {
-                    x: 10
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 3
-                    Row {
-                        spacing: 8
-                        Rectangle {
-                            width: 6
-                            height: 6
-                            radius: 3
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: row.activity === "running" ? Theme.running
-                                 : row.activity === "stalled" ? Theme.warning : Theme.muted
-                        }
-                        Text {
-                            text: row.name
-                            width: 190
-                            elide: Text.ElideRight
-                            font.family: Theme.font
-                            font.pixelSize: 13
-                            color: row.current ? Theme.text : Theme.muted
-                        }
-                    }
-                    Text {
-                        leftPadding: 14
-                        text: row.backendLabel
-                        font.family: Theme.font
-                        font.pixelSize: 12
-                        color: Theme.muted
-                    }
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: Outputs.select(row.index)
+        OutputList { width: parent.width }
+        Item { width: 1; height: 10 }
+        Rectangle { width: parent.width; height: 1; color: Theme.gridMajor }
+        Item { width: 1; height: 12 }
+        NavItem { view: "settings"; icon: "settings"; label: "Settings" }
+    }
+
+    // Collapsed: the Outputs button with the current output's dot, and Settings.
+    Column {
+        visible: !root.open
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 16
+        spacing: 12
+        Rectangle {
+            id: outputsButton
+            objectName: "railOutputs"
+            width: 44
+            height: 44
+            radius: 10
+            color: outputsArea.containsMouse ? Theme.surface : "transparent"
+            Icon { name: "output"; size: 20; anchors.centerIn: parent }
+            StatusDot {
+                x: 34 - 10 + 4
+                y: 11
+                status: Outputs.currentActivity === "running" ? "ok" : Outputs.currentActivity === "stalled" ? "warn" : ""
+            }
+            MouseArea {
+                id: outputsArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    const p = outputsButton.mapToItem(null, outputsButton.width + 12, 0)
+                    root.outputsRequested(p.x, p.y)
                 }
             }
         }
-        Item { width: 1; height: 14 }
-        Rectangle { width: parent.width; height: 1; color: Theme.gridMinor }
-        Item { width: 1; height: 14 }
+        Rectangle { width: 40; height: 1; color: Theme.gridMajor }
         NavItem { view: "settings"; icon: "settings"; label: "Settings" }
     }
 }

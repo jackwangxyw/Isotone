@@ -218,19 +218,27 @@ void ResponseGraph::paint(QPainter* p) {
         g.setColorAt(1.0, edge);
         p->fillPath(fill, g);
     }
-    // L+R with channels that differ: the right channel as a second, fainter line.
+    // L+R with channels that differ: the right channel as a second line.
     if (channels == 2 && session_->viewChannel() == 2 && !state.bypass) {
         std::vector<double> right(n);
         isotone::magnitude_db(drawn, channels, mask, 1, freqs.data(), n, kSampleRate, right.data());
         bool differs = false;
         for (size_t i = 0; i < n && !differs; ++i) differs = std::abs(right[i] - db[i]) > 0.01;
         if (differs) {
-            QColor faint = accent_;
-            faint.setAlphaF(0.55f);
-            QPen right_pen(faint, 1.75);
+            // As the prototype draws it: the right dashed, and L and R marked at the right edge.
+            QPen right_pen(accent_, 2.5);
             right_pen.setJoinStyle(Qt::RoundJoin);
-            right_pen.setCapStyle(Qt::RoundCap);
+            right_pen.setCapStyle(Qt::FlatCap);
+            right_pen.setDashPattern({7.0 / 2.5, 5.0 / 2.5});
             p->strokePath(polyline(right), right_pen);
+            QFont bold(font_family_);
+            bold.setPixelSize(11);
+            bold.setWeight(QFont::DemiBold);
+            p->setFont(bold);
+            p->setPen(accent_);
+            const double lx = kLeft + pw - 14;
+            p->drawText(QPointF(lx, std::clamp(yOf(db[n - 1]) - 8, kTop + 10, kTop + ph)), QStringLiteral("L"));
+            p->drawText(QPointF(lx, std::clamp(yOf(right[n - 1]) + 16, kTop + 10, kTop + ph)), QStringLiteral("R"));
         }
     }
     QPen pen(accent_, 2.5);

@@ -6,6 +6,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest.h"
 
+#include <QDir>
 #include <QGuiApplication>
 
 #include <cmath>
@@ -283,6 +284,9 @@ TEST_CASE("the graph draws the channel in view, and a handle sits on its band's 
 
 int main(int argc, char** argv) {
     if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Settings and presets never go to the owner's %APPDATA%\Isotone.
+    if (!qEnvironmentVariableIsSet("ISOTONE_DATA_DIR"))
+        qputenv("ISOTONE_DATA_DIR", QDir::temp().filePath(QStringLiteral("isotone-model-tests")).toUtf8());
     QGuiApplication app(argc, argv);
     return doctest::Context(argc, argv).run();
 }

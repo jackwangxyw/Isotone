@@ -30,6 +30,8 @@ class Outputs : public QAbstractListModel {
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
     Q_PROPERTY(int currentRow READ currentRow NOTIFY currentChanged)
     Q_PROPERTY(QString currentName READ currentName NOTIFY currentChanged)
+    // "running", "idle", "stalled" or "unknown"; the collapsed rail's dot.
+    Q_PROPERTY(QString currentActivity READ currentActivity NOTIFY currentActivityChanged)
 
 public:
     enum Role { NameRole = Qt::UserRole + 1, BackendLabelRole, ActivityRole, CurrentRole };
@@ -52,6 +54,7 @@ public:
 
     int currentRow() const;
     QString currentName() const;
+    QString currentActivity() const;
     const Output* current() const;
 
     Q_INVOKABLE void select(int row);
@@ -62,6 +65,7 @@ public:
 signals:
     void countChanged();
     void currentChanged();
+    void currentActivityChanged();
 
 private:
     void probe();

@@ -24,7 +24,24 @@ Item {
         plus: ["M12 5v14M5 12h14"],
         panel: ["M6 4h12a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z", "M9 4v16"],
         output: ["M4 9v6h4l5 4V5L8 9H4z", "M16.5 8.5a5 5 0 0 1 0 7"],
-        logo: ["M3 14c3 0 3-6 6-6s3 8 6 8 3-4 6-4"]
+        logo: ["M3 14c3 0 3-6 6-6s3 8 6 8 3-4 6-4"],
+        // The prototype's set (docs/design/prototype/views-eq.js, IC), circles and rects as paths.
+        speakers: ["M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2z",
+                   "M15 14a3 3 0 1 1 -6 0a3 3 0 1 1 6 0", "M13 7.5a1 1 0 1 1 -2 0a1 1 0 1 1 2 0"],
+        search: ["M17 11a6 6 0 1 1 -12 0a6 6 0 1 1 12 0", "M20 20l-4.5-4.5"],
+        pen: ["M4 20h4L19 9l-4-4L4 16z"],
+        copy: ["M10 8h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z",
+               "M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"],
+        trash: ["M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"],
+        play: ["M8 5l11 7-11 7z"],
+        pause: ["M8 5v14M16 5v14"],
+        refresh: ["M20 11a8 8 0 0 0-14.8-3M4 5v4h4M4 13a8 8 0 0 0 14.8 3M20 19v-4h-4"],
+        check: ["M5 12.5l4.5 4.5L19 7.5"],
+        file: ["M14 3H6v18h12V7z", "M14 3v4h4"],
+        close: ["M6 6l12 12M18 6L6 18"],
+        shield: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"],
+        warning: ["M12 4l9 16H3z", "M12 10v4M12 17v.5"],
+        external: ["M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"]
     })
 
     implicitWidth: size

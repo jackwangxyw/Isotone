@@ -1,16 +1,71 @@
 import QtQuick
 import Isotone
 
-// Channels panel (stereo), open: balance and mute.
+// Channels panel (stereo): open (240 px) with balance and mute; collapsed
+// (52 px) to a strip with the vertical label and the balance value.
 Item {
     id: root
+    readonly property bool open: AppSettings.panelOpen
+
+    width: open ? 240 : 52
 
     Rectangle { width: 1; height: parent.height; color: Theme.gridMinor }
 
+    // Collapsed.
+    Item {
+        visible: !root.open
+        anchors.fill: parent
+        Rectangle {
+            objectName: "panelExpand"
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 12
+            width: 32
+            height: 32
+            radius: 8
+            color: expandArea.containsMouse ? Theme.surface : "transparent"
+            Icon { name: "chevronLeft"; size: 16; anchors.centerIn: parent }
+            MouseArea { id: expandArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: AppSettings.panelOpen = true }
+        }
+        Text {
+            y: 66 + width
+            rotation: -90
+            transformOrigin: Item.TopLeft
+            x: (parent.width - height) / 2
+            text: "Channels"
+            font.family: Theme.font
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            color: Theme.text
+        }
+        Column {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 22
+            spacing: 2
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Bal"
+                font.family: Theme.font
+                font.pixelSize: 11
+                color: Theme.muted
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: EqSession.balance === 0 ? "0.0" : Theme.signed(EqSession.balance, 1)
+                font.family: Theme.font
+                font.pixelSize: 13
+                font.weight: Font.DemiBold
+                color: Theme.text
+            }
+        }
+    }
+
+    // Open.
     Column {
+        visible: root.open
         x: 22
         y: 4
-        width: parent.width - 22
+        width: parent.width - 22 - 32
         spacing: 18
 
         Item {
@@ -24,11 +79,16 @@ Item {
                 font.weight: Font.DemiBold
                 color: Theme.text
             }
-            Item {
+            Rectangle {
+                objectName: "panelCollapse"
                 anchors.right: parent.right
+                anchors.rightMargin: -8
                 width: 32
                 height: 32
+                radius: 8
+                color: collapseArea.containsMouse ? Theme.surface : "transparent"
                 Icon { name: "chevronRight"; size: 16; anchors.centerIn: parent }
+                MouseArea { id: collapseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: AppSettings.panelOpen = false }
             }
         }
 

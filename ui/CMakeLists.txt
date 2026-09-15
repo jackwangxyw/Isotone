@@ -3,7 +3,7 @@
 #
 # The QML module is a static library, so the app and the QML tests load the same
 # module.
-find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Qml Quick QuickTest)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Qml Quick QuickTest Widgets)
 qt_standard_project_setup(REQUIRES 6.11)
 
 # Without Qt: spectrum analysis, the state an output gets, and where edits go.
@@ -23,18 +23,24 @@ target_compile_definitions(isotone_ui_backend PUBLIC NOMINMAX WIN32_LEAN_AND_MEA
 target_link_libraries(isotone_ui_backend PUBLIC isotone_core isotone_transport isotone_compat isotone_devices)
 
 qt_add_library(isotone_ui STATIC
+    src/apppaths.cpp
+    src/apppaths.h
+    src/appsettings.cpp
+    src/appsettings.h
     src/eqsession.cpp
     src/eqsession.h
     src/filterglyph.cpp
     src/filterglyph.h
     src/outputs.cpp
     src/outputs.h
+    src/presets.cpp
+    src/presets.h
     src/responsegraph.cpp
     src/responsegraph.h
 )
 
 # Before qt_add_qml_module, which reads it.
-set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/Theme.qml qml/UiState.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_qml_module(isotone_ui
     URI Isotone
@@ -53,6 +59,24 @@ qt_add_qml_module(isotone_ui
         qml/ChannelsPanel.qml
         qml/ValueField.qml
         qml/BandMenu.qml
+        qml/UiState.qml
+        qml/Button.qml
+        qml/TextBox.qml
+        qml/DialogFrame.qml
+        qml/Popover.qml
+        qml/Spinner.qml
+        qml/StatusDot.qml
+        qml/OutputList.qml
+        qml/EqualizerView.qml
+        qml/SpeakersView.qml
+        qml/DevicesView.qml
+        qml/SettingsView.qml
+        qml/SettingsGeneral.qml
+        qml/SettingsOutputs.qml
+        qml/SettingsAppearance.qml
+        qml/SettingsShortcuts.qml
+        qml/SettingsAbout.qml
+        qml/PresetsMenu.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -64,7 +88,7 @@ target_include_directories(isotone_ui PUBLIC src)
 # and qjsengine.h as their templates are instantiated. It comes from code
 # generation, which /external:W0 does not cover.
 target_compile_options(isotone_ui PUBLIC /wd4702)
-target_link_libraries(isotone_ui PUBLIC Qt6::Gui Qt6::Qml Qt6::Quick isotone_ui_backend)
+target_link_libraries(isotone_ui PUBLIC Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Widgets isotone_ui_backend)
 
 qt_add_executable(isotone WIN32 src/main.cpp)
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)

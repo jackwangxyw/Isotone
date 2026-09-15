@@ -130,6 +130,10 @@ public:
     // A drag or a typed value is done: commits it to the output, and re-sorts
     // by frequency if that is the order.
     Q_INVOKABLE void finishEdit();
+    // FOUNDATION STUBS, the presets work package implements them: every committed
+    // edit is a step.
+    Q_INVOKABLE void undo() {}
+    Q_INVOKABLE void redo() {}
     // A typed value in `unit`'s base unit, or NaN when the text is not one.
     Q_INVOKABLE double parseValue(const QString& text, Unit unit) const;
 

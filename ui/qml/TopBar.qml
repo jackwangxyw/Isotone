@@ -5,25 +5,78 @@ import Isotone
 // spectrum and the EQ switch.
 Item {
     id: root
-    property bool spectrumOn: true
-    signal spectrumPicked(bool on)
+    // In window coordinates, where the popover's top left goes.
+    signal presetsRequested(real x, real y)
+    signal outputsRequested(real x, real y)
 
     height: 76
 
-    Row {
+    // The preset name (a dot when modified) opens the presets popover; under it,
+    // with the sidebar collapsed, the output name opens the outputs popover.
+    Column {
         x: 32
         anchors.verticalCenter: parent.verticalCenter
-        spacing: 8
-        Text {
-            text: EqSession.presetName
-            font.family: Theme.font
-            font.pixelSize: 24
-            font.weight: Font.DemiBold
-            font.letterSpacing: -0.36
-            color: Theme.text
-            anchors.verticalCenter: parent.verticalCenter
+        spacing: 1
+        Item {
+            objectName: "presetName"
+            width: nameRow.implicitWidth
+            height: nameRow.implicitHeight
+            Row {
+                id: nameRow
+                spacing: 8
+                Text {
+                    text: Presets.currentName
+                    font.family: Theme.font
+                    font.pixelSize: 24
+                    font.weight: Font.DemiBold
+                    font.letterSpacing: -0.36
+                    color: Theme.text
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Rectangle {
+                    visible: Presets.modified
+                    width: 7
+                    height: 7
+                    radius: 3.5
+                    color: Theme.accent
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Icon { name: "chevron"; size: 18; anchors.verticalCenter: parent.verticalCenter }
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    const p = nameRow.mapToItem(null, 0, nameRow.height + 8)
+                    root.presetsRequested(p.x - 12, p.y)
+                }
+            }
         }
-        Icon { name: "chevron"; size: 18; anchors.verticalCenter: parent.verticalCenter }
+        Item {
+            objectName: "topBarOutput"
+            visible: !AppSettings.sidebarOpen
+            width: outputRow.implicitWidth
+            height: outputRow.implicitHeight
+            Row {
+                id: outputRow
+                spacing: 4
+                Text {
+                    text: Outputs.currentName
+                    font.family: Theme.font
+                    font.pixelSize: 13
+                    color: Theme.muted
+                }
+                Icon { name: "chevron"; size: 14; anchors.verticalCenter: parent.verticalCenter }
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    const p = outputRow.mapToItem(null, 0, outputRow.height + 8)
+                    root.outputsRequested(p.x - 12, p.y)
+                }
+            }
+        }
     }
 
     Row {
@@ -136,8 +189,8 @@ Item {
             }
             Segmented {
                 options: ["On", "Off"]
-                current: root.spectrumOn ? 0 : 1
-                onPicked: (index) => root.spectrumPicked(index === 0)
+                current: AppSettings.spectrumOn ? 0 : 1
+                onPicked: (index) => AppSettings.spectrumOn = index === 0
             }
         }
 

@@ -15,7 +15,7 @@ Item {
 
         Column {
             id: scroller
-            width: root.width - 64 - 92 - 240 - 24
+            width: root.width - 64 - 92 - panel.width - 24
             spacing: 6
 
             Item {
@@ -156,8 +156,9 @@ Item {
             }
         }
 
+        // The right-hand panel: Channels on stereo outputs.
         ChannelsPanel {
-            width: 240
+            id: panel
             height: parent.height
         }
     }

@@ -5,24 +5,23 @@ import Isotone
 // hover readout. Drag a handle for frequency and gain, scroll on it for Q.
 Rectangle {
     id: root
-    property bool spectrumOn: true
     // Where the readout is; negative for none.
     property real hoverFrequency: -1
     signal menuRequested(int row, real x, real above, real below)
 
     radius: 18
     color: Theme.plot
-    height: 14 + 404 + 4
+    height: 14 + 404 + 4   // the 1440 x 900 board; the view sets it from the window
 
     ResponseGraph {
         id: graph
         x: 10
         y: 14
         width: parent.width - 20
-        height: 404
+        height: parent.height - 18
         session: EqSession
         fontFamily: Theme.font
-        spectrumVisible: root.spectrumOn
+        spectrumVisible: AppSettings.spectrumOn
         perBandColours: Theme.perBandColours
         bandColours: Theme.bandColours
         accent: Theme.accent

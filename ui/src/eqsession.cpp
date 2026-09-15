@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 
+#include "apppaths.h"
 #include "isotone/param_block.h"
 #include "isotone/processor.h"
 #include "isotone/response.h"
@@ -60,7 +61,8 @@ constexpr double kAutoPreampMatchDb = 0.01;
 }  // namespace
 
 EqSession::EqSession(QObject* parent)
-    : QAbstractListModel(parent), link_(std::make_unique<isotone::ui::DeviceLink>()),
+    : QAbstractListModel(parent),
+      link_(std::make_unique<isotone::ui::DeviceLink>(L"Global\\", AppPaths::compatConfigDir().toStdWString())),
       audio_(size_t{8192} * isotone::kMaxChannels) {
     state_.auto_preamp = true;
     preset_name_ = QStringLiteral("Untitled");

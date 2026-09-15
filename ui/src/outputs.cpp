@@ -85,6 +85,7 @@ void Outputs::refresh() {
                                       now->layout.speaker_mask != before_layout.speaker_mask ||
                                       now->layout.sample_rate != before_layout.sample_rate);
     if (current_guid_ != previous || format_moved) emit currentChanged();
+    emit currentActivityChanged();
 }
 
 int Outputs::rowCount(const QModelIndex& parent) const { return parent.isValid() ? 0 : static_cast<int>(outputs_.size()); }
@@ -120,6 +121,11 @@ const Outputs::Output* Outputs::current() const {
     return row < 0 ? nullptr : &outputs_[static_cast<size_t>(row)];
 }
 
+QString Outputs::currentActivity() const {
+    const Output* o = current();
+    return o ? o->activity : QString();
+}
+
 QString Outputs::currentName() const {
     const Output* o = current();
     return o ? o->name : QString();
@@ -132,6 +138,7 @@ void Outputs::select(int row) {
     if (previous >= 0) emit dataChanged(index(previous), index(previous), {CurrentRole});
     emit dataChanged(index(row), index(row), {CurrentRole});
     emit currentChanged();
+    emit currentActivityChanged();
 }
 
 bool Outputs::selectGuid(const std::wstring& endpoint) {
@@ -182,6 +189,7 @@ void Outputs::probe() {
                         if (outputs_[i].guid != guid || outputs_[i].activity == activity) continue;
                         outputs_[i].activity = activity;
                         emit dataChanged(index(static_cast<int>(i)), index(static_cast<int>(i)), {ActivityRole});
+                        if (guid == current_guid_) emit currentActivityChanged();
                     }
                 }
             },

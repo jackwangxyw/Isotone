@@ -1,7 +1,9 @@
 import QtQuick
 import Isotone
 
-// The Equalizer view at the 1440 x 900 reference size (docs/design/screens/Main.png).
+// The window: sidebar, the view for UiState.view, and the overlay that popovers,
+// dialogs and toasts open in. 1440 x 900 is the boards' size; 1120 x 760 the
+// minimum (docs/decisions.md, prototype decisions).
 Window {
     id: window
     width: 1440
@@ -12,17 +14,22 @@ Window {
     title: "Isotone"
     color: Theme.background
 
-    property bool spectrumOn: true
-
     Connections {
         target: Outputs
-        function onCurrentChanged() { EqSession.useOutput(Outputs) }
+        function onCurrentChanged() {
+            EqSession.useOutput(Outputs)
+            if (UiState.view === "speakers" && EqSession.outputChannels <= 2) UiState.view = "eq"
+        }
     }
-    Component.onCompleted: EqSession.useOutput(Outputs)
+    Component.onCompleted: {
+        UiState.overlay = overlay
+        EqSession.useOutput(Outputs)
+    }
 
     // A shortcut, not a key handler: a field being typed in keeps Delete for its text.
     Shortcut {
         sequence: StandardKey.Delete
+        enabled: UiState.view === "eq"
         onActivated: EqSession.deleteBand(EqSession.selectedRow)
     }
 
@@ -33,35 +40,129 @@ Window {
         Sidebar {
             id: sidebar
             height: parent.height
+            onOutputsRequested: (x, y) => outputsPopover.openAbove(x, y + 44)
         }
 
-        Column {
+        Item {
+            id: viewArea
             width: window.width - sidebar.width
             height: parent.height
 
-            TopBar {
-                width: parent.width
-                spectrumOn: window.spectrumOn
-                onSpectrumPicked: (on) => window.spectrumOn = on
+            EqualizerView {
+                id: equalizer
+                anchors.fill: parent
+                visible: UiState.view === "eq"
+                onBandMenuRequested: (row, x, above, below) => bandMenu.openAt(row, x, above, below)
+                onPresetsRequested: (x, y) => presetsMenu.openAt(x, y)
+                onOutputsRequested: (x, y) => outputsPopover.openAt(x, y)
             }
-            GraphCard {
-                x: 32
-                width: parent.width - 64
-                spectrumOn: window.spectrumOn
-                onMenuRequested: (row, x, above, below) => bandMenu.openAt(row, x, above, below)
-            }
-            BandStrip {
-                width: parent.width
-                height: parent.height - 76 - 422
-                onMenuRequested: (row, x, above, below) => bandMenu.openAt(row, x, above, below)
+            Loader {
+                anchors.fill: parent
+                active: UiState.view !== "eq"
+                source: UiState.view === "speakers" ? "SpeakersView.qml"
+                      : UiState.view === "devices" ? "DevicesView.qml"
+                      : UiState.view === "settings" ? "SettingsView.qml" : ""
             }
         }
     }
 
-    BandMenu {
-        id: bandMenu
+    Item {
+        id: overlay
+        objectName: "overlay"
         anchors.fill: parent
-        z: 900
+        z: 100
+
+        BandMenu { id: bandMenu; anchors.fill: parent }
+        PresetsMenu { id: presetsMenu; anchors.fill: parent }
+
+        // The collapsed rail's outputs list (and the top bar's output name).
+        Popover {
+            id: outputsPopover
+            objectName: "outputsPopover"
+            panelWidth: 280
+            Column {
+                width: parent.width
+                spacing: 0
+                Item {
+                    width: parent.width
+                    height: 30
+                    Text {
+                        x: 10
+                        text: "Outputs"
+                        font.family: Theme.font
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
+                        color: Theme.text
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        text: "Manage"
+                        font.family: Theme.font
+                        font.pixelSize: 13
+                        color: Theme.muted
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { outputsPopover.close(); UiState.view = "devices" }
+                        }
+                    }
+                }
+                OutputList { width: parent.width; onPicked: outputsPopover.close() }
+            }
+        }
+
+        // A toast: text and an optional action, for a few seconds.
+        Rectangle {
+            id: toast
+            objectName: "toast"
+            property var action: null
+            visible: false
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenterOffset: sidebar.width / 2
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 26
+            width: toastRow.implicitWidth + 24
+            height: 44
+            radius: 10
+            color: Theme.pop
+            border.color: Theme.border
+            Row {
+                id: toastRow
+                x: 16
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 16
+                Text {
+                    id: toastText
+                    anchors.verticalCenter: parent.verticalCenter
+                    font.family: Theme.font
+                    font.pixelSize: 13
+                    color: Theme.text
+                }
+                Button {
+                    id: toastAction
+                    visible: text !== ""
+                    kind: "ghost"
+                    anchors.verticalCenter: parent.verticalCenter
+                    onClicked: {
+                        toast.visible = false
+                        if (toast.action) toast.action()
+                    }
+                }
+            }
+            Timer { id: toastTimer; interval: 5000; onTriggered: toast.visible = false }
+        }
+        Connections {
+            target: UiState
+            function onToastRequested(text, actionText, action) {
+                toastText.text = text
+                toastAction.text = actionText
+                toast.action = action
+                toast.visible = true
+                toastTimer.restart()
+            }
+        }
     }
 
     // A press anywhere else ends typing in a field. Passes every press on.
