@@ -14,6 +14,8 @@ add_library(isotone_ui_backend STATIC
     backend/output_state.h
     backend/spectrum.cpp
     backend/spectrum.h
+    backend/typed_value.cpp
+    backend/typed_value.h
 )
 target_include_directories(isotone_ui_backend PUBLIC backend)
 # windows.h without the min and max macros, which break std::min and std::max.
@@ -23,6 +25,8 @@ target_link_libraries(isotone_ui_backend PUBLIC isotone_core isotone_transport i
 qt_add_library(isotone_ui STATIC
     src/eqsession.cpp
     src/eqsession.h
+    src/filterglyph.cpp
+    src/filterglyph.h
     src/outputs.cpp
     src/outputs.h
     src/responsegraph.cpp
@@ -47,6 +51,8 @@ qt_add_qml_module(isotone_ui
         qml/BandColumn.qml
         qml/GainSlider.qml
         qml/ChannelsPanel.qml
+        qml/ValueField.qml
+        qml/BandMenu.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -64,7 +70,7 @@ qt_add_executable(isotone WIN32 src/main.cpp)
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
 if(ISOTONE_BUILD_TESTS)
-    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp)
+    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp)
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests

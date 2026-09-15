@@ -6,12 +6,14 @@
 //   --output <endpoint>       edit this output instead of the default one
 //   --add-band <hz>,<db>      add a band as the Add band button does
 //   --quit-after <seconds>    exit on its own
+//   --click <x>,<y>[,right]   click there once the window has drawn (repeatable, in order)
 
 #include <QCommandLineParser>
 #include <QFont>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QImage>
+#include <QMouseEvent>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QTimer>
@@ -41,6 +43,8 @@ int main(int argc, char* argv[]) {
     parser.addOption(output);
     parser.addOption(add_band);
     parser.addOption(quit_after);
+    const QCommandLineOption click(QStringLiteral("click"), QStringLiteral("Click at <x,y[,right]>."), QStringLiteral("x,y"));
+    parser.addOption(click);
     parser.process(app);
 
     for (const char* face : {"Regular", "Medium", "SemiBold"}) {
@@ -79,8 +83,22 @@ int main(int argc, char* argv[]) {
         QTimer::singleShot(static_cast<int>(parser.value(quit_after).toDouble() * 1000), &app, [] { QCoreApplication::exit(0); });
     }
 
+    auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
+    const QStringList clicks = parser.values(click);
+    for (qsizetype i = 0; i < clicks.size(); ++i) {
+        QTimer::singleShot(static_cast<int>(800 + 100 * i), &app, [window, spec = clicks[i]] {
+            const QStringList parts = spec.split(QLatin1Char(','));
+            if (parts.size() < 2) return;
+            const QPointF at(parts[0].toDouble(), parts[1].toDouble());
+            const Qt::MouseButton button = parts.size() > 2 && parts[2] == QLatin1String("right") ? Qt::RightButton : Qt::LeftButton;
+            QMouseEvent press(QEvent::MouseButtonPress, at, window->mapToGlobal(at), button, button, Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease, at, window->mapToGlobal(at), button, Qt::NoButton, Qt::NoModifier);
+            QGuiApplication::sendEvent(window, &press);
+            QGuiApplication::sendEvent(window, &release);
+        });
+    }
+
     if (parser.isSet(screenshot)) {
-        auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
         const QString file = parser.value(screenshot);
         // A few frames in, so fonts and layout have settled.
         QTimer::singleShot(1500, &app, [window, file] {

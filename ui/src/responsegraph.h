@@ -68,6 +68,11 @@ public:
     // The composite of the enabled bands at `hz`, as the handles sit on it:
     // without preamp and bypass.
     Q_INVOKABLE double compositeAt(double hz) const;
+    // Where band `row`'s handle sits: the composite at its frequency on the channel
+    // it is drawn on (in L+R, a band on the right alone is on the right).
+    Q_INVOKABLE double handleDb(int row) const;
+    // False for a band not on the channel in view.
+    Q_INVOKABLE bool onView(int row) const;
 
 signals:
     void sessionChanged();
@@ -83,6 +88,9 @@ private:
     static constexpr double kLeft = 46.0, kRight = 14.0, kTop = 14.0, kBottom = 30.0;
 
     void curveChanged();
+    // The channel the composite is drawn for: the right in R view, else the left.
+    uint32_t viewChannel() const;
+    double compositeOn(uint32_t channel, double hz) const;
 
     QPointer<EqSession> session_;
     int revision_ = 0;

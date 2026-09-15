@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 The Isotone authors
 //
-// EqSession, the band model, without QML or an output.
+// EqSession, the band model, and ResponseGraph's placement, without QML or an output.
 
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
+
+#include <cmath>
 
 #include "eqsession.h"
+#include "responsegraph.h"
+#include "isotone/param_block.h"
 
 using namespace isotone;
 
@@ -63,7 +67,222 @@ TEST_CASE("a band's width is shown and changed in its own unit") {
     CHECK(session.bandAt(0)->width == doctest::Approx(0.00145));
 }
 
+TEST_CASE("a type without gain shows none and takes none") {
+    // Low pass, high pass, band pass, notch and all pass ignore gain in the
+    // processor; their columns showed a slider and "+0.0 dB" that did nothing.
+    EqSession session;
+    EqState s;
+    s.bands = {band(1, FilterType::Peaking, 1000, 3, 1, WidthMode::Q),
+               band(2, FilterType::LowShelf, 100, 3, 1, WidthMode::Q),
+               band(3, FilterType::HighShelf, 8000, 3, 1, WidthMode::Q),
+               band(4, FilterType::LowPass, 5000, 0, 0.7, WidthMode::Q),
+               band(5, FilterType::HighPass, 30, 0, 0.7, WidthMode::Q),
+               band(6, FilterType::BandPass, 1000, 0, 1, WidthMode::Q),
+               band(7, FilterType::Notch, 60, 0, 30, WidthMode::Q),
+               band(8, FilterType::AllPass, 500, 0, 1, WidthMode::Q)};
+    session.loadState(&s);
+    REQUIRE(session.rowCount() == 8);
+    for (int row = 0; row < 8; ++row) {
+        CAPTURE(row);
+        const bool has_gain = row < 3;
+        CHECK(session.data(session.index(row), EqSession::HasGainRole).toBool() == has_gain);
+        session.setGain(row, -5);
+        CHECK(session.bandAt(row)->gain_db == (has_gain ? -5.0 : s.bands[static_cast<size_t>(row)].gain_db));
+    }
+}
+
+TEST_CASE("Auto preamp is on unless the loaded preamp is not what Auto sets") {
+    // The region and Isotone.txt do not carry the mode, so every output loaded
+    // with Auto off. A preamp Auto would have set is Auto's; any other was set by hand.
+    EqSession session;
+    CHECK(session.autoPreamp());
+
+    session.loadState(nullptr);
+    CHECK(session.autoPreamp());
+
+    EqState flat;
+    session.loadState(&flat);
+    CHECK(session.autoPreamp());
+    CHECK(session.preampDb() == 0.0);
+
+    EqState boosted;
+    boosted.bands = {band(1, FilterType::Peaking, 1000, 6, 1, WidthMode::Q)};
+    boosted.preamp_db = -6.0;
+    session.loadState(&boosted);
+    CHECK(session.autoPreamp());
+    CHECK(session.preampDb() == -6.0);
+
+    // Written as text, the preamp is rounded; still Auto's.
+    boosted.preamp_db = -6.004;
+    session.loadState(&boosted);
+    CHECK(session.autoPreamp());
+
+    boosted.preamp_db = -3.0;
+    session.loadState(&boosted);
+    CHECK_FALSE(session.autoPreamp());
+    CHECK(session.preampDb() == -3.0);   // loading changes nothing the output plays
+
+    EqState cut;
+    cut.bands = {band(1, FilterType::Peaking, 1000, -6, 1, WidthMode::Q)};
+    cut.preamp_db = 0.0;
+    session.loadState(&cut);
+    CHECK(session.autoPreamp());   // Auto only cuts
+}
+
+TEST_CASE("changing a band's type keeps the band, and a slope becomes a Q off a shelf") {
+    EqSession session;
+    EqState s;
+    s.bands = {band(7, FilterType::Peaking, 1200, 4, 2, WidthMode::Q),
+               band(8, FilterType::LowShelf, 150, 6, 12, WidthMode::SlopeDb),
+               band(9, FilterType::HighShelf, 6000, 0, 6, WidthMode::SlopeDb),
+               band(10, FilterType::Peaking, 800, 3, 1.5, WidthMode::BandwidthOct)};
+    session.loadState(&s);
+    const auto type = [&](int row) { return session.data(session.index(row), EqSession::TypeRole).toInt(); };
+    CHECK(type(0) == static_cast<int>(FilterType::Peaking));
+
+    session.setType(0, static_cast<int>(FilterType::LowPass));
+    const Band* b = session.bandAt(0);
+    CHECK(b->type == FilterType::LowPass);
+    CHECK(type(0) == static_cast<int>(FilterType::LowPass));
+    CHECK(session.data(session.index(0), EqSession::TypeNameRole).toString() == QStringLiteral("Low pass"));
+    CHECK(b->id == 7);
+    CHECK(b->fc == 1200);
+    CHECK(b->width == 2);
+    CHECK(b->width_mode == WidthMode::Q);
+    session.setType(0, static_cast<int>(FilterType::Peaking));
+    CHECK(session.bandAt(0)->gain_db == 4);   // the gain comes back with a type that has one
+
+    // A slope shelf to another shelf stays a slope.
+    session.setType(1, static_cast<int>(FilterType::HighShelf));
+    CHECK(session.bandAt(1)->width_mode == WidthMode::SlopeDb);
+    CHECK(session.bandAt(1)->width == 12);
+
+    // Off a shelf, the slope is read as Q by the processor: it becomes the Q with
+    // the same shape, 1 / sqrt((A + 1/A)(1/S - 1) + 2) with S = slope / 12.
+    session.setType(1, static_cast<int>(FilterType::Peaking));
+    CHECK(session.bandAt(1)->width_mode == WidthMode::Q);
+    CHECK(session.bandAt(1)->width == doctest::Approx(1.0 / std::sqrt(2.0)));
+    // With a slope under 12 dB the gain matters: 6 dB at 6 dB/oct.
+    s.bands[1].width = 6;
+    session.loadState(&s);
+    session.setType(1, static_cast<int>(FilterType::Peaking));
+    const double a = std::pow(10.0, 6.0 / 40.0);
+    CHECK(session.bandAt(1)->width == doctest::Approx(1.0 / std::sqrt((a + 1.0 / a) * (2.0 - 1.0) + 2.0)));
+    session.setType(2, static_cast<int>(FilterType::Notch));
+    CHECK(session.bandAt(2)->width_mode == WidthMode::Q);
+    CHECK(session.bandAt(2)->width == doctest::Approx(std::sqrt(0.5 / 2.0)));   // A = 1: sqrt(S / 2)
+    CHECK(session.data(session.index(2), EqSession::WidthLabelRole).toString() == QStringLiteral("Q 0.50"));
+
+    // A bandwidth stays one, held where the processor holds it for the new type.
+    session.setType(3, static_cast<int>(FilterType::LowShelf));
+    CHECK(session.bandAt(3)->width_mode == WidthMode::BandwidthOct);
+    CHECK(session.bandAt(3)->width == 1.5);
+
+    session.setType(3, 99);   // not a type
+    CHECK(session.bandAt(3)->type == FilterType::LowShelf);
+}
+
+TEST_CASE("a band's channels on a stereo output") {
+    EqSession session;
+    EqState s;
+    s.bands = {band(1, FilterType::Peaking, 1000, 3, 1, WidthMode::Q)};
+    session.loadState(&s);
+    const auto target = [&] { return session.data(session.index(0), EqSession::TargetRole).toString(); };
+    const auto which = [&] { return session.data(session.index(0), EqSession::ChannelsRole).toInt(); };
+    CHECK(target() == QStringLiteral("L+R"));
+    CHECK(which() == 2);
+    session.setChannels(0, 0);
+    CHECK(session.bandAt(0)->channels == 0x1);
+    CHECK(target() == QStringLiteral("L"));
+    CHECK(which() == 0);
+    session.setChannels(0, 1);
+    CHECK(session.bandAt(0)->channels == 0x2);
+    CHECK(target() == QStringLiteral("R"));
+    CHECK(which() == 1);
+    session.setChannels(0, 2);
+    CHECK(session.bandAt(0)->channels == kAllChannels);
+    CHECK(target() == QStringLiteral("L+R"));
+    session.setChannels(0, 3);
+    CHECK(session.bandAt(0)->channels == kAllChannels);
+
+    // Both bits of a stereo output are both channels.
+    s.bands[0].channels = 0x3;
+    session.loadState(&s);
+    CHECK(target() == QStringLiteral("L+R"));
+    CHECK(which() == 2);
+}
+
+TEST_CASE("duplicate and reset gain") {
+    EqSession session;
+    EqState s;
+    s.bands = {band(4, FilterType::HighShelf, 5000, -3, 0.7, WidthMode::Q),
+               band(2, FilterType::Peaking, 200, 5, 3, WidthMode::Q)};
+    s.bands[0].channels = 0x2;
+    session.loadState(&s);
+
+    session.duplicateBand(0);
+    REQUIRE(session.rowCount() == 3);
+    const Band* copy = session.bandAt(1);   // next to the original
+    CHECK(copy->id == 5);                   // a fresh id
+    CHECK(copy->type == FilterType::HighShelf);
+    CHECK(copy->fc == 5000);
+    CHECK(copy->gain_db == -3);
+    CHECK(copy->width == 0.7);
+    CHECK(copy->channels == 0x2);
+    CHECK(session.selectedRow() == 1);
+    CHECK(session.bandAt(2)->id == 2);
+    CHECK(session.data(session.index(1), EqSession::ColorIndexRole).toInt() !=
+          session.data(session.index(0), EqSession::ColorIndexRole).toInt());
+
+    session.resetGain(2);
+    CHECK(session.bandAt(2)->gain_db == 0.0);
+    CHECK(session.bandAt(2)->fc == 200);
+
+    while (session.canAddBand()) session.duplicateBand(0);
+    CHECK(session.rowCount() == static_cast<int>(kParamMaxBands));
+    session.duplicateBand(0);
+    CHECK(session.rowCount() == static_cast<int>(kParamMaxBands));
+}
+
+TEST_CASE("the graph draws the channel in view, and a handle sits on its band's channel") {
+    // A band on the right channel alone drew a flat curve with its handle at 0 dB:
+    // the graph drew channel 0 only (found 2026-09-14).
+    EqSession session;
+    EqState s;
+    s.bands = {band(1, FilterType::Peaking, 1000, 6, 1, WidthMode::Q), band(2, FilterType::Peaking, 100, -4, 1, WidthMode::Q)};
+    s.bands[0].channels = 0x2;
+    s.bands[1].channels = 0x1;
+    session.loadState(&s);
+    ResponseGraph graph;
+    graph.setSession(&session);
+
+    CHECK(session.viewChannel() == 2);   // L+R
+    CHECK(graph.handleDb(0) == doctest::Approx(6.0).epsilon(1e-3));
+    CHECK(graph.handleDb(1) == doctest::Approx(-4.0).epsilon(1e-3));
+    CHECK(graph.onView(0));
+    CHECK(graph.onView(1));
+    CHECK(std::abs(graph.compositeAt(1000)) < 0.1);   // the left channel, in L+R
+
+    session.setViewChannel(1);   // R
+    CHECK(graph.compositeAt(1000) == doctest::Approx(6.0).epsilon(1e-3));
+    CHECK(graph.handleDb(0) == doctest::Approx(6.0).epsilon(1e-3));
+    CHECK(graph.onView(0));
+    CHECK_FALSE(graph.onView(1));
+    // A band off the view sits where the view's curve is at its frequency.
+    CHECK(std::abs(graph.handleDb(1)) < 0.1);
+
+    session.setViewChannel(0);   // L
+    CHECK(graph.compositeAt(100) == doctest::Approx(-4.0).epsilon(1e-3));
+    CHECK(std::abs(graph.handleDb(0)) < 0.1);
+    CHECK_FALSE(graph.onView(0));
+    CHECK(graph.onView(1));
+
+    session.setViewChannel(5);
+    CHECK(session.viewChannel() == 0);
+}
+
 int main(int argc, char** argv) {
-    QCoreApplication app(argc, argv);
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
+    QGuiApplication app(argc, argv);
     return doctest::Context(argc, argv).run();
 }

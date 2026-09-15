@@ -12,11 +12,15 @@ Rectangle {
     required property real gain
     required property real q
     required property string widthLabel
+    required property int widthUnit
+    required property bool hasGain
     required property bool bandEnabled
     required property string target
     required property int colorIndex
     required property bool selected
     readonly property color colour: Theme.bandColour(colorIndex)
+    // In window coordinates: centred on x, above `above` or below `below`.
+    signal menuRequested(real x, real above, real below)
 
     width: 112
     height: column.implicitHeight + 26
@@ -49,45 +53,73 @@ Rectangle {
                 }
             }
             Text {
+                id: typeLabel
+                objectName: "typeName"
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.typeName
                 font.family: Theme.font
                 font.pixelSize: 12
-                color: Theme.muted
+                color: typeArea.containsMouse ? Theme.text : Theme.muted
+                MouseArea {
+                    id: typeArea
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    // The popover is centred on the column, above the type name.
+                    onClicked: {
+                        const top = typeLabel.mapToItem(null, 0, -4)
+                        const centre = root.mapToItem(null, root.width / 2, 0)
+                        root.menuRequested(centre.x, top.y, top.y + typeLabel.height + 8)
+                    }
+                }
             }
         }
+        // A type without gain shows its slider and value greyed, at 0 dB.
         GainSlider {
             objectName: "gainSlider"
             anchors.horizontalCenter: parent.horizontalCenter
-            gain: root.gain
+            enabled: root.hasGain
+            opacity: root.hasGain ? 1 : 0.35
+            gain: root.hasGain ? root.gain : 0
             colour: root.colour
             onMoved: (g) => { EqSession.select(root.index); EqSession.setGain(root.index, g) }
             onReleased: EqSession.finishEdit()
         }
-        Text {
+        ValueField {
+            objectName: "gainValue"
             anchors.horizontalCenter: parent.horizontalCenter
-            text: Theme.signed(root.gain, 1) + " dB"
-            font.family: Theme.font
-            font.pixelSize: 15
-            font.weight: Font.DemiBold
-            color: Theme.text
+            text: Theme.signed(root.hasGain ? root.gain : 0, 1) + " dB"
+            unit: EqSession.Decibels
+            editable: root.hasGain
+            opacity: root.hasGain ? 1 : 0.35
+            pixelSize: 15
+            weight: Font.DemiBold
+            onStarted: EqSession.select(root.index)
+            onSubmitted: (v) => { EqSession.setGain(root.index, v); EqSession.finishEdit() }
         }
         Column {
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: 4
-            Text {
+            ValueField {
+                objectName: "frequencyValue"
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: Theme.frequency(root.frequency)
-                font.family: Theme.font
-                font.pixelSize: 12
-                color: Theme.muted
+                unit: EqSession.Hertz
+                pixelSize: 12
+                colour: Theme.muted
+                onStarted: EqSession.select(root.index)
+                onSubmitted: (v) => { EqSession.setFrequency(root.index, v); EqSession.finishEdit() }
             }
-            Text {
+            ValueField {
+                objectName: "widthValue"
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: root.widthLabel
-                font.family: Theme.font
-                font.pixelSize: 12
-                color: Theme.muted
+                unit: root.widthUnit
+                pixelSize: 12
+                colour: Theme.muted
+                onStarted: EqSession.select(root.index)
+                onSubmitted: (v) => EqSession.setWidth(root.index, v)
             }
         }
         Row {

@@ -52,14 +52,14 @@ Item {
                     height: valueText.implicitHeight + 8
                     radius: 7
                     color: Theme.track
-                    Text {
+                    ValueField {
                         id: valueText
+                        objectName: "balanceValue"
                         anchors.centerIn: parent
                         text: EqSession.balance === 0 ? "0.0" : Theme.signed(EqSession.balance, 1)
-                        font.family: Theme.font
-                        font.pixelSize: 13
-                        font.weight: Font.DemiBold
-                        color: Theme.text
+                        unit: EqSession.Plain
+                        weight: Font.DemiBold
+                        onSubmitted: (v) => { EqSession.balance = v; EqSession.finishEdit() }
                     }
                 }
             }

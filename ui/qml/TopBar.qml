@@ -5,7 +5,6 @@ import Isotone
 // spectrum and the EQ switch.
 Item {
     id: root
-    property int channelView: 2      // L, R, L+R
     property bool spectrumOn: true
     signal spectrumPicked(bool on)
 
@@ -84,15 +83,15 @@ Item {
                     onReleased: EqSession.finishEdit()
                 }
             }
-            Text {
+            ValueField {
+                objectName: "preampValue"
                 width: 62
                 horizontalAlignment: Text.AlignRight
                 text: Theme.signed(EqSession.preampDb, 1) + " dB"
-                font.family: Theme.font
-                font.pixelSize: 13
-                font.weight: Font.DemiBold
-                color: Theme.text
+                unit: EqSession.Decibels
+                weight: Font.DemiBold
                 anchors.verticalCenter: parent.verticalCenter
+                onSubmitted: (v) => { EqSession.preampDb = v; EqSession.finishEdit() }
             }
             Rectangle {
                 width: autoLabel.implicitWidth + 18
@@ -117,10 +116,12 @@ Item {
         }
 
         Segmented {
+            objectName: "viewChannel"
             anchors.verticalCenter: parent.verticalCenter
+            visible: EqSession.outputChannels === 2
             options: ["L", "R", "L+R"]
-            current: root.channelView
-            onPicked: (index) => root.channelView = index
+            current: EqSession.viewChannel
+            onPicked: (index) => EqSession.viewChannel = index
         }
 
         Row {

@@ -24,6 +24,7 @@ QtObject {
     readonly property color knob: "#f3f5f8"
     readonly property color running: "#7ccd8e"
     readonly property color warning: "#d8953d"
+    readonly property color danger: "#f47b74"        // gen_screens.py RED, oklch(0.72 0.15 25)
     readonly property real fillEdgeAlpha: 0.30
     readonly property real fillMidAlpha: 0.04
 

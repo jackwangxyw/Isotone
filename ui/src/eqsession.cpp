@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <set>
 
 #include "isotone/param_block.h"
@@ -13,6 +15,10 @@
 #include "isotone/response.h"
 #include "output_state.h"
 #include "outputs.h"
+#include "typed_value.h"
+
+static_assert(static_cast<int>(EqSession::Plain) == static_cast<int>(isotone::ui::TypedUnit::Plain) &&
+              static_cast<int>(EqSession::SlopeDb) == static_cast<int>(isotone::ui::TypedUnit::SlopeDb));
 
 namespace {
 
@@ -35,6 +41,21 @@ QString type_name(isotone::FilterType t) {
 }
 
 double band_q(const isotone::Band& b) { return b.width; }
+
+// The processor designs only these with the band's gain.
+bool uses_gain(isotone::FilterType t) {
+    return t == isotone::FilterType::Peaking || t == isotone::FilterType::LowShelf ||
+           t == isotone::FilterType::HighShelf;
+}
+
+// Which of a stereo output's channels a band is on: 0 left, 1 right, 2 both.
+int stereo_channels(const isotone::Band& b) {
+    const isotone::ChannelMask m = b.channels & 0x3;
+    return m == 0x1 ? 0 : m == 0x2 ? 1 : 2;
+}
+
+// A loaded preamp this close to Auto's value is Auto's: Isotone.txt rounds it.
+constexpr double kAutoPreampMatchDb = 0.01;
 
 }  // namespace
 
@@ -80,7 +101,12 @@ QVariant EqSession::data(const QModelIndex& index, int role) const {
         case GainRole: return b->gain_db;
         case QRole: return band_q(*b);
         case EnabledRole: return b->enabled;
-        case TargetRole: return QStringLiteral("L+R");
+        case TargetRole: {
+            static const QString kNames[] = {QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("L+R")};
+            return kNames[stereo_channels(*b)];
+        }
+        case ChannelsRole: return stereo_channels(*b);
+        case TypeRole: return static_cast<int>(b->type);
         case ColorIndexRole: return static_cast<int>((b->id - 1) % kBandColours);
         case SelectedRole: return b->id == selected_id_;
         case WidthLabelRole:
@@ -90,6 +116,14 @@ QVariant EqSession::data(const QModelIndex& index, int role) const {
                 case isotone::WidthMode::SlopeDb: return QStringLiteral("%1 dB/oct").arg(b->width, 0, 'f', 1);
             }
             return {};
+        case WidthUnitRole:
+            switch (b->width_mode) {
+                case isotone::WidthMode::Q: return Q;
+                case isotone::WidthMode::BandwidthOct: return Octaves;
+                case isotone::WidthMode::SlopeDb: return SlopeDb;
+            }
+            return {};
+        case HasGainRole: return uses_gain(b->type);
     }
     return {};
 }
@@ -98,7 +132,8 @@ QHash<int, QByteArray> EqSession::roleNames() const {
     return {{BandIdRole, "bandId"},      {PositionRole, "position"}, {TypeNameRole, "typeName"},
             {FrequencyRole, "frequency"}, {GainRole, "gain"},         {QRole, "q"},
             {EnabledRole, "bandEnabled"}, {TargetRole, "target"},     {ColorIndexRole, "colorIndex"},
-            {SelectedRole, "selected"},   {WidthLabelRole, "widthLabel"}};
+            {SelectedRole, "selected"},   {WidthLabelRole, "widthLabel"}, {WidthUnitRole, "widthUnit"},
+            {HasGainRole, "hasGain"},     {TypeRole, "type"},         {ChannelsRole, "channels"}};
 }
 
 std::vector<size_t> EqSession::displayOrder() const {
@@ -125,7 +160,11 @@ void EqSession::useOutput(Outputs* outputs) {
     link_->set_target(target_);
     link_->take_region_opened();   // what is loaded below is what the region holds
     analyzer_.reset();
-    if (same) return;   // a format change on the same output keeps what is being edited
+    if (same) {   // a format change on the same output keeps what is being edited
+        emit stateChanged();
+        emit curveChanged();
+        return;
+    }
 
     // Start from what the output plays.
     isotone::EqState loaded;
@@ -149,6 +188,8 @@ void EqSession::loadState(const isotone::EqState* state) {
             }
         }
         state_ = loaded;
+        // The output does not carry the mode. Auto unless the preamp was set by hand.
+        state_.auto_preamp = std::abs(autoPreampValue() - state_.preamp_db) <= kAutoPreampMatchDb;
     } else {
         state_ = isotone::EqState{};
         state_.auto_preamp = true;
@@ -214,6 +255,13 @@ void EqSession::setByFrequency(bool on) {
     emit curveChanged();   // handle numbers follow the order
 }
 
+void EqSession::setViewChannel(int view) {
+    if (view < 0 || view > 2 || view == view_channel_) return;
+    view_channel_ = view;
+    emit viewChanged();
+    emit curveChanged();
+}
+
 void EqSession::bandChanged(int row, const QList<int>& roles) {
     emit dataChanged(index(row), index(row), roles);
     updateAutoPreamp();
@@ -221,12 +269,16 @@ void EqSession::bandChanged(int row, const QList<int>& roles) {
     emit curveChanged();
 }
 
-void EqSession::updateAutoPreamp() {
-    if (!state_.auto_preamp) return;
+double EqSession::autoPreampValue() const {
     static const std::vector<double> grid = isotone::log_grid(20.0, 20000.0, 512);
     const double rate = target_.layout.sample_rate > 0 ? target_.layout.sample_rate : 48000.0;
-    const double db = isotone::auto_preamp_db(state_, target_.layout.channels, target_.layout.speaker_mask, grid.data(),
-                                              grid.size(), rate);
+    return isotone::auto_preamp_db(state_, target_.layout.channels, target_.layout.speaker_mask, grid.data(),
+                                   grid.size(), rate);
+}
+
+void EqSession::updateAutoPreamp() {
+    if (!state_.auto_preamp) return;
+    const double db = autoPreampValue();
     if (db != state_.preamp_db) {
         state_.preamp_db = db;
         emit stateChanged();
@@ -245,7 +297,7 @@ void EqSession::select(int row) {
 }
 
 void EqSession::setGain(int row, double db) {
-    if (bandAt(row) == nullptr || !std::isfinite(db)) return;
+    if (bandAt(row) == nullptr || !std::isfinite(db) || !uses_gain(bandAt(row)->type)) return;
     state_.bands[order_[static_cast<size_t>(row)]].gain_db = std::clamp(db, -24.0, 24.0);
     bandChanged(row, {GainRole});
 }
@@ -277,21 +329,75 @@ void EqSession::setEnabled(int row, bool on) {
     commit();
 }
 
+void EqSession::setType(int row, int type) {
+    if (bandAt(row) == nullptr || type < static_cast<int>(isotone::FilterType::Peaking) ||
+        type > static_cast<int>(isotone::FilterType::HighShelf)) {
+        return;
+    }
+    isotone::Band& b = state_.bands[order_[static_cast<size_t>(row)]];
+    const auto shelf = [](isotone::FilterType t) {
+        return t == isotone::FilterType::LowShelf || t == isotone::FilterType::HighShelf;
+    };
+    const isotone::FilterType to = static_cast<isotone::FilterType>(type);
+    if (b.width_mode == isotone::WidthMode::SlopeDb && shelf(b.type) && !shelf(to)) {
+        // The processor reads a slope as a Q off a shelf. The Q of the same
+        // shelf shape, with the slope and gain the processor held (biquad.cpp).
+        const isotone::Band held = isotone::effective_band(b);
+        const double a = std::pow(10.0, held.gain_db / 40.0);
+        const double inner = (a + 1.0 / a) * (12.0 / held.width - 1.0) + 2.0;
+        b.width = 1.0 / std::sqrt(std::max(inner, 0.01));
+        b.width_mode = isotone::WidthMode::Q;
+    }
+    b.type = to;
+    b.width = isotone::effective_band(b).width;
+    bandChanged(row, {TypeRole, TypeNameRole, HasGainRole, QRole, WidthLabelRole, WidthUnitRole});
+    commit();
+}
+
+void EqSession::setChannels(int row, int which) {
+    if (bandAt(row) == nullptr) return;
+    static constexpr isotone::ChannelMask kMasks[] = {0x1, 0x2, isotone::kAllChannels};
+    state_.bands[order_[static_cast<size_t>(row)]].channels =
+        which >= 0 && which < 3 ? kMasks[which] : isotone::kAllChannels;
+    bandChanged(row, {TargetRole, ChannelsRole});
+    commit();
+}
+
+void EqSession::duplicateBand(int row) {
+    if (bandAt(row) == nullptr || !canAddBand()) return;
+    isotone::Band copy = *bandAt(row);
+    copy.id = nextBandId();
+    insertBand(order_[static_cast<size_t>(row)] + 1, copy);
+}
+
+void EqSession::resetGain(int row) {
+    setGain(row, 0.0);
+    commit();
+}
+
 bool EqSession::canAddBand() const { return state_.bands.size() < isotone::kParamMaxBands; }
+
+uint32_t EqSession::nextBandId() const {
+    uint32_t id = 1;
+    for (const isotone::Band& b : state_.bands) id = std::max(id, b.id + 1);
+    return id;
+}
 
 void EqSession::addBand(double hz, double db) {
     if (!canAddBand() || !std::isfinite(hz) || !std::isfinite(db)) return;
-    uint32_t id = 1;
-    for (const isotone::Band& b : state_.bands) id = std::max(id, b.id + 1);
     isotone::Band b;
-    b.id = id;
+    b.id = nextBandId();
     b.type = isotone::FilterType::Peaking;
     b.fc = std::clamp(hz, 10.0, 22000.0);
     b.gain_db = std::clamp(std::round(db * 10.0) / 10.0, -24.0, 24.0);
     b.width = 1.41;
+    insertBand(state_.bands.size(), b);
+}
+
+void EqSession::insertBand(size_t at, const isotone::Band& b) {
     beginResetModel();
-    state_.bands.push_back(b);
-    selected_id_ = id;
+    state_.bands.insert(state_.bands.begin() + static_cast<std::ptrdiff_t>(at), b);
+    selected_id_ = b.id;
     rebuildOrder();
     endResetModel();
     emit countChanged();
@@ -327,6 +433,13 @@ void EqSession::finishEdit() {
     endResetModel();
     emit selectionChanged();
     emit curveChanged();
+}
+
+double EqSession::parseValue(const QString& text, Unit unit) const {
+    const QByteArray utf8 = text.toUtf8();
+    const std::optional<double> v = isotone::ui::parse_typed_value(
+        std::string_view(utf8.constData(), static_cast<size_t>(utf8.size())), static_cast<isotone::ui::TypedUnit>(unit));
+    return v ? *v : std::numeric_limits<double>::quiet_NaN();
 }
 
 void EqSession::setPreampDb(double db) {

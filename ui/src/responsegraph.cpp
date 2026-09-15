@@ -67,15 +67,38 @@ double ResponseGraph::frequencyAt(double x) const {
 
 double ResponseGraph::dbAt(double y) const { return (kTop + plotHeight() / 2.0 - y) * range_db_ / (plotHeight() / 2.0); }
 
-double ResponseGraph::compositeAt(double hz) const {
+uint32_t ResponseGraph::viewChannel() const {
+    const bool stereo = session_ && session_->layout().channels == 2;
+    return stereo && session_->viewChannel() == 1 ? 1 : 0;
+}
+
+double ResponseGraph::compositeOn(uint32_t channel, double hz) const {
     if (!session_) return 0.0;
     isotone::EqState s = session_->state();
     s.preamp_db = 0.0;
     s.bypass = false;
     s.mute = false;
     double out = 0.0;
-    isotone::magnitude_db(s, session_->layout().channels, session_->layout().speaker_mask, 0, &hz, 1, kSampleRate, &out);
+    isotone::magnitude_db(s, session_->layout().channels, session_->layout().speaker_mask, channel, &hz, 1, kSampleRate,
+                          &out);
     return out;
+}
+
+double ResponseGraph::compositeAt(double hz) const { return compositeOn(viewChannel(), hz); }
+
+double ResponseGraph::handleDb(int row) const {
+    const isotone::Band* b = session_ ? session_->bandAt(row) : nullptr;
+    if (b == nullptr) return 0.0;
+    const bool both = session_->layout().channels == 2 && session_->viewChannel() == 2;
+    const bool right_only = (b->channels & 0x3) == 0x2;
+    return compositeOn(both && right_only ? 1 : viewChannel(), b->fc);
+}
+
+bool ResponseGraph::onView(int row) const {
+    const isotone::Band* b = session_ ? session_->bandAt(row) : nullptr;
+    if (b == nullptr) return false;
+    if (session_->layout().channels != 2 || session_->viewChannel() == 2) return true;
+    return isotone::band_affects_channel(*b, viewChannel());
 }
 
 void ResponseGraph::paint(QPainter* p) {
@@ -162,7 +185,7 @@ void ResponseGraph::paint(QPainter* p) {
     if (!state.bypass && !muted) {
         for (int row = 0; row < session_->rowCount(); ++row) {
             const isotone::Band* b = session_->bandAt(row);
-            if (!b->enabled) continue;
+            if (!b->enabled || !onView(row)) continue;
             isotone::band_magnitude_db(*b, freqs.data(), n, kSampleRate, db.data());
             QColor c = bell_;
             if (per_band_ && !band_colours_.isEmpty()) {
@@ -177,9 +200,10 @@ void ResponseGraph::paint(QPainter* p) {
     if (muted) return;
     isotone::EqState drawn = state;
     drawn.preamp_db = 0.0;
-    isotone::magnitude_db(drawn, session_->layout().channels, session_->layout().speaker_mask, 0, freqs.data(), n,
-                          kSampleRate, db.data());
+    const uint32_t channels = session_->layout().channels, mask = session_->layout().speaker_mask;
+    isotone::magnitude_db(drawn, channels, mask, viewChannel(), freqs.data(), n, kSampleRate, db.data());
     const QPainterPath curve = polyline(db);
+
     if (!state.bypass) {
         QPainterPath fill = curve;
         fill.lineTo(kLeft + pw, yOf(0));
@@ -193,6 +217,21 @@ void ResponseGraph::paint(QPainter* p) {
         g.setColorAt(0.5, mid);
         g.setColorAt(1.0, edge);
         p->fillPath(fill, g);
+    }
+    // L+R with channels that differ: the right channel as a second, fainter line.
+    if (channels == 2 && session_->viewChannel() == 2 && !state.bypass) {
+        std::vector<double> right(n);
+        isotone::magnitude_db(drawn, channels, mask, 1, freqs.data(), n, kSampleRate, right.data());
+        bool differs = false;
+        for (size_t i = 0; i < n && !differs; ++i) differs = std::abs(right[i] - db[i]) > 0.01;
+        if (differs) {
+            QColor faint = accent_;
+            faint.setAlphaF(0.55f);
+            QPen right_pen(faint, 1.75);
+            right_pen.setJoinStyle(Qt::RoundJoin);
+            right_pen.setCapStyle(Qt::RoundCap);
+            p->strokePath(polyline(right), right_pen);
+        }
     }
     QPen pen(accent_, 2.5);
     pen.setJoinStyle(Qt::RoundJoin);

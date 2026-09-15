@@ -8,6 +8,7 @@ Rectangle {
     property bool spectrumOn: true
     // Where the readout is; negative for none.
     property real hoverFrequency: -1
+    signal menuRequested(int row, real x, real above, real below)
 
     radius: 18
     color: Theme.plot
@@ -114,14 +115,15 @@ Rectangle {
                 readonly property real radius: selected ? 14 : 12
                 // Re-evaluated when the curve or the size changes, as the readout's.
                 readonly property real cx: graph.revision >= 0 && graph.plotWidth > 0 ? graph.xOf(frequency) : 0
-                readonly property real cy: graph.revision >= 0 && graph.plotHeight > 0 ? graph.yOf(graph.compositeAt(frequency)) : 0
+                readonly property real cy: graph.revision >= 0 && graph.plotHeight > 0 ? graph.yOf(graph.handleDb(index)) : 0
+                readonly property bool onView: graph.revision >= 0 && graph.onView(index)
 
                 x: cx - 20
                 y: cy - 20
                 width: 40
                 height: 40
                 z: selected ? 2 : 1
-                opacity: EqSession.eqOn && !EqSession.muted ? 1 : 0.4
+                opacity: EqSession.eqOn && !EqSession.muted && onView ? 1 : 0.4
 
                 Rectangle {
                     visible: handle.selected
@@ -156,17 +158,24 @@ Rectangle {
                     anchors.centerIn: parent
                     width: handle.radius * 2 + 4
                     height: width
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                     cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                     property real startDb
                     property real startGain
                     onPressed: (mouse) => {
                         EqSession.select(handle.index)
+                        if (mouse.button === Qt.RightButton) {
+                            // Centred on the handle, above it, or below where there is no room.
+                            const c = handle.mapToItem(null, handle.width / 2, handle.height / 2)
+                            root.menuRequested(handle.index, c.x, c.y - 18, c.y + 18)
+                            return
+                        }
                         const p = mapToItem(graph, mouse.x, mouse.y)
                         startDb = graph.dbAt(p.y)
                         startGain = handle.gain
                     }
                     onPositionChanged: (mouse) => {
-                        if (!pressed) return
+                        if (!pressed || (pressedButtons & Qt.RightButton)) return
                         const p = mapToItem(graph, mouse.x, mouse.y)
                         EqSession.setFrequency(handle.index, graph.frequencyAt(p.x))
                         EqSession.setGain(handle.index, startGain + graph.dbAt(p.y) - startDb)

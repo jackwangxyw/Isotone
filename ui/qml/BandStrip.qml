@@ -5,6 +5,7 @@ import Isotone
 // right-edge fade and a thumb, Add band, and the Channels panel, pinned.
 Item {
     id: root
+    signal menuRequested(int row, real x, real above, real below)
 
     Row {
         x: 32
@@ -55,7 +56,9 @@ Item {
                         spacing: 6
                         Repeater {
                             model: EqSession
-                            delegate: BandColumn {}
+                            delegate: BandColumn {
+                                onMenuRequested: (x, above, below) => root.menuRequested(index, x, above, below)
+                            }
                         }
                     }
                     function scrollBy(dx) {

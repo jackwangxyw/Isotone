@@ -2071,6 +2071,62 @@ yet).
 
 ---
 
+## 2026-09-15: Typed values, gain-less types, Auto by default, band popover, L / R view
+
+Committed first: the Equalizer view as it stood (375094a, owner's request).
+
+**Types without gain** (owner: grey them out). Low pass, high pass, band pass, notch
+and all pass show their gain slider and value greyed at 0 dB and take no gain from
+the slider, the value, the handle or Reset gain. The band keeps its stored gain, so
+it comes back when the type changes back to one with gain.
+
+**Typed values** (owner: type to enter did not exist). Gain, frequency and width in
+each column, the preamp and the balance: click, type, Enter. Escape keeps the
+value; leaving the field applies a value that reads, and text that does not stays
+open and selected on Enter. Values read as the field shows them or shorter
+(`typed_value.h`: "−3.0 dB", "-3", "1.2k", "1.20 kHz", "Q 1.41", "1.50 oct",
+"12.0 dB/oct"; U+2212 is a minus, a comma a decimal point); a unit that is not the
+field's, an exponent, hex, inf or nan is refused. Enter on the unchanged text
+changes nothing, so a shown "1.23 kHz" does not round the band to 1230 Hz. Delete
+is now a shortcut, not a key handler, so Delete in a field edits the text.
+
+**Auto preamp by default** (owner). The region and Isotone.txt do not carry the
+mode, so every output loaded with Auto off. A loaded state is now in Auto unless
+its preamp differs from Auto's value by more than 0.01 dB (Isotone.txt rounds
+it), in which case it was set by hand and stays; loading never changes what the
+output plays. A new or flat state is in Auto.
+
+**Band popover** (BandMenu board), from a column's type name (centred on the
+column, above it) or a right click on a handle (centred on the handle, below it
+when there is no room above): the eight type tiles drawn by `FilterGlyph` from the
+core with the generator's tile parameters, Channels (stereo), Enabled, Duplicate,
+Reset gain (greyed for a type without gain), Delete. A press outside or Escape
+closes it. Changing type keeps the band's id, frequency, gain and width; a shelf's
+dB slope becomes, off a shelf, the Q of the same shape, 1/sqrt((A + 1/A)(12/slope
+- 1) + 2) with the gain and slope the processor holds, since the processor reads a
+slope as a Q on any other type. Duplicate gives a fresh id and lands next to the
+band, selected; nothing at 64 bands.
+
+**L / R view.** L and R draw that channel's composite and bells, with bands not on
+it faded; L+R draws the left channel, and the right as a second, fainter line
+where the two differ. A handle sits on its band's channel: in L+R, a band on the
+right alone sits on the right line. This fixes the right-only band drawn flat with
+its handle at 0 dB. The fainter second line is the implementer's choice; the
+boards show only one curve. Hidden on outputs that are not stereo (their group
+picker is not built).
+
+**Tests:** `ui_tests` 11 cases (3 new for typed values), `ui_model_tests` 7
+(gain-less types, Auto on load, type change, channels, duplicate and reset, the
+view; now on QGuiApplication, offscreen), `ui_qml_tests` 28 test functions (new:
+typed values 9, band popover 11). Every new behaviour was broken on
+purpose once: 29 mutations, each failed a test (two needed tests added first: an
+exponent in a typed value, and a slope converted at a gain other than 0 dB).
+Screenshots of the popover from a column and a handle, and of L+R and R with a
+right-only band, taken with the app's new `--click x,y[,right]` option on CABLE
+Input.
+
+---
+
 # Where things stand (end of 2026-09-13)
 
 ## Done
