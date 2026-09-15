@@ -58,12 +58,20 @@ Item {
                 if (overlay.children[i].objectName.endsWith("Dialog")) overlay.children[i].destroy()
         }
 
+        // The sandbox config.txt, with Isotone.txt included or not.
+        readonly property string peaceConfig: "Preamp: -3 dB\r\nInclude: peace.txt\r\nGraphicEQ: 25 0; 40 -1.5; 100 0\r\n"
+        function config(text) {
+            verify(TestHooks.setCompatConfig(text))
+            Devices.refresh()
+        }
+
         function initTestCase() { UiState.overlay = overlay }
         function init() {
             tryVerify(() => !Devicetool.working, 5000)
             closeDialogs()
             wait(0)
             script({ started: false, commands: {} })
+            config(peaceConfig + "Include: Isotone.txt\r\n")
             UiState.devicesSelection = ""
             waitForRendering(view)
         }
@@ -255,10 +263,9 @@ Item {
         }
 
         function test_attach_shows_config_txt_and_removes_the_peace_include() {
+            config(peaceConfig)
             select(3)
-            click(findChild(view, "action_replace"))
-            click(findChild(dialog("replaceDialog"), "choice_eapo"))
-            click(findChild(dialog("replaceDialog"), "replaceContinue"))
+            click(findChild(view, "action_attach"))
             wait(0)
             const a = dialog("attachDialog")
             verify(a !== null, "attach dialog")
@@ -279,6 +286,63 @@ Item {
             tryVerify(() => dialog("attachDialog") === null, 1000, "closed")
             verify(!after.lines.some((l) => l.peace), "no Peace include")
             compare(after.lines.length, 5)
+        }
+
+        // Review fixes.
+        function test_an_equalizer_apo_output_config_txt_does_not_include_is_not_attached() {
+            config(peaceConfig)
+            select(3)
+            compare(text("detailStatus"), "Not attached")
+            compare(actionNames().sort(), ["attach", "test"])
+            compare(findChild(view, "action_attach").kind, "primary")
+            click(findChild(view, "action_attach"))
+            verify(dialog("attachDialog") !== null)
+        }
+
+        function test_keeping_equalizer_apo_offers_attach_once_isoapo_is_uninstalled() {
+            config(peaceConfig)
+            script({ started: true, commands: { uninstall: [{ delay_ms: 200 }] } })
+            select(6)
+            click(findChild(view, "action_keepEapo"))
+            click(findChild(dialog("uninstallDialog"), "uninstallConfirm"))
+            wait(0)
+            verify(dialog("attachDialog") === null, "not before the uninstall is done")
+            tryVerify(() => dialog("attachDialog") !== null, 3000)
+            compare(Devicetool.phase, "done")
+        }
+
+        function test_uninstall_alone_offers_no_attach() {
+            config(peaceConfig)
+            script({ started: true })
+            select(6)
+            click(findChild(view, "action_keepEapo"))
+            click(findChild(dialog("uninstallDialog"), "uninstallCancel"))
+            select(1)
+            click(findChild(view, "action_uninstall"))
+            click(findChild(dialog("uninstallDialog"), "uninstallConfirm"))
+            tryCompare(findChild(view, "operationText"), "text", "Uninstalled", 2000)
+            wait(50)
+            verify(dialog("attachDialog") === null)
+        }
+
+        function test_retry_under_test_failed_runs_the_test() {
+            script({ started: true, commands: { test: [{ exit: 1, json: { reason: "Initialize failed" } }, { exit: 0 }] } })
+            select(8)
+            click(findChild(view, "action_install"))
+            tryCompare(findChild(view, "operationText"), "text", "Test failed", 2000)
+            click(findChild(view, "operationRetry"))
+            compare(Devicetool.kind, "test")
+            tryCompare(findChild(view, "operationText"), "text", "Test passed", 2000)
+        }
+
+        function test_restart_audio_busy_is_busy_with_retry() {
+            script({ started: true, commands: { "restart-audio": [{ exit: 4, json: { error: "busy" } }, { exit: 0 }] } })
+            select(8)
+            click(findChild(view, "action_install"))
+            tryCompare(findChild(view, "operationText"), "text", "Another install is running", 2000)
+            verify(!findChild(view, "operationRestart").visible)
+            click(findChild(view, "operationRetry"))
+            tryCompare(findChild(view, "operationText"), "text", "Installed", 2000)
         }
     }
 }

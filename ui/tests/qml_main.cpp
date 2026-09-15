@@ -60,6 +60,13 @@ public:
             L"", isotone::ui::Backend::none,
             isotone::ui::OutputLayout{static_cast<uint32_t>(channels), static_cast<uint32_t>(speakerMask), 48000.0}});
     }
+    // Devices: replaces the sandbox config.txt (ISOTONE_COMPAT_DIR, never the installed one).
+    Q_INVOKABLE bool setCompatConfig(const QString& text) {
+        const QString dir = qEnvironmentVariable("ISOTONE_COMPAT_DIR");
+        if (!QDir::fromNativeSeparators(dir).startsWith(QDir::tempPath(), Qt::CaseInsensitive)) return false;
+        QFile config(QDir(dir).filePath(QStringLiteral("config.txt")));
+        return config.open(QIODevice::WriteOnly | QIODevice::Truncate) && config.write(text.toUtf8()) == text.toUtf8().size();
+    }
 
 private:
     QQmlEngine* engine_;

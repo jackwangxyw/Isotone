@@ -43,9 +43,9 @@ struct AttachOutcome {
     bool appended = false;        // attach_include appended its block
 };
 
-// With `remove_peace`, first rewrites config.txt without its Peace includes
-// (write_file_atomically), then attach_include. Running it again changes
-// nothing.
+// attach_include, then with `remove_peace` and only once that succeeded,
+// rewrites config.txt without its Peace includes (write_file_atomically), so a
+// failed attach leaves Peace in place. Running it again changes nothing.
 AttachOutcome attach_config(const std::filesystem::path& config_dir, bool remove_peace);
 
 }  // namespace isotone::ui

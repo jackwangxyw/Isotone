@@ -96,6 +96,9 @@ public:
 
 signals:
     void revisionChanged();
+    // A read found an output's engine, config.txt's include or its Off setting
+    // changed: what Outputs lists may have changed too (Main.qml refreshes it).
+    void outputsChanged();
     // The app connects it (main.cpp); tests cannot run the uninstaller.
     void equalizerApoUninstallerRequested(const QString& command);
 

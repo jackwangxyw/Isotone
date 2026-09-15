@@ -43,6 +43,18 @@ Item {
     Component { id: replaceDialog; ReplaceDialog { onKeepEqualizerApo: (device) => UiState.openDialog(attachDialog, { device: device }) } }
     Component { id: attachDialog; AttachDialog {} }
 
+    // Keep Equalizer APO: once IsoAPO is uninstalled, Attach, unless config.txt already includes Isotone.txt.
+    property string attachAfterUninstall: ""
+    Connections {
+        target: Devicetool
+        function onFinished(kind, guid) {
+            if (kind !== "uninstall" || guid !== root.attachAfterUninstall) return
+            root.attachAfterUninstall = ""
+            if (Devicetool.phase === "done" && !EqualizerApoConfig.preview().attached)
+                UiState.openDialog(attachDialog, { device: Devices.row(guid) })
+        }
+    }
+
     Text {
         id: title
         x: 36
@@ -319,8 +331,11 @@ Item {
             visible: root.selected !== ""
             device: root.device
             onAction: (action) => {
+                root.attachAfterUninstall = action === "keepEapo" ? root.selected : ""
                 if (action === "uninstall" || action === "keepEapo")
                     UiState.openDialog(uninstallDialog, { device: root.device })
+                else if (action === "attach")
+                    UiState.openDialog(attachDialog, { device: root.device })
                 else if (action === "replace")
                     UiState.openDialog(replaceDialog, { device: root.device })
                 else if (action === "copyDiagnostics")

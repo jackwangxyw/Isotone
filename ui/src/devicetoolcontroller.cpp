@@ -69,6 +69,20 @@ QString reason_of(const DevicetoolResult& r) {
 
 }  // namespace
 
+QString attachConfigStep(const std::filesystem::path& dir) {
+    if (dir.empty()) return windowsMessage(ERROR_PATH_NOT_FOUND);
+    const isotone::ui::AttachOutcome a = isotone::ui::attach_config(dir, false);
+    return a.error == ERROR_SUCCESS ? QString() : windowsMessage(a.error);
+}
+
+QString removeBlockStep(const std::filesystem::path& dir, const QString& guid) {
+    // An empty dir: load() refuses it (no such directory) before anything is written.
+    isotone::compat::CompatWriter writer(dir);
+    DWORD error = writer.load();
+    if (error == ERROR_SUCCESS) error = writer.remove(guid.toStdString());
+    return error == ERROR_SUCCESS ? QString() : windowsMessage(error);
+}
+
 DevicetoolController::DevicetoolController(QObject* parent) : QObject(parent) {
     const QString script = qEnvironmentVariable("ISOTONE_FAKE_DEVICETOOL");
     if (!script.isEmpty()) {
@@ -144,22 +158,35 @@ void DevicetoolController::start(const Request& request) {
     target_ = request.guid;
     reason_.clear();
     restarted_ = false;
-    row_status_.clear();
+    const bool apply = request.kind == QLatin1String("apply");
+    // A restart after an apply keeps its rows.
+    if (!apply || !request.restart_only) row_status_.clear();
     bool changes = request.kind != QLatin1String("test");
-    if (request.kind == QLatin1String("apply")) {
+    QVariantMap restore;
+    if (apply && !request.restart_only) {
         changes = false;
         for (const QVariant& p : request.plans) {
             const QVariantMap plan = p.toMap();
-            row_status_.insert(plan.value(QStringLiteral("guid")).toString(), QStringLiteral("queued"));
+            const QString guid = plan.value(QStringLiteral("guid")).toString();
+            row_status_.insert(guid, QStringLiteral("queued"));
             changes |= !plan.value(QStringLiteral("commands")).toList().isEmpty();
+            // Off is kept before anything runs: Outputs drops the output, so the
+            // session's writer for it is gone before its block is removed.
+            if (!plan.contains(QStringLiteral("off"))) continue;
+            const bool off = plan.value(QStringLiteral("off")).toBool();
+            const bool was = equalizerApoOutputOff(guid);
+            if (off == was) continue;
+            setEqualizerApoOutputOff(guid, off);
+            restore.insert(guid, was);
         }
     }
     // Set now, so a second click before the worker starts finds it working.
     phase_ = changes && !runner_->started() ? QStringLiteral("uac") : QStringLiteral("running");
     emit changed();
-    post([this, request, changes] {
+    if (!restore.isEmpty()) emit outputChoicesChanged();
+    post([this, request, changes, restore] {
         if (request.kind == QLatin1String("apply")) {
-            applyPlans(request, changes);
+            applyPlans(request, changes, restore);
         } else {
             operate(request);
         }
@@ -168,12 +195,12 @@ void DevicetoolController::start(const Request& request) {
 
 void DevicetoolController::run(const QString& kind, const QString& guid, const QStringList& args) {
     if (args.isEmpty()) return;
-    start({kind, guid, args, {}});
+    start({kind, guid, args, {}, false, {}});
 }
 
-void DevicetoolController::requestApproval() { start({QStringLiteral("approval"), {}, {}, {}}); }
+void DevicetoolController::requestApproval() { start({QStringLiteral("approval"), {}, {}, {}, false, {}}); }
 
-void DevicetoolController::apply(const QVariantList& plans) { start({QStringLiteral("apply"), {}, {}, plans}); }
+void DevicetoolController::apply(const QVariantList& plans) { start({QStringLiteral("apply"), {}, {}, plans, false, {}}); }
 
 void DevicetoolController::retry() {
     if (!last_.kind.isEmpty()) start(last_);
@@ -213,6 +240,19 @@ bool DevicetoolController::loadScript(const QString& script) {
 
 // ---------------------------------------------------------------------------
 // On the worker
+
+bool DevicetoolController::stopping() {
+    std::lock_guard lock(mutex_);
+    return stopping_;
+}
+
+void DevicetoolController::restoreChoices(const QVariantMap& restore) {
+    if (restore.isEmpty()) return;
+    publish([restore](DevicetoolController* c) {
+        for (auto it = restore.cbegin(); it != restore.cend(); ++it) setEqualizerApoOutputOff(it.key(), it.value().toBool());
+        emit c->outputChoicesChanged();
+    });
+}
 
 bool DevicetoolController::approve() {
     if (runner_->started()) return true;
@@ -265,14 +305,19 @@ void DevicetoolController::fail(Outcome outcome, const QString& reason) {
 }
 
 DevicetoolController::Outcome DevicetoolController::restartAndTest(const QStringList& tests, QString* reason, QString* failed_test) {
+    // Closing: nothing more runs.
+    if (stopping()) return Outcome::ok;
     publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("restarting"); });
-    QString ignored;
-    if (command({L"restart-audio"}, false, nullptr, &ignored) != Outcome::ok) return Outcome::restart_failed;
+    QString restart_reason;
+    const Outcome restart = command({L"restart-audio"}, false, nullptr, &restart_reason);
+    if (restart == Outcome::busy) return Outcome::busy;
+    if (restart != Outcome::ok) return Outcome::restart_failed;
     publish([](DevicetoolController* c) {
         c->restarted_ = true;
         c->phase_ = QStringLiteral("testing");
     });
     for (const QString& guid : tests) {
+        if (stopping()) return Outcome::ok;
         if (command({L"test", guid.toStdWString()}, true, nullptr, reason) != Outcome::ok) {
             *failed_test = guid;
             return Outcome::failed;
@@ -294,37 +339,62 @@ void DevicetoolController::operate(const Request& request) {
     };
     DevicetoolResult result;
     QString reason;
-    const Outcome outcome = command(wide(request.args), test_only, &result, &reason);
-    if (outcome != Outcome::ok) {
-        fail(outcome, reason);
-        finished();
-        return;
-    }
-    if (test_only) {
-        publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("done"); });
-        finished();
-        return;
-    }
+    QStringList tests = request.tests;
+    if (!request.restart_only) {
+        const Outcome outcome = command(wide(request.args), test_only, &result, &reason);
+        const QJsonObject json = QJsonDocument::fromJson(QByteArray::fromStdString(result.json)).object();
+        if (outcome != Outcome::ok) {
+            // A change that failed after changing the output (a repair that
+            // undid an interrupted command, then refused) still needs the audio
+            // service restarted. Straight through the runner: Copy details keeps
+            // the failed command's.
+            if (outcome == Outcome::failed && !test_only && json.value(QStringLiteral("fx_properties_changed")).toBool() &&
+                !stopping()) {
+                publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("restarting"); });
+                const DevicetoolResult restart = runner_->run({L"restart-audio"});
+                const bool restarted = restart.error == ERROR_SUCCESS && restart.exit_code == 0;
+                publish([restarted](DevicetoolController* c) { c->restarted_ = restarted; });
+            }
+            fail(outcome, reason);
+            finished();
+            return;
+        }
+        if (test_only) {
+            publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("done"); });
+            finished();
+            return;
+        }
 
-    // The outputs changed: the operation's own, and each one repair reattached.
-    QStringList tests;
-    if (!request.guid.isEmpty()) tests << request.guid;
-    const QJsonObject json = QJsonDocument::fromJson(QByteArray::fromStdString(result.json)).object();
-    for (const QJsonValue& d : json.value(QStringLiteral("repaired")).toArray()) {
-        const QJsonObject o = d.toObject();
-        const QString guid = o.value(QStringLiteral("guid")).toString();
-        if (o.value(QStringLiteral("ok")).toBool() && o.value(QStringLiteral("mode")).isString() && !tests.contains(guid))
-            tests << guid;
+        // The outputs changed: the operation's own, and each one repair reattached.
+        if (!request.guid.isEmpty()) tests << request.guid;
+        for (const QJsonValue& d : json.value(QStringLiteral("repaired")).toArray()) {
+            const QJsonObject o = d.toObject();
+            const QString guid = o.value(QStringLiteral("guid")).toString();
+            if (o.value(QStringLiteral("ok")).toBool() && o.value(QStringLiteral("mode")).isString() && !tests.contains(guid))
+                tests << guid;
+        }
     }
     QString failed_test;
     const Outcome after = restartAndTest(tests, &reason, &failed_test);
     if (after == Outcome::restart_failed) {
         publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("reboot"); });
+    } else if (after == Outcome::busy) {
+        // The change is done; Retry restarts and tests.
+        Request again = request;
+        again.restart_only = true;
+        again.tests = tests;
+        publish([again](DevicetoolController* c) {
+            c->phase_ = QStringLiteral("busy");
+            c->last_ = again;
+        });
     } else if (after == Outcome::failed) {
-        publish([reason](DevicetoolController* c) {
+        // Retry runs the test that failed, not the change again.
+        const Request test{QStringLiteral("test"), failed_test, {QStringLiteral("test"), failed_test}, {}, false, {}};
+        publish([reason, test](DevicetoolController* c) {
             c->kind_ = QStringLiteral("test");
             c->phase_ = QStringLiteral("failed");
             c->reason_ = reason;
+            c->last_ = test;
         });
     } else {
         publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("done"); });
@@ -332,17 +402,22 @@ void DevicetoolController::operate(const Request& request) {
     finished();
 }
 
-void DevicetoolController::applyPlans(const Request& request, bool changes) {
-    if (changes && !approve()) return;
+void DevicetoolController::applyPlans(const Request& request, bool changes, const QVariantMap& restore) {
+    if (changes && !approve()) {
+        restoreChoices(restore);
+        return;
+    }
     publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("running"); });
     const auto row = [this](const QString& guid, const QString& status) {
         publish([guid, status](DevicetoolController* c) { c->row_status_.insert(guid, status); });
     };
     const std::filesystem::path dir = equalizerApoConfigDir();
     QString first_failure;
-    QStringList tests;
-    bool changed = false;
-    for (const QVariant& p : request.plans) {
+    QStringList tests = request.tests;
+    bool changed = request.restart_only;
+    for (const QVariant& p : request.restart_only ? QVariantList() : request.plans) {
+        // Closing: the plans not started are not run.
+        if (stopping()) break;
         const QVariantMap plan = p.toMap();
         const QString guid = plan.value(QStringLiteral("guid")).toString();
         QString reason;
@@ -360,24 +435,18 @@ void DevicetoolController::applyPlans(const Request& request, bool changes) {
         }
         if (ok && plan.value(QStringLiteral("attach")).toBool()) {
             row(guid, QStringLiteral("attaching"));
-            const isotone::ui::AttachOutcome a = isotone::ui::attach_config(dir, false);
-            if (a.error != ERROR_SUCCESS) {
-                ok = false;
-                reason = windowsMessage(a.error);
-            }
+            reason = attachConfigStep(dir);
+            ok = reason.isEmpty();
         }
         if (ok && plan.value(QStringLiteral("removeBlock")).toBool()) {
             row(guid, QStringLiteral("removing"));
-            isotone::compat::CompatWriter writer(dir);
-            DWORD error = writer.load();
-            if (error == ERROR_SUCCESS) error = writer.remove(guid.toStdString());
-            if (error != ERROR_SUCCESS) {
-                ok = false;
-                reason = windowsMessage(error);
-            }
+            reason = removeBlockStep(dir, guid);
+            ok = reason.isEmpty();
         }
         if (ran) tests << guid;
         if (!ok && first_failure.isEmpty()) first_failure = reason;
+        // The output's Off setting goes back to what it was when its plan did not succeed.
+        if (!ok && restore.contains(guid)) restoreChoices({{guid, restore.value(guid)}});
         row(guid, ok ? plan.value(QStringLiteral("result")).toString() : QStringLiteral("failed"));
     }
 
@@ -387,6 +456,19 @@ void DevicetoolController::applyPlans(const Request& request, bool changes) {
         if (after == Outcome::restart_failed) {
             publish([](DevicetoolController* c) { c->phase_ = QStringLiteral("reboot"); });
             publish([](DevicetoolController* c) { emit c->finished(QStringLiteral("apply"), QString()); });
+            return;
+        }
+        if (after == Outcome::busy) {
+            // The plans are done; Retry restarts and tests, and the rows stay.
+            Request again = request;
+            again.restart_only = true;
+            again.tests = tests;
+            publish([again](DevicetoolController* c) {
+                c->phase_ = QStringLiteral("busy");
+                c->reason_.clear();
+                c->last_ = again;
+                emit c->finished(QStringLiteral("apply"), QString());
+            });
             return;
         }
         if (after == Outcome::failed) {

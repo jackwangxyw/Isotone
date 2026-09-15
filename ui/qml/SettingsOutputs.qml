@@ -61,6 +61,14 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 10
 
+            // Approval that failed (not declined): Windows' reason.
+            Row {
+                visible: root.phase === "locked" && Devicetool.kind === "approval" && Devicetool.phase === "failed"
+                spacing: 8
+                anchors.verticalCenter: parent.verticalCenter
+                Icon { name: "warning"; size: 15; colour: Theme.danger; anchors.verticalCenter: parent.verticalCenter }
+                Text { objectName: "outputsApprovalFailure"; text: Devicetool.reason; font.family: Theme.font; font.pixelSize: 13; color: Theme.text; anchors.verticalCenter: parent.verticalCenter }
+            }
             Button { objectName: "outputsChange"; visible: root.phase === "locked"; text: "Change"; icon: "shield"; onClicked: root.change() }
 
             Row {
@@ -113,6 +121,7 @@ Item {
             }
             Button { objectName: "outputsLater"; visible: root.phase === "reboot"; kind: "ghost"; text: "Later"; onClicked: root.finish() }
             Button { objectName: "outputsRestart"; visible: root.phase === "reboot"; kind: "primary"; text: "Restart Windows"; onClicked: Devicetool.restartWindows() }
+            Button { objectName: "outputsRetry"; visible: root.phase === "busy"; kind: "ghost"; text: "Retry"; onClicked: Devicetool.retry() }
             Button { objectName: "outputsDone"; visible: root.phase === "done" || root.phase === "failed" || root.phase === "busy"; text: "Done"; onClicked: root.finish() }
         }
     }

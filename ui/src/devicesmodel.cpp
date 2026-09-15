@@ -34,9 +34,24 @@ QString config_line(bool included) {
     return included ? QStringLiteral("config.txt · Isotone.txt") : QStringLiteral("config.txt");
 }
 
-bool isotone_included() {
-    const std::filesystem::path dir = equalizerApoConfigDir();
-    return !dir.empty() && isotone::compat::inspect_config(dir).isotone_included;
+// What config.txt and Settings Outputs say about the output.
+void annotate(DevicesModel::Entry* e, bool included) {
+    e->facts.attached = included;
+    e->facts.isotone_off = equalizerApoOutputOff(e->facts.guid);
+    if (equalizerApoPresent(e->facts)) e->config = config_line(included);
+}
+
+// What Outputs lists depends on: the engine, the include and Off.
+bool outputs_differ(const std::vector<DevicesModel::Entry>& before, const std::vector<DevicesModel::Entry>& after) {
+    for (const DevicesModel::Entry& a : after) {
+        for (const DevicesModel::Entry& b : before) {
+            if (a.facts.guid != b.facts.guid) continue;
+            if (a.facts.backend != b.facts.backend || a.facts.isoapo != b.facts.isoapo || a.facts.attached != b.facts.attached ||
+                a.facts.isotone_off != b.facts.isotone_off)
+                return true;
+        }
+    }
+    return false;
 }
 
 void order(std::vector<DevicesModel::Entry>* entries) {
@@ -62,7 +77,7 @@ Reading read_machine() {
     CoUninitialize();
     if (FAILED(hr)) return out;
     const std::wstring exe = devicetoolPath().toStdWString();
-    const bool included = isotone_included();
+    const bool included = equalizerApoAttached();
     for (const isotone::devices::Endpoint& e : endpoints) {
         if ((e.state & DEVICE_STATE_NOTPRESENT) || e.guid.empty()) continue;
         DevicesModel::Entry entry;
@@ -76,7 +91,7 @@ Reading read_machine() {
             entry.facts.default_mode = status.default_mode;
             entry.status_json = QString::fromStdString(r.json);
         }
-        if (equalizerApoPresent(entry.facts)) entry.config = config_line(included);
+        annotate(&entry, included);
         out.entries.push_back(std::move(entry));
     }
     order(&out.entries);
@@ -205,6 +220,7 @@ void DevicesModel::copyDiagnostics(const QString& guid) const {
 }
 
 void DevicesModel::setEntries(std::vector<Entry> entries, bool eapo_installed, const QString& version, const QString& uninstaller) {
+    const bool outputs_changed = outputs_differ(entries_, entries);
     beginResetModel();
     entries_ = std::move(entries);
     eapo_installed_ = eapo_installed;
@@ -213,15 +229,16 @@ void DevicesModel::setEntries(std::vector<Entry> entries, bool eapo_installed, c
     endResetModel();
     ++revision_;
     emit revisionChanged();
+    if (outputs_changed) emit outputsChanged();
 }
 
 void DevicesModel::refresh() {
     if (fake_) {
-        // A script's rows stay; only the config line is read again.
-        const bool included = isotone_included();
-        for (Entry& e : entries_)
-            if (equalizerApoPresent(e.facts)) e.config = config_line(included);
-        setEntries(std::move(entries_), eapo_installed_, eapo_version_, eapo_uninstaller_);
+        // A script's rows stay; only config.txt and the settings are read again.
+        const bool included = equalizerApoAttached();
+        std::vector<Entry> entries = entries_;
+        for (Entry& e : entries) annotate(&e, included);
+        setEntries(std::move(entries), eapo_installed_, eapo_version_, eapo_uninstaller_);
         return;
     }
     if (reading_) {
@@ -278,13 +295,13 @@ bool DevicesModel::loadScript(const QString& script) {
     if (!doc.isObject()) return false;
     const QJsonObject o = doc.object();
     std::vector<Entry> entries;
-    const bool included = isotone_included();
+    const bool included = equalizerApoAttached();
     for (const QJsonValue& d : o.value(QStringLiteral("devices")).toArray()) {
         Entry e;
         const QByteArray json = QJsonDocument(d.toObject()).toJson(QJsonDocument::Compact);
         if (!factsFromStatusJson(json, &e.facts)) continue;
         e.status_json = QString::fromUtf8(json);
-        if (equalizerApoPresent(e.facts)) e.config = config_line(included);
+        annotate(&e, included);
         entries.push_back(std::move(e));
     }
     order(&entries);

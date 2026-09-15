@@ -62,10 +62,18 @@ Item {
         }
 
         function test_a_working_output_shows_nothing() {
+            verify(TestHooks.setCompatConfig("Include: Isotone.txt\r\n"))
             load([status(target, "installed", "native")])
             verify(!pill().visible)
             load([status(target, "not_installed", "equalizerapo")])
             verify(!pill().visible)
+        }
+
+        function test_equalizer_apo_without_the_include_shows_not_attached_and_attach() {
+            verify(TestHooks.setCompatConfig("Include: peace.txt\r\n"))
+            load([status(target, "not_installed", "equalizerapo")])
+            verify(pill().visible)
+            compare(findChild(bar, "engineStatusAction").text, "Attach")
         }
 
         function test_equalizer_apo_on_no_output_offers_its_uninstaller() {

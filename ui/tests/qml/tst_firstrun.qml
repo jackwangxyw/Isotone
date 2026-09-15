@@ -82,6 +82,17 @@ Item {
             verify(child("wizardInstall").visible)
         }
 
+        function test_an_approval_that_fails_says_why() {
+            // ERROR_FILE_NOT_FOUND from starting serve (devicetool missing).
+            script({ start: { error: 2 } })
+            click(child("wizardInstall"))
+            tryVerify(() => !Devicetool.working && Devicetool.phase === "failed", 3000)
+            compare(child("wizardTitle").text, "Outputs")
+            verify(child("wizardResult").visible)
+            compare(child("wizardResult").text, "The system cannot find the file specified.")
+            verify(child("wizardInstall").visible)
+        }
+
         function test_skip_finishes() {
             click(child("wizardSkip"))
             compare(finished.count, 1)

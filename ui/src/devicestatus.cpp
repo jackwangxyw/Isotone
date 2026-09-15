@@ -137,13 +137,15 @@ QString statusKey(const DeviceFacts& f) {
         case IsoApoState::detached: return QStringLiteral("detached");
         case IsoApoState::not_installed: break;
     }
-    return f.backend == Backend::equalizerapo ? QStringLiteral("active") : QStringLiteral("not_installed");
+    if (f.backend != Backend::equalizerapo) return QStringLiteral("not_installed");
+    return f.attached ? QStringLiteral("active") : QStringLiteral("not_attached");
 }
 
 QString statusLabel(const QString& key) {
     static const QHash<QString, QString> labels = {
         {QStringLiteral("installed"), QStringLiteral("Installed")},
         {QStringLiteral("active"), QStringLiteral("Active")},
+        {QStringLiteral("not_attached"), QStringLiteral("Not attached")},
         {QStringLiteral("detached"), QStringLiteral("Detached")},
         {QStringLiteral("conflict"), QStringLiteral("Conflict")},
         {QStringLiteral("replaced"), QStringLiteral("Replaced by Equalizer APO")},
@@ -193,7 +195,7 @@ QString formatLabel(const DeviceFacts& f) {
 
 QString nowEngine(const DeviceFacts& f) {
     if (f.backend == Backend::conflict) return QStringLiteral("IsoAPO + Equalizer APO");
-    if (f.backend == Backend::equalizerapo) return QStringLiteral("Equalizer APO");
+    if (f.backend == Backend::equalizerapo) return f.isotone_off ? QStringLiteral("Off") : QStringLiteral("Equalizer APO");
     if (f.backend == Backend::native || f.isoapo == IsoApoState::detached || f.isoapo == IsoApoState::interrupted)
         return QStringLiteral("IsoAPO");
     return QStringLiteral("Off");
@@ -208,6 +210,7 @@ QStringList actions(const DeviceFacts& f) {
     const QString key = statusKey(f);
     if (key == QLatin1String("installed")) return {QStringLiteral("test"), QStringLiteral("uninstall")};
     if (key == QLatin1String("active")) return {QStringLiteral("replace"), QStringLiteral("test")};
+    if (key == QLatin1String("not_attached")) return {QStringLiteral("attach"), QStringLiteral("test")};
     if (key == QLatin1String("detached")) {
         if (f.backend == Backend::equalizerapo) return {QStringLiteral("takeBack"), QStringLiteral("keepEapo")};
         return {QStringLiteral("repair"), QStringLiteral("test"), QStringLiteral("uninstall")};
@@ -234,14 +237,14 @@ QVariantMap operation(const DeviceFacts& f, const QString& action) {
         action == QLatin1String("replaceWithIsoApo"))
         return op("replace", {QStringLiteral("install"), g, QStringLiteral("--replace-equalizerapo")});
     if (action == QLatin1String("enableEnhancements")) return op("repair", {QStringLiteral("enable-enhancements"), g});
-    if (action == QLatin1String("undo")) return op("repair", {QStringLiteral("repair")});
+    if (action == QLatin1String("undo")) return op("repair", {QStringLiteral("repair"), g});
     if (action == QLatin1String("repair")) {
         // An install record from before Isotone.InstallMode does not say the
         // slot: the mode an install would pick, as `repair --mode` asks.
         const QString slot = post_slot_of_mode(f.default_mode).toLower();
         if (f.remedies.contains(QStringLiteral("repair --mode")) && !slot.isEmpty())
-            return op("repair", {QStringLiteral("repair"), QStringLiteral("--mode"), slot});
-        return op("repair", {QStringLiteral("repair")});
+            return op("repair", {QStringLiteral("repair"), g, QStringLiteral("--mode"), slot});
+        return op("repair", {QStringLiteral("repair"), g});
     }
     return {};
 }
@@ -262,8 +265,10 @@ QVariantMap planChange(const DeviceFacts& f, const QString& want) {
     } else if (want == QLatin1String("Equalizer APO")) {
         result = QStringLiteral("attached");
         if (now != QLatin1String("Equalizer APO")) {
-            // Uninstalling IsoAPO keeps the Equalizer APO on the output.
-            commands << QVariant(QStringList{QStringLiteral("uninstall"), g});
+            // Uninstalling IsoAPO keeps the Equalizer APO on the output. Turned
+            // Off with no IsoAPO, attaching is all.
+            if (isoapo_on(f) || f.isoapo != IsoApoState::not_installed)
+                commands << QVariant(QStringList{QStringLiteral("uninstall"), g});
             attach = true;
         }
     } else {
@@ -277,6 +282,8 @@ QVariantMap planChange(const DeviceFacts& f, const QString& want) {
             {QStringLiteral("commands"), commands},
             {QStringLiteral("attach"), attach},
             {QStringLiteral("removeBlock"), remove_block},
+            // Off where Equalizer APO stays: Isotone leaves the output alone from now on.
+            {QStringLiteral("off"), remove_block},
             {QStringLiteral("result"), result},
             {QStringLiteral("changed"), want != now}};
 }

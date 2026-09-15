@@ -58,6 +58,7 @@ First match wins (`devicestatus.h`):
 | Installed | installed | ok |
 | Replaced by Equalizer APO | replaced_by_equalizerapo | warn |
 | Detached | detached | warn |
+| Not attached | not_installed, backend equalizerapo, config.txt does not include Isotone.txt | warn |
 | Active | not_installed, backend equalizerapo | ok |
 | Not installed | not_installed | off |
 
@@ -75,11 +76,12 @@ Actions and what they run:
 |---|---|---|
 | Installed | Test, Uninstall | `test <g>` unelevated; `uninstall <g>` after the dialog |
 | Active | Replace with IsoAPO, Test | the Replace dialog: `install <g> --replace-equalizerapo`, or Attach |
-| Detached | Repair, Test, Uninstall | `repair`, or `repair --mode <m>` when the remedy is `repair --mode` (m from `default_install_mode`) |
+| Not attached | Attach, Test | the Attach dialog |
+| Detached | Repair, Test, Uninstall | `repair <g>`, or `repair <g> --mode <m>` when the remedy is `repair --mode` (m from `default_install_mode`) |
 | Detached, Equalizer APO in a slot | Take back, Keep Equalizer APO | `install <g> --replace-equalizerapo`; `uninstall <g>` |
 | Conflict | Remove Equalizer APO, Uninstall IsoAPO | `install <g> --replace-equalizerapo`; `uninstall <g>` |
 | Replaced by Equalizer APO | Take back, Keep Equalizer APO | as above |
-| Interrupted | Undo | `repair` |
+| Interrupted | Undo | `repair <g>` |
 | Unrecorded | Copy diagnostics | the status JSON to the clipboard |
 | Enhancements off | Turn on enhancements | `enable-enhancements <g>` |
 | Not installed | Install | `install <g>` |
@@ -108,9 +110,9 @@ Actions and what they run:
 - **Attach dialog** shows the block `attach_include` really appends (three lines, or
   more with open Ifs or Stage lines), not only the Include line. The Peace row is
   shown only when config.txt has a Peace include. Remove include deletes that Include
-  line with `write_file_atomically`; no extra backup is written (every new name in
-  Equalizer APO's directory makes it reload), so `attach_include`'s own backup is of
-  the file without it. Attach failing shows Windows' sentence in the dialog.
+  line with `write_file_atomically` once the attach has succeeded; no extra backup is
+  written (every new name in Equalizer APO's directory makes it reload), so
+  `attach_include`'s own backup is of the file with it. Attach failing shows Windows' sentence in the dialog.
 - **Attach needs no elevation.** Equalizer APO's config directory grants Users full
   control (`icacls` on this machine: `BUILTIN\Users:(OI)(CI)(F)`, inherited by
   config.txt), and the compat library only reads, appends to and atomically
@@ -259,3 +261,96 @@ Actions and what they run:
 - `Devicetool.loadScript` and `Devices.loadScript` are test hooks in the QML API.
 - A devicetool reason is technical ("pass --replace-equalizerapo"); the prototype's
   sentence was user-facing. The UI shows devicetool's as the brief asks.
+
+## Fixes after review
+
+Each fix has a test that fails without it: every fix below was broken on purpose
+again (a script applied the mutation, built, ran the guarding test, restored), and
+the test failed, except where said.
+
+1. **Repair and Undo repaired the whole machine.** `isotone-devicetool repair` takes
+   an optional endpoint (`repair [<endpoint>] [--mode m] [--dry-run]`; without one it
+   still repairs every render endpoint), and the UI passes the output: `repair <g>`,
+   `repair <g> --mode <m>`. A failed command whose JSON says `fx_properties_changed`
+   (a repair that undid an interrupted command, then refused) still restarts audio,
+   straight through the runner so Copy details keeps the repair's text, and ends
+   failed. Tests: devicetool `repair <endpoint> --dry-run` on all 35 render endpoints
+   here, compared with the machine-wide dry run's entry, and its argument checks;
+   `each action runs devicetool's remedy`; `a repair that fails after changing the
+   output restarts audio`. Mutations: repair without the endpoint argument, the
+   restart dropped, devicetool refusing the endpoint: all failed. **Survived:**
+   devicetool enumerating every endpoint despite the argument, because no endpoint on
+   this machine has anything to repair (0 of 35), so both forms print `repaired: []`.
+2. **Off on an Equalizer APO output did not stick.** Kept per output in settings.ini
+   (`outputs/off/<guid>`, `equalizerApoOutputOff` in `equalizerapoconfig.h`), written
+   by `Devicetool.apply` on the GUI thread before any plan runs, with
+   `outputChoicesChanged` emitted at once; `Main.qml` refreshes Outputs on it, so the
+   output leaves Outputs and EqSession's writer for it is stopped (`set_target` joins
+   it) before the worker removes the block through the same config directory.
+   Outputs leaves such outputs out; Now shows Off; choosing Equalizer APO attaches
+   (no `uninstall` when IsoAPO is not on the output) and clears the setting. A plan
+   that fails, or an approval declined, puts the setting back. eqsession.* is
+   unchanged. Tests: `Off on an Equalizer APO output is kept before its block goes`,
+   `Off goes back when its apply is declined`, `Outputs lists an Equalizer APO output
+   only while ...` (this machine's 3 Equalizer APO outputs, sandbox config.txt),
+   `tst_settingsoutputs` Off then Equalizer APO. Mutations (setting not written,
+   signal not emitted, Outputs ignoring it, Now ignoring it, decline not restored,
+   uninstall kept for Equalizer APO): all failed.
+3. **Done rows turned into a dash on the next Devices read.** The status column shows
+   the rows `Devicetool.rowStatus` has, the set taken when Apply started. Test: the
+   reviewer's, ported to `tst_settingsoutputs`. The mutation failed it.
+4. **Retry under Test failed re-ran the change.** A failed test makes that test the
+   request Retry runs. Tests: model and `tst_devices`. Mutations failed both.
+5. **`--fake-devicetool` without a sandbox.** `main.cpp` refuses to start when
+   `ISOTONE_FAKE_DEVICETOOL` is set (flag or environment) and no compat directory is
+   (`fakeDevicetoolRefusal`), and `faked` follows the environment. Test:
+   `a fake devicetool refuses ...`; mutations failed it. Checked by running
+   isotone.exe with the variable, and with the flag, without `--compat-dir`: exit 1
+   and the reason, no window. The `main.cpp` lines have no automated test.
+6. **A failed approval was silent.** First run shows the reason on Outputs; Settings
+   Outputs shows it beside Change. Tests in `tst_firstrun` and `tst_settingsoutputs`;
+   mutations failed them.
+7. **Equalizer APO outputs without the include looked working.** New status Not
+   attached (warn) for an Equalizer APO output whose config.txt does not include
+   Isotone.txt for every device (`inspect_config(...).isotone_included`), actions
+   Attach and Test, Attach in the top bar pill; Outputs leaves them out until
+   attached; Keep Equalizer APO opens Attach once its uninstall is done, unless
+   config.txt already includes Isotone.txt. On this machine (config.txt includes only
+   peace.txt) the 3 Equalizer APO outputs now show Not attached and are not in the
+   sidebar. The QML tests write the sandbox config.txt through
+   `TestHooks.setCompatConfig`, so each test says which it has. Tests: model status,
+   `Devices reads config.txt's include ...`, Outputs on this machine, `tst_devices`,
+   `tst_devicespill`. Mutations failed all.
+8. **Closing during an apply kept changing devices.** The worker checks `stopping_`
+   before each plan and before restart-audio and each test. Test: a held install,
+   the controller destroyed, only that install ran. Both mutations failed it.
+9. **Remove include removed Peace before a failed attach.** `attach_config` attaches
+   first and removes the Peace include only after. Test: attach refused
+   (Isotone.txt included for one device only), Peace kept. The mutation failed it.
+10. **An empty ConfigPath.** `attachConfigStep` refuses an empty directory ("The
+    system cannot find the path specified."). Test with the working directory set to
+    a sandbox holding config.txt: untouched. The mutation failed it. The same check in
+    the block removal survived its mutation: `CompatWriter::load` already refuses an
+    empty directory with that error before writing, so that check was removed.
+11. **restart-audio busy offered a Windows restart.** Busy shows as busy; Retry runs
+    only restart-audio and the tests (an apply keeps its rows); Settings Outputs and
+    first run got Retry for it. Tests: model (operation and apply), `tst_devices`,
+    `tst_settingsoutputs`. Both mutations failed.
+
+Also:
+- **Stale Outputs.** Confirmed by reading: the 3 s poll refreshed only Devices.
+  `Devices.outputsChanged` is emitted when a read finds an output's engine, include
+  or Off changed, and `Main.qml` refreshes Outputs on it. Test on the signal; its
+  mutation failed. The `Main.qml` connection has no test.
+- **UTF-8 BOM before a Peace include: not confirmed.** The compat library's
+  `config_lines` and `trim` keep the BOM bytes in the first line's key, so
+  `inspect_config` does not count that line as an include, and the preview does not
+  mark it either: they agree. Nothing changed; a test pins the agreement. Whether
+  Equalizer APO itself strips a BOM was not checked (its source is not on this
+  machine).
+
+Not verified: a real repair with an endpoint (elevated), the `Main.qml` wiring of
+`outputChoicesChanged` and `outputsChanged` in the running app with real outputs, and
+a restart-audio that fails after a failed repair (only `restarted` records it). In
+the fake outputs' Devices screenshot the Preset column is cut by the detail card at
+1440 px; not compared with the build before these fixes.

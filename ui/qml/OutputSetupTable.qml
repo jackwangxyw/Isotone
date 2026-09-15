@@ -107,6 +107,7 @@ Item {
                         color: Theme.muted
                     }
                     Text {
+                        objectName: "setupNow"
                         visible: !root.firstRun
                         width: 190
                         height: parent.height
@@ -151,7 +152,8 @@ Item {
                             spacing: 8
                             readonly property string step: {
                                 if (!parent.applying) return row.d.status === "installed" || row.d.status === "active" || row.d.status === "not_installed" ? "" : "device"
-                                if (!row.isChanged) return "unchanged"
+                                // The outputs Apply ran on, as they were at Apply: Devices reads them again meanwhile.
+                                if (row.rowStatus === "") return "unchanged"
                                 return row.rowStatus
                             }
                             Spinner { visible: ["installing", "removing", "attaching"].indexOf(parent.step) >= 0; anchors.verticalCenter: parent.verticalCenter }

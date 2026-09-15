@@ -34,6 +34,13 @@ Window {
     Connections {
         target: Devicetool
         function onFinished() { Devices.refresh(); Outputs.refresh() }
+        // At once, before Settings Outputs removes a block: an output turned Off leaves Outputs and the session.
+        function onOutputChoicesChanged() { Outputs.refresh(); Devices.refresh() }
+    }
+    // The 3 s engine poll, config.txt's include and Off: what Outputs lists.
+    Connections {
+        target: Devices
+        function onOutputsChanged() { Outputs.refresh() }
     }
     // First run over the whole window (--first-run forces it).
     function showFirstRun() { firstRun.active = true }

@@ -10,7 +10,8 @@
 //   --data-dir <dir>          settings and presets there instead of %APPDATA%\Isotone
 //   --compat-dir <dir>        Equalizer APO outputs write Isotone.txt there, not in its install
 //   --fake-devicetool <file>  devicetool's answers and the Devices outputs from a script
-//                             (devicetoolrunner.h, devicesmodel.h); nothing is installed or restarted
+//                             (devicetoolrunner.h, devicesmodel.h); nothing is installed or restarted;
+//                             needs --compat-dir (also as ISOTONE_FAKE_DEVICETOOL and ISOTONE_COMPAT_DIR)
 //   --first-run               show first run
 //   --view <view>[/<tab>]     open a view, and a Settings tab (settings/outputs)
 //   --tray                    start hidden in the tray (launch at sign-in with Start in the tray)
@@ -41,6 +42,7 @@
 #include "apppaths.h"
 #include "devicesmodel.h"
 #include "devicetoolcontroller.h"
+#include "equalizerapoconfig.h"
 #include "eqsession.h"
 #include "outputs.h"
 // Settings
@@ -97,8 +99,13 @@ int main(int argc, char* argv[]) {
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
     if (parser.isSet(compat_dir)) AppPaths::setCompatConfigDir(parser.value(compat_dir));
-    const bool faked = parser.isSet(fake_devicetool);
-    if (faked) qputenv("ISOTONE_FAKE_DEVICETOOL", parser.value(fake_devicetool).toLocal8Bit());
+    if (parser.isSet(fake_devicetool)) qputenv("ISOTONE_FAKE_DEVICETOOL", parser.value(fake_devicetool).toLocal8Bit());
+    // The flag or the environment: the controller and Devices read the environment.
+    const bool faked = fakeDevicetool();
+    if (const QString refusal = fakeDevicetoolRefusal(); !refusal.isEmpty()) {
+        std::fprintf(stderr, "%s\n", qPrintable(refusal));
+        return 1;
+    }
 
     // Settings: one instance; the tray keeps the app running with the window closed.
     const bool checking = parser.isSet(screenshot);

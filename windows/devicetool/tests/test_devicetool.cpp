@@ -497,6 +497,75 @@ TEST_CASE("enable-enhancements and restart-audio refuse bad arguments") {
     }
 }
 
+std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// The UI repairs the output the user picked: a refusal or a --mode for another
+// endpoint must not decide that output's result.
+TEST_CASE("repair <endpoint> --dry-run plans that endpoint alone, as the machine-wide repair plans it") {
+    const Direct all_run = run_direct({L"repair", L"--dry-run"});
+    const Json all = parsed(all_run.out);
+    REQUIRE(all["command"].s == "repair");
+    CHECK(all["dry_run"].b);
+    size_t checked = 0, planned = 0;
+    for (const std::string& endpoint : render_endpoints()) {
+        INFO(endpoint);
+        const Json* expected = nullptr;
+        for (const Json& d : all["repaired"].items)
+            if (lower(d["guid"].s) == lower(endpoint)) expected = &d;
+        const Direct one = run_direct({L"repair", widen(endpoint), L"--dry-run"});
+        const Json j = parsed(one.out);
+        CHECK(j["command"].s == "repair");
+        CHECK(j["dry_run"].b);
+        const bool ok = !expected || (*expected)["ok"].b;
+        CHECK(one.exit == (ok ? 0u : 1u));
+        CHECK(j["ok"].b == ok);
+        REQUIRE(j["repaired"].items.size() == (expected ? 1u : 0u));
+        if (expected) {
+            const Json& d = j["repaired"].items[0];
+            CHECK(lower(d["guid"].s) == lower(endpoint));
+            CHECK(d["ok"].b == (*expected)["ok"].b);
+            CHECK(d["mode"].s == (*expected)["mode"].s);
+            CHECK(d["error"].s == (*expected)["error"].s);
+            CHECK(d["undid_interrupted"].s == (*expected)["undid_interrupted"].s);
+            ++planned;
+        }
+        ++checked;
+    }
+    MESSAGE(checked << " render endpoints, " << planned << " with something to repair");
+    CHECK(checked > 0);
+}
+
+TEST_CASE("repair's endpoint argument is checked as every command's is") {
+    const std::wstring cable = L"{798436d2-8c71-4834-9248-00ccbaaca00a}";
+    struct Case {
+        std::vector<std::wstring> args;
+        DWORD exit;
+    };
+    const std::vector<Case> cases = {
+        {{L"repair", L"not-a-guid", L"--dry-run"}, 2},
+        {{L"repair", cable, cable, L"--dry-run"}, 2},
+        {{L"repair", L"{00000000-0000-0000-0000-000000000001}", L"--dry-run"}, 1},
+        {{L"repair", L"{0.0.1.00000000}.{00000000-0000-0000-0000-000000000001}", L"--dry-run"}, 1},
+    };
+    for (const Case& c : cases) {
+        std::string joined;
+        for (const std::wstring& a : c.args) joined += narrow(a) + " ";
+        INFO(joined);
+        const Direct d = run_direct(c.args);
+        CHECK(d.exit == c.exit);
+        const Json j = parsed(d.out);
+        CHECK_FALSE(j["ok"].b);
+        CHECK(j["command"].s == "repair");
+    }
+    // --mode is taken with an endpoint too.
+    const Direct with_mode = run_direct({L"repair", cable, L"--mode", L"mfx", L"--dry-run"});
+    CHECK(with_mode.exit != 2);
+    CHECK(parsed(with_mode.out)["mode"].s == "SFX_MFX");
+}
+
 TEST_CASE("enable-enhancements --dry-run and the status remedy on every endpoint") {
     const Direct list = run_direct({L"list"});
     const Json endpoints = parsed(list.out)["endpoints"];
