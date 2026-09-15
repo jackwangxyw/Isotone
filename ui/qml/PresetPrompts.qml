@@ -5,6 +5,15 @@ import Isotone
 // band is deleted, and the unsaved dialog when a preset is loaded over unsaved
 // changes (from the popover, a shortcut or the tray). One in Main.
 Item {
+    id: root
+    // The window to show before asking (a pick from the tray or a global hotkey
+    // comes while it is hidden); a test gives a stand-in.
+    property var host: Window.window
+    // The one unsaved dialog, and the preset to load after it: a later pick
+    // while it is open changes the preset and asks no more.
+    property var unsaved: null
+    property string loading: ""
+
     Connections {
         target: EqSession
         function onBandDeleted(position, step) {
@@ -15,7 +24,14 @@ Item {
     Connections {
         target: Presets
         function onUnsavedChanges(name) {
-            PresetActions.confirmUnsaved(false, () => Presets.load(name))
+            root.loading = name
+            UiState.showWindow(root.host)
+            if (root.unsaved) return
+            const d = PresetActions.confirmUnsaved(false, () => Presets.load(root.loading))
+            if (d) {
+                root.unsaved = d
+                d.closed.connect(() => { root.unsaved = null })
+            }
         }
     }
 }

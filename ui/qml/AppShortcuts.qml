@@ -7,6 +7,9 @@ import Isotone
 // page waits for keys. Delete is Main's Shortcut, for the Equalizer view.
 Item {
     id: root
+    // False turns the window Shortcuts off (a dialog or popover has the keys);
+    // activate() still performs.
+    property bool keysActive: true
 
     function perform(id) {
         switch (id) {
@@ -14,7 +17,7 @@ Item {
         case "mute": EqSession.muted = !EqSession.muted; break
         case "nextPreset": Presets.next(); break
         case "previousPreset": Presets.previous(); break
-        case "savePreset": Presets.save(); break
+        case "savePreset": PresetActions.save(); break   // Save as while untitled
         case "undo": EqSession.undo(); break
         case "redo": EqSession.redo(); break
         }
@@ -28,7 +31,7 @@ Item {
     component ActionShortcut: Shortcut {
         required property string action
         sequence: ShortcutRegistry.revision >= 0 ? ShortcutRegistry.sequence(action) : ""
-        enabled: !ShortcutRegistry.capturing && sequence !== ""
+        enabled: root.keysActive && !ShortcutRegistry.capturing && sequence !== ""
         onActivated: ShortcutRegistry.activate(action)
     }
     ActionShortcut { action: "eq" }

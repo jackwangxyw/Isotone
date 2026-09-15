@@ -170,6 +170,9 @@ qt_add_qml_module(isotone_ui
         qml/SettingBox.qml
         qml/SettingsRow.qml
         qml/SettingsSection.qml
+        qml/WindowKeys.qml
+        qml/PressWatch.qml
+        qml/WindowClose.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
