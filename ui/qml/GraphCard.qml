@@ -110,6 +110,7 @@ Rectangle {
                 required property int position
                 required property int colorIndex
                 required property bool selected
+                required property bool bandEnabled
                 readonly property color colour: Theme.bandColour(colorIndex)
                 readonly property real radius: selected ? 14 : 12
                 // Re-evaluated when the curve or the size changes, as the readout's.
@@ -122,7 +123,7 @@ Rectangle {
                 width: 40
                 height: 40
                 z: selected ? 2 : 1
-                opacity: EqSession.eqOn && !EqSession.muted && onView ? 1 : 0.4
+                opacity: EqSession.eqOn && !EqSession.muted && onView && bandEnabled ? 1 : 0.4
 
                 Rectangle {
                     visible: handle.selected

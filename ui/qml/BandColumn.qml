@@ -26,6 +26,8 @@ Rectangle {
     height: column.implicitHeight + 26
     radius: 12
     color: selected ? Theme.selectedColumn : "transparent"
+    // A disabled band's column is faded, as the prototype's .col.off.
+    opacity: bandEnabled ? 1 : 0.5
 
     MouseArea { anchors.fill: parent; onPressed: EqSession.select(root.index) }
 
