@@ -2127,6 +2127,36 @@ Input.
 
 ---
 
+## 2026-09-15: The rest of stage 4, in four work packages
+
+The owner asked for all of stage 4 except EQ by ear. The lead built a shared
+foundation (9a7fc6e), then four agents built the packages in parallel worktrees
+from the same brief, and the lead merged and tested them.
+
+**Foundation.**
+- `AppSettings` (settings.ini) and `AppPaths`: the data directory
+  (`%APPDATA%\Isotone`) and the Equalizer APO directory can be moved with
+  `--data-dir`/`--compat-dir` or `ISOTONE_DATA_DIR`/`ISOTONE_COMPAT_DIR`, so checks
+  and tests never touch the owner's settings, presets or Equalizer APO install;
+  the test runners set a scratch data directory.
+- Themes from the prototype's app.css tokens: System (Windows' app mode), Dark,
+  Light, Custom (Dark with five colours overridden); six accents per theme; band
+  colours per band or accent.
+- The shell: sidebar open (248 px) or the 72 px rail with an outputs popover and
+  the output name under the preset name; the Channels panel collapses to its
+  52 px strip; views switch through `UiState.view`; the graph takes the height
+  the band strip leaves (422 px at 900, 282 at the 760 minimum).
+- Shared controls from app.css (`Button`, `TextBox`, `DialogFrame`, `Popover`,
+  `Spinner`, `StatusDot`), `UiState` for dialogs and toasts, and a `Presets` stub
+  so the packages could call each other's API before it existed.
+- The app is a `QApplication` (the tray icon is Qt Widgets).
+- EQ by ear is hidden from the navigation until stage 5.
+- L+R with channels that differ is now drawn as the approved prototype draws it,
+  the right channel dashed and the ends marked L and R, replacing the fainter
+  line chosen the day before.
+
+---
+
 # Where things stand (end of 2026-09-13)
 
 ## Done
