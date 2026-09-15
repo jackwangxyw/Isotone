@@ -87,8 +87,8 @@ Item {
                 // Column widths as the prototype's HTML table lays them out: each
                 // column's widest content (max) and widest word (min); room to
                 // spare is shared in proportion to max, and with too little every
-                // column gives up the same share of max - min, so Engine and Status
-                // wrap. Names do not wrap.
+                // column gives up the same share of max - min. Engine, Status and Format
+                // keep one line; a long output name is cut short instead.
                 function longestWord(text) {
                     return Math.max(...text.split(" ").map((w) => root.textWidth(w, 14)))
                 }
@@ -101,11 +101,11 @@ Item {
                         const name = root.textWidth(d.name, 14, Font.Medium) + (d.isDefault ? 10 + root.textWidth("Default", 11, Font.Medium) + 18 : 0)
                         const preset = Presets.assignedName(d.guid) || root.dash
                         max[0] = Math.max(max[0], name)
-                        min[0] = Math.max(min[0], name)
+                        min[0] = Math.max(min[0], Math.min(name, 220))
                         max[1] = Math.max(max[1], root.textWidth(d.engine, 14))
-                        min[1] = Math.max(min[1], longestWord(d.engine))
+                        min[1] = max[1]
                         max[2] = Math.max(max[2], 14 + root.textWidth(d.statusLabel, 14))
-                        min[2] = Math.max(min[2], 14 + longestWord(d.statusLabel))
+                        min[2] = max[2]
                         max[3] = Math.max(max[3], root.textWidth(d.format, 14))
                         min[3] = max[3]
                         max[4] = Math.max(max[4], root.textWidth(preset, 14))
