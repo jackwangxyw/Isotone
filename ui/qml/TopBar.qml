@@ -79,6 +79,51 @@ Item {
         }
     }
 
+    // Devices work package: the output's status when its engine does not work,
+    // with Install or Repair, which open Devices on it. The current output, or
+    // with none working, the default output.
+    Row {
+        id: engineStatus
+        objectName: "engineStatus"
+        readonly property string guid: Outputs.currentGuid !== "" ? Outputs.currentGuid : Outputs.count === 0 ? Devices.defaultGuid : ""
+        readonly property var device: Devices.revision >= 0 && guid !== "" ? Devices.row(guid) : ({})
+        visible: device.status !== undefined && !device.working && device.status !== "unplugged"
+        x: 32 + Math.max(nameRow.implicitWidth, AppSettings.sidebarOpen ? 0 : outputRow.implicitWidth) + 10
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: 12
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: pillRow.implicitWidth + 18
+            height: 22
+            radius: 6
+            color: Theme.segmentedSelected
+            Row {
+                id: pillRow
+                anchors.centerIn: parent
+                spacing: 6
+                StatusDot { status: engineStatus.device.dot || ""; anchors.verticalCenter: parent.verticalCenter }
+                Text {
+                    text: engineStatus.device.statusLabel || ""
+                    font.family: Theme.font
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                    color: Theme.text
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+        }
+        Button {
+            objectName: "engineStatusAction"
+            anchors.verticalCenter: parent.verticalCenter
+            kind: "primary"
+            text: engineStatus.device.status === "not_installed" ? "Install" : "Repair"
+            onClicked: {
+                UiState.devicesSelection = engineStatus.guid
+                UiState.view = "devices"
+            }
+        }
+    }
+
     Row {
         anchors.right: parent.right
         anchors.rightMargin: 32

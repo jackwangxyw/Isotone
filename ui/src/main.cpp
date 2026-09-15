@@ -9,6 +9,9 @@
 //   --click <x>,<y>[,right]   click there once the window has drawn (repeatable, in order)
 //   --data-dir <dir>          settings and presets there instead of %APPDATA%\Isotone
 //   --compat-dir <dir>        Equalizer APO outputs write Isotone.txt there, not in its install
+//   --fake-devicetool <file>  devicetool's answers and the Devices outputs from a script
+//                             (devicetoolrunner.h, devicesmodel.h); nothing is installed or restarted
+//   --first-run               show first run
 
 #include <QCommandLineParser>
 #include <QFont>
@@ -20,7 +23,14 @@
 #include <QQuickWindow>
 #include <QTimer>
 
+#include <QProcess>
+
+#include <windows.h>
+#include <shellapi.h>
+
 #include "apppaths.h"
+#include "devicesmodel.h"
+#include "devicetoolcontroller.h"
 #include "eqsession.h"
 #include "outputs.h"
 
@@ -53,10 +63,17 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption compat_dir(QStringLiteral("compat-dir"), QStringLiteral("Write Equalizer APO outputs to <dir>."), QStringLiteral("dir"));
     parser.addOption(data_dir);
     parser.addOption(compat_dir);
+    const QCommandLineOption fake_devicetool(QStringLiteral("fake-devicetool"), QStringLiteral("Answer devicetool from <script>."),
+                                             QStringLiteral("script"));
+    const QCommandLineOption first_run(QStringLiteral("first-run"), QStringLiteral("Show first run."));
+    parser.addOption(fake_devicetool);
+    parser.addOption(first_run);
     parser.process(app);
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
     if (parser.isSet(compat_dir)) AppPaths::setCompatConfigDir(parser.value(compat_dir));
+    const bool faked = parser.isSet(fake_devicetool);
+    if (faked) qputenv("ISOTONE_FAKE_DEVICETOOL", parser.value(fake_devicetool).toLocal8Bit());
 
     for (const char* face : {"Regular", "Medium", "SemiBold"}) {
         const QString path = QStringLiteral(":/qt/qml/Isotone/fonts/InstrumentSans-%1.ttf").arg(QLatin1String(face));
@@ -75,6 +92,32 @@ int main(int argc, char* argv[]) {
                      Qt::QueuedConnection);
     engine.loadFromModule("Isotone", "Main");
     if (engine.rootObjects().isEmpty()) return 1;
+
+    // Restart Windows and Equalizer APO's uninstaller, only from their buttons in
+    // the app itself; with a scripted devicetool they only say so.
+    if (auto* devicetool = engine.singletonInstance<DevicetoolController*>("Isotone", "Devicetool")) {
+        QObject::connect(devicetool, &DevicetoolController::restartWindowsRequested, &app, [faked] {
+            if (faked) {
+                std::fprintf(stdout, "restart Windows requested (not with --fake-devicetool)\n");
+                return;
+            }
+            QProcess::startDetached(QStringLiteral("shutdown.exe"), {QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0")});
+        });
+    }
+    if (auto* devices = engine.singletonInstance<DevicesModel*>("Isotone", "Devices")) {
+        QObject::connect(devices, &DevicesModel::equalizerApoUninstallerRequested, &app, [faked](const QString& command) {
+            QStringList parts = QProcess::splitCommand(command);
+            if (faked || parts.isEmpty()) {
+                std::fprintf(stdout, "Equalizer APO's uninstaller requested: %s\n", qPrintable(command));
+                return;
+            }
+            const QString program = parts.takeFirst();
+            // ShellExecute, so the uninstaller's own request for elevation is honoured.
+            ShellExecuteW(nullptr, L"open", program.toStdWString().c_str(), parts.join(QLatin1Char(' ')).toStdWString().c_str(),
+                          nullptr, SW_SHOWNORMAL);
+        });
+    }
+    if (parser.isSet(first_run)) QMetaObject::invokeMethod(engine.rootObjects().constFirst(), "showFirstRun");
 
     if (parser.isSet(output)) {
         auto* outputs = engine.singletonInstance<Outputs*>("Isotone", "Outputs");

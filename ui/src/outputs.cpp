@@ -126,6 +126,11 @@ QString Outputs::currentActivity() const {
     return o ? o->activity : QString();
 }
 
+QString Outputs::currentGuid() const {
+    const Output* o = current();
+    return o ? QString::fromStdWString(o->guid) : QString();
+}
+
 QString Outputs::currentName() const {
     const Output* o = current();
     return o ? o->name : QString();

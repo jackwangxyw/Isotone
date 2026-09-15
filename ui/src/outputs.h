@@ -32,6 +32,8 @@ class Outputs : public QAbstractListModel {
     Q_PROPERTY(QString currentName READ currentName NOTIFY currentChanged)
     // "running", "idle", "stalled" or "unknown"; the collapsed rail's dot.
     Q_PROPERTY(QString currentActivity READ currentActivity NOTIFY currentActivityChanged)
+    // The current output's braced GUID, empty when no output works (Devices work package: the top bar's status pill).
+    Q_PROPERTY(QString currentGuid READ currentGuid NOTIFY currentChanged)
 
 public:
     enum Role { NameRole = Qt::UserRole + 1, BackendLabelRole, ActivityRole, CurrentRole };
@@ -55,6 +57,7 @@ public:
     int currentRow() const;
     QString currentName() const;
     QString currentActivity() const;
+    QString currentGuid() const;
     const Output* current() const;
 
     Q_INVOKABLE void select(int row);

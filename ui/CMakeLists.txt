@@ -3,7 +3,7 @@
 #
 # The QML module is a static library, so the app and the QML tests load the same
 # module.
-find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Qml Quick QuickTest Widgets)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Qml Quick QuickTest Test Widgets)
 qt_standard_project_setup(REQUIRES 6.11)
 
 # Without Qt: spectrum analysis, the state an output gets, and where edits go.
@@ -16,6 +16,9 @@ add_library(isotone_ui_backend STATIC
     backend/spectrum.h
     backend/typed_value.cpp
     backend/typed_value.h
+    # Devices work package.
+    backend/config_attach.cpp
+    backend/config_attach.h
 )
 target_include_directories(isotone_ui_backend PUBLIC backend)
 # windows.h without the min and max macros, which break std::min and std::max.
@@ -37,6 +40,17 @@ qt_add_library(isotone_ui STATIC
     src/presets.h
     src/responsegraph.cpp
     src/responsegraph.h
+    # Devices work package.
+    src/devicesmodel.cpp
+    src/devicesmodel.h
+    src/devicestatus.cpp
+    src/devicestatus.h
+    src/devicetoolcontroller.cpp
+    src/devicetoolcontroller.h
+    src/devicetoolrunner.cpp
+    src/devicetoolrunner.h
+    src/equalizerapoconfig.cpp
+    src/equalizerapoconfig.h
 )
 
 # Before qt_add_qml_module, which reads it.
@@ -77,6 +91,14 @@ qt_add_qml_module(isotone_ui
         qml/SettingsShortcuts.qml
         qml/SettingsAbout.qml
         qml/PresetsMenu.qml
+        # Devices work package.
+        qml/DeviceDetail.qml
+        qml/OperationBox.qml
+        qml/UninstallDialog.qml
+        qml/ReplaceDialog.qml
+        qml/AttachDialog.qml
+        qml/OutputSetupTable.qml
+        qml/FirstRun.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -89,19 +111,26 @@ target_include_directories(isotone_ui PUBLIC src)
 # generation, which /external:W0 does not cover.
 target_compile_options(isotone_ui PUBLIC /wd4702)
 target_link_libraries(isotone_ui PUBLIC Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Widgets isotone_ui_backend)
+# Devices: the elevated devicetool session, and the devicetool this build makes,
+# found when isotone.exe has none beside it.
+target_link_libraries(isotone_ui PUBLIC isotone_devicetool_session)
+target_compile_definitions(isotone_ui PRIVATE ISOTONE_DEVICETOOL_BUILD_PATH="$<TARGET_FILE:isotone-devicetool>")
+add_dependencies(isotone_ui isotone-devicetool)
 
 qt_add_executable(isotone WIN32 src/main.cpp)
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
 if(ISOTONE_BUILD_TESTS)
-    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp)
+    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
+                            tests/test_config_attach.cpp)
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
     add_test(NAME ui_tests COMMAND ui_tests)
 
-    add_executable(ui_model_tests tests/test_model.cpp)
-    target_link_libraries(ui_model_tests PRIVATE isotone_ui)
+    add_executable(ui_model_tests tests/test_model.cpp tests/test_devices.cpp)
+    target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
+    target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_model_tests PRIVATE /wd5285)   # doctest, as in core/tests
 
@@ -109,4 +138,6 @@ if(ISOTONE_BUILD_TESTS)
     qt_add_executable(ui_qml_tests tests/qml_main.cpp)
     target_link_libraries(ui_qml_tests PRIVATE isotone_ui isotone_uiplugin Qt6::QuickTest)
     target_compile_definitions(ui_qml_tests PRIVATE QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/qml")
+    # Devices work package: the outputs and devicetool the QML tests see.
+    target_compile_definitions(ui_qml_tests PRIVATE ISOTONE_FAKE_DEVICETOOL_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices/fake-devicetool.json")
 endif()
