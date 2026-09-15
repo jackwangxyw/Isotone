@@ -441,7 +441,8 @@ TEST_CASE("the Showing picker chooses the channel the graph draws") {
     REQUIRE(items.size() == 1 + 3 + 8);
     CHECK(items[0].toMap()[QStringLiteral("label")].toString() == QStringLiteral("All speakers"));
     CHECK(items[0].toMap()[QStringLiteral("detail")].toString() == QStringLiteral("8"));
-    CHECK(items[1].toMap()[QStringLiteral("detail")].toString() == QStringLiteral("L R C"));
+    CHECK(items[1].toMap()[QStringLiteral("detail")].toString() == QStringLiteral("L C R"));
+    CHECK(items[2].toMap()[QStringLiteral("detail")].toString() == QStringLiteral("SL SR RL RR"));
     CHECK(items[4].toMap()[QStringLiteral("separator")].toBool());
     CHECK(items[7].toMap()[QStringLiteral("label")].toString() == QStringLiteral("Subwoofer"));
 

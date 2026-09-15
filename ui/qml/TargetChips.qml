@@ -23,18 +23,18 @@ Item {
 
     // Right-aligned lines of chips that fit `width`.
     FontMetrics { id: metrics; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold }
-    function chipWidth(label) { return Math.max(30, Math.ceil(metrics.advanceWidth(label)) + 14) }
+    function chipWidth(label) { return Math.max(28, Math.ceil(metrics.advanceWidth(label)) + 14) }
     function lines(items, width) {
         const out = []
         let line = [], used = 0
         for (const item of items) {
             const w = chipWidth(item.label)
-            if (line.length > 0 && used + 4 + w > width) {
+            if (line.length > 0 && used + 3 + w > width) {
                 out.push(line)
                 line = []
                 used = 0
             }
-            used += (line.length > 0 ? 4 : 0) + w
+            used += (line.length > 0 ? 3 : 0) + w
             line.push(item)
         }
         if (line.length > 0) out.push(line)
@@ -42,6 +42,7 @@ Item {
     }
 
     Text {
+        id: label
         x: 8
         y: 8 + 4
         text: "Target"
@@ -57,7 +58,7 @@ Item {
         y: 8
         width: available
         spacing: 6
-        readonly property real available: root.width - 16 - 60
+        readonly property real available: root.width - 8 - (label.x + label.implicitWidth + 10)
 
         Repeater {
             model: root.lines(Speakers.groups.map(g => ({label: g.name, mask: g.mask, group: true})), chips.available)
@@ -65,7 +66,7 @@ Item {
             delegate: Row {
                 required property var modelData
                 anchors.right: parent.right
-                spacing: 4
+                spacing: 3
                 Repeater {
                     model: parent.modelData
                     delegate: Rectangle {

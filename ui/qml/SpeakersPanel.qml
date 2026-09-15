@@ -80,7 +80,7 @@ Item {
         x: 22
         y: 4
         width: parent.width - 22 - 32
-        spacing: 18
+        spacing: 8
 
         Item {
             width: parent.width

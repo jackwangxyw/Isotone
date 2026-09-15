@@ -193,9 +193,18 @@ QVariantList Speakers::groups() const {
     QVariantList out;
     if (channels_ <= 2) return out;
     for (const isotone::ui::ResolvedGroup& g : isotone::ui::layout_groups(channels_, mask_, user_groups_)) {
-        QString codes;
+        // Built-in groups list their speakers in the prototype's order, the user's in channel order.
+        std::vector<std::string> order;
+        if (g.builtin && g.name == "Front") order = {"L", "C", "R"};
+        if (g.builtin && g.name == "Surround") order = {"SL", "SR", "RL", "RR"};
         for (const isotone::ui::Speaker& s : speakers_)
-            if ((g.mask & bit(s.channel)) != 0) codes += (codes.isEmpty() ? QString() : QStringLiteral(" ")) + QString::fromStdString(s.code);
+            if (std::find(order.begin(), order.end(), s.code) == order.end()) order.push_back(s.code);
+        QString codes;
+        for (const std::string& code : order) {
+            const auto it = std::find_if(speakers_.begin(), speakers_.end(), [&](const isotone::ui::Speaker& s) { return s.code == code; });
+            if (it != speakers_.end() && (g.mask & bit(it->channel)) != 0)
+                codes += (codes.isEmpty() ? QString() : QStringLiteral(" ")) + QString::fromStdString(code);
+        }
         if (g.builtin && g.name == "All") codes = QStringLiteral("%1 speakers").arg(speakers_.size());
         out.append(QVariantMap{{QStringLiteral("name"), QString::fromStdString(g.name)},
                                {QStringLiteral("mask"), static_cast<int>(g.mask)},

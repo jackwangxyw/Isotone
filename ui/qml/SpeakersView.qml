@@ -195,7 +195,7 @@ Item {
                 Row {
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 2
+                    anchors.bottomMargin: -4
                     spacing: 12
                     SmallSegmented {
                         id: layoutPicker
@@ -358,7 +358,7 @@ Item {
                         }
                         Text {
                             visible: !Speakers.distanceMode
-                            x: table.distanceRight * table.scale - width - 8
+                            x: table.distanceRight * table.scale - width
                             anchors.verticalCenter: parent.verticalCenter
                             text: speakerRow.distance.toFixed(2) + " m"
                             font.family: Theme.font
@@ -376,7 +376,7 @@ Item {
                         }
                         Text {
                             visible: Speakers.distanceMode
-                            x: table.delayRight * table.scale - width - 8
+                            x: table.delayRight * table.scale - width
                             anchors.verticalCenter: parent.verticalCenter
                             text: speakerRow.delay.toFixed(2) + " ms"
                             font.family: Theme.font
@@ -455,7 +455,7 @@ Item {
                                 width: 26
                                 height: 22
                                 radius: 5
-                                color: lit ? Theme.danger : Theme.surface
+                                color: lit ? Theme.danger : Theme.track
                                 Text {
                                     anchors.centerIn: parent
                                     text: "M"
@@ -475,7 +475,7 @@ Item {
                                 width: 26
                                 height: 22
                                 radius: 5
-                                color: speakerRow.soloed ? Theme.warning : Theme.surface
+                                color: speakerRow.soloed ? Theme.warning : Theme.track
                                 Text {
                                     anchors.centerIn: parent
                                     text: "S"
