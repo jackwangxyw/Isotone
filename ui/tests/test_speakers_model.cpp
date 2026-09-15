@@ -16,8 +16,11 @@
 #include <cmath>
 #include <filesystem>
 
+#include "apppaths.h"
 #include "eqsession.h"
+#include "isotone/apo_config.h"
 #include "isotone/param_block.h"
+#include "isotone_file.h"
 #include "persisted_state.h"
 #include "responsegraph.h"
 #include "speakers.h"
@@ -126,6 +129,72 @@ TEST_CASE("a layout change moves the speaker values by speaker role") {
     CHECK(speakers.data(speakers.index(5), Speakers::DelayRole).toDouble() == 1.5);
     CHECK(session.data(session.index(1), EqSession::TargetRole).toString() == QStringLiteral("Side right"));
     QFile::remove(temp_path("remap.json"));
+}
+
+TEST_CASE("a state written for another layout loads moved to the output's") {
+    EqSession session;
+    session.useTarget(surround());
+    EqState s;
+    s.layout_channels = 6;
+    s.layout_speaker_mask = k51;
+    s.bands = {peak(1, 0x30, 100, 3)};   // SL SR on 5.1
+    s.channel_gain_db[4] = -3;           // SL
+    session.loadState(&s);
+    CHECK(session.state().bands[0].channels == 0xC0);
+    CHECK(session.state().channel_gain_db[6] == -3);
+    CHECK(session.state().channel_gain_db[4] == 0);
+    CHECK(session.state().layout_channels == 8);
+}
+
+TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state comes back") {
+    // What DeviceLink writes, read back from a sandbox Isotone.txt.
+    const QString dir = temp_path("compat");
+    QDir(dir).removeRecursively();
+    QDir().mkpath(dir);
+    AppPaths::setCompatConfigDir(dir);
+    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000c0a7e}";
+    const auto written = [&](const std::function<bool(const EqState&)>& want) {
+        for (int i = 0; i < 100; ++i) {
+            // Shared for delete too: the writer replaces the file while it is read.
+            const HANDLE file = CreateFileW(QDir(dir).filePath(QStringLiteral("Isotone.txt")).toStdWString().c_str(), GENERIC_READ,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                std::string text(64 * 1024, '\0');
+                DWORD read = 0;
+                ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+                CloseHandle(file);
+                text.resize(read);
+                for (const compat::ParsedDevice& d :
+                     compat::parse_isotone_file(text, [](const std::string&) { return ChannelLayout{8, k71}; })) {
+                    if (d.endpoint_guid.find("8f4d2a10-0000-4000-8000-0000000c0a7e") != std::string::npos && want(d.state)) return true;
+                }
+            }
+            Sleep(30);
+        }
+        return false;
+    };
+    {
+        EqSession session;
+        AppPaths::setCompatConfigDir(QString());
+        Speakers speakers(&session);
+        speakers.setStore(SpeakerStore(temp_path("compat.json")));
+        session.useTarget(surround(8, k71, Backend::equalizer_apo, guid));
+        session.addBand(1000, -6);   // committed
+        speakers.setUpmix(1);
+        CHECK(written([](const EqState& s) { return !s.bypass && s.speakers.upmix == Upmix::All && s.speakers.muted == 0; }));
+
+        speakers.toggleSolo(0);
+        CHECK(written([](const EqState& s) { return s.speakers.muted == 0xFE; }));
+        speakers.setTestTones(true);
+        CHECK(written([](const EqState& s) { return s.bypass && s.speakers.upmix == Upmix::Off && s.speakers.muted == 0xFE; }));
+        speakers.setTestTones(false);
+        speakers.toggleSolo(0);
+        CHECK(written([](const EqState& s) {
+            return !s.bypass && s.speakers.upmix == Upmix::All && s.speakers.muted == 0 && s.bands.size() == 1;
+        }));
+    }
+    QDir(dir).removeRecursively();
+    QFile::remove(temp_path("compat.json"));
 }
 
 TEST_CASE("solo and test tones reach the output and are never saved") {
