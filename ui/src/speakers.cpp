@@ -145,13 +145,21 @@ void Speakers::rowsChanged() {
 
 int Speakers::channels() const { return static_cast<int>(channels_); }
 
-QString Speakers::layoutName() const {
+QString speaker_layout_name(uint32_t channels, uint32_t speaker_mask) {
     for (const isotone::devices::SpeakerLayoutSpec& spec : isotone::devices::kSpeakerLayouts) {
-        const uint32_t mask = mask_ != 0 ? mask_ : spec.mask;
-        if (spec.channels == channels_ && spec.mask == mask) return QLatin1String(kLayoutNames[static_cast<int>(spec.layout)]);
+        const uint32_t mask = speaker_mask != 0 ? speaker_mask : spec.mask;
+        if (spec.channels == channels && spec.mask == mask) return QLatin1String(kLayoutNames[static_cast<int>(spec.layout)]);
     }
-    return QStringLiteral("%1 ch").arg(channels_);
+    // Another arrangement of the same speakers with an LFE (5.1 with back rather
+    // than side speakers, 0x3F; 7.1 wide, 0xFF) is still named by its count.
+    for (const isotone::devices::SpeakerLayoutSpec& spec : isotone::devices::kSpeakerLayouts) {
+        if (spec.channels == channels && channels > 2 && (speaker_mask & 0x8) != 0)
+            return QLatin1String(kLayoutNames[static_cast<int>(spec.layout)]);
+    }
+    return QStringLiteral("%1 ch").arg(channels);
 }
+
+QString Speakers::layoutName() const { return speaker_layout_name(channels_, mask_); }
 
 int Speakers::layoutChannels(const QString& name) const {
     isotone::devices::SpeakerLayout layout;

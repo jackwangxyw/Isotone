@@ -142,7 +142,8 @@ TEST_CASE("shortcut defaults") {
     for (const char* id : {"eq", "mute", "nextPreset", "previousPreset"}) {
         CAPTURE(id);
         CHECK(r.globalCapable(QString::fromLatin1(id)));
-        CHECK(r.isGlobal(QString::fromLatin1(id)));
+        // Off until turned on: a global Ctrl+Left takes word navigation from every other app.
+        CHECK_FALSE(r.isGlobal(QString::fromLatin1(id)));
     }
     for (const char* id : {"savePreset", "undo", "redo", "delete", "gain"}) {
         CAPTURE(id);
@@ -216,6 +217,8 @@ TEST_CASE("bindings and Global persist") {
         ShortcutRegistry r(s.settings.get());
         r.rebind(QStringLiteral("eq"), QStringLiteral("Ctrl+Shift+E"));
         r.replace(QStringLiteral("redo"), QStringLiteral("Ctrl+Z"));
+        r.setGlobal(QStringLiteral("eq"), true);
+        r.setGlobal(QStringLiteral("mute"), true);
         r.setGlobal(QStringLiteral("mute"), false);
         r.setGlobal(QStringLiteral("undo"), true);   // not a global action: ignored
     }

@@ -13,6 +13,7 @@
 
 #include "eqsession.h"
 #include "responsegraph.h"
+#include "speakers.h"
 #include "isotone/param_block.h"
 
 using namespace isotone;
@@ -280,6 +281,19 @@ TEST_CASE("the graph draws the channel in view, and a handle sits on its band's 
 
     session.setViewChannel(5);
     CHECK(session.viewChannel() == 0);
+}
+
+TEST_CASE("an output's layout is named by its channels and speakers") {
+    // The outputs list called every layout above two channels that was not 7.1 "5.1".
+    CHECK(speaker_layout_name(2, 0x3) == QStringLiteral("Stereo"));
+    CHECK(speaker_layout_name(3, 0xB) == QStringLiteral("2.1"));
+    CHECK(speaker_layout_name(6, 0x60F) == QStringLiteral("5.1"));
+    CHECK(speaker_layout_name(6, 0x3F) == QStringLiteral("5.1"));   // back speakers
+    CHECK(speaker_layout_name(8, 0xFF) == QStringLiteral("7.1"));   // wide
+    CHECK(speaker_layout_name(8, 0x63F) == QStringLiteral("7.1"));
+    CHECK(speaker_layout_name(8, 0) == QStringLiteral("7.1"));
+    CHECK(speaker_layout_name(4, 0x33) == QStringLiteral("4 ch"));
+    CHECK(speaker_layout_name(6, 0x637) == QStringLiteral("6 ch"));   // no LFE
 }
 
 int main(int argc, char** argv) {

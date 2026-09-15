@@ -62,26 +62,23 @@ Window {
     DefaultOutputFollower {}
 
     // Settings, General, closing the window: to the tray, or quit. With unsaved
-    // changes the presets package's UnsavedDialog asks first.
+    // changes "Save changes to <name> before closing?" asks first; Cancel keeps
+    // the window open.
     onClosing: (close) => {
         close.accepted = false
         window.requestClose()
     }
     function requestClose() {
+        PresetActions.confirmUnsaved(true, window.finishClose)
+    }
+    // The tray's Quit: the same question, over the window.
+    function requestQuit() {
         if (Presets.modified) {
-            // INTEGRATION (presets package): UnsavedDialog, "Save changes to <name>
-            // before closing?" with Cancel / Don't save / Save. It gets `closing: true`
-            // and `afterClose`, and calls afterClose() once Save has saved or Don't
-            // save has put the output back to its saved preset; Cancel closes only
-            // the dialog.
-            const unsaved = Qt.createComponent("Isotone", "UnsavedDialog")
-            if (unsaved.status === Component.Ready) {
-                UiState.openDialog(unsaved, { closing: true, afterClose: window.finishClose })
-                return
-            }
-            console.warn("UnsavedDialog is not in this build; closing without asking")
+            window.show()
+            window.raise()
+            window.requestActivate()
         }
-        finishClose()
+        PresetActions.confirmUnsaved(true, () => Qt.quit())
     }
     function finishClose() {
         if (GeneralSettings.keepInTray) window.hide()

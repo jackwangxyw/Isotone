@@ -14,6 +14,7 @@
 #include "devices.h"
 #include "engine_probe.h"
 #include "shared_mapping.h"
+#include "speakers.h"
 
 namespace {
 
@@ -115,7 +116,7 @@ QVariant Outputs::data(const QModelIndex& index, int role) const {
         case NameRole: return o.name;
         case BackendLabelRole: {
             QString label = o.backend == isotone::ui::Backend::native ? QStringLiteral("Native") : QStringLiteral("Equalizer APO");
-            if (o.layout.channels > 2) label += QStringLiteral(" · %1").arg(o.layout.channels == 8 ? QStringLiteral("7.1") : QStringLiteral("5.1"));
+            if (o.layout.channels > 2) label += QStringLiteral(" · %1").arg(speaker_layout_name(o.layout.channels, o.layout.speaker_mask));
             return label;
         }
         case ActivityRole: return o.activity;

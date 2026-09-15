@@ -184,7 +184,8 @@ int main(int argc, char* argv[]) {
     tray_menu.attach(&tray_icon);
     if (!checking) tray_icon.show();
     QObject::connect(&tray_menu, &TrayMenu::openRequested, &app, show_window);
-    QObject::connect(&tray_menu, &TrayMenu::quitRequested, &app, &QCoreApplication::quit);
+    // Quit asks about unsaved changes first, as closing does.
+    QObject::connect(&tray_menu, &TrayMenu::quitRequested, &app, [root_window] { QMetaObject::invokeMethod(root_window, "requestQuit"); });
     QObject::connect(&instance, &SingleInstance::showRequested, &app, show_window);
 
     if (parser.isSet(output)) {

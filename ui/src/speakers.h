@@ -34,6 +34,10 @@ class EqSession;
 class QQmlEngine;
 class QJSEngine;
 
+// "Stereo", "2.1", "5.1", "7.1", or "<n> ch" for another layout; a mask of 0 is
+// the usual one for the channel count.
+QString speaker_layout_name(uint32_t channels, uint32_t speaker_mask);
+
 class Speakers : public QAbstractListModel {
     Q_OBJECT
     QML_ELEMENT

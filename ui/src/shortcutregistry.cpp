@@ -142,7 +142,7 @@ QString ShortcutRegistry::sequenceFor(int key, int modifiers) const {
 
 bool ShortcutRegistry::isGlobal(const QString& id) const {
     const Action* a = find(id);
-    return a && a->global_capable && settings_->value(QStringLiteral("shortcuts/%1/global").arg(id), true).toBool();
+    return a && a->global_capable && settings_->value(QStringLiteral("shortcuts/%1/global").arg(id), false).toBool();
 }
 
 void ShortcutRegistry::setGlobal(const QString& id, bool on) {
