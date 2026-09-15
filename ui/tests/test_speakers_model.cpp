@@ -294,6 +294,27 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
     QFile::remove(temp_path("solo.json"));
 }
 
+TEST_CASE("a failure of a tone already stopped does not end test tones") {
+    EqSession session;
+    session.setSavedStateDir(QDir::temp().filePath(QStringLiteral("isotone-speakers-stale")).toStdWString());
+    Speakers speakers(&session);
+    speakers.setStore(SpeakerStore(temp_path("stale.json")));
+    session.useTarget(surround(8, k71, Backend::native, L"{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
+    QSignalSpy failed(&speakers, &Speakers::toneFailed);
+    speakers.setTestTones(true);   // its tone fails on its thread
+    Sleep(1000);                   // the failure is queued by now
+    speakers.toggleTone(0);        // paused: that tone is stopped
+    for (int i = 0; i < 10; ++i) {
+        QCoreApplication::processEvents();
+        Sleep(20);
+    }
+    CHECK(speakers.testTones());
+    CHECK(failed.isEmpty());
+    speakers.setTestTones(false);
+    QDir(QDir::temp().filePath(QStringLiteral("isotone-speakers-stale"))).removeRecursively();
+    QFile::remove(temp_path("stale.json"));
+}
+
 TEST_CASE("bass management takes its ranges in 10 Hz steps") {
     EqSession session;
     Speakers speakers(&session);

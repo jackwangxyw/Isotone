@@ -165,6 +165,11 @@ TEST_CASE("test tones bypass the bands and turn upmix and swaps off; solo adds i
     CHECK(live.speakers.muted == 0x80);
 
     live = s;
+    apply_live_overrides(LiveOverrides{0x0B, false}, &live);   // solo alone
+    CHECK_FALSE(live.bypass);
+    CHECK(live.speakers.muted == 0x8B);
+
+    live = s;
     apply_live_overrides(LiveOverrides{0x0B, true}, &live);
     CHECK(live.bypass);
     CHECK(live.speakers.upmix == Upmix::Off);
