@@ -2236,7 +2236,72 @@ as errors and its 7 ctest suites pass.
 
 ---
 
-# Where things stand (end of 2026-09-13)
+## 2026-09-15: Review of the merged UI, and the fixes
+
+Three reviewers read the merged UI by area and proved each finding with a failing
+test or a precise trace; three fixers fixed them in parallel worktrees, each fix
+with a test that failed before it and a mutation check (75 mutations; 73 made a
+test fail, and the two that did not are explained in the devices notes). Details per bug are in the notes' "Fixes after
+review" sections.
+
+**Session, presets, speakers**
+- Solo and test tones stayed on an output when another was picked, and came back
+  as real speaker mutes. They are now cleared on the old output before retargeting.
+- Saving or loading a preset dropped solo and tones from a native output: the file
+  gets the saved state, the region what plays.
+- A layout change was an undo step whose undo put the old layout's masks on the
+  new layout. It is no longer a step and clears the history.
+- Auto preamp was computed with the EQ off, so turning it back on could clip. It is
+  computed as the EQ on plays.
+- Undo of a speaker change now saves the speaker setup; a speaker change writes
+  the file before the region.
+- Import and presets are held to 64 bands on IsoAPO outputs; import lists the rest
+  as skipped (`ApoParseResult::band_lines`, new in the core, tested).
+- Undo of a distance restores the farthest distance too.
+- One saved-state directory (`DeviceLink::saved_state_path`), so no test can write
+  ProgramData.
+- A wheel spin on a handle commits once when it stops, not per notch.
+
+**Devices**
+- Repair and Undo ran devicetool's machine-wide `repair`. `isotone-devicetool
+  repair` now takes an endpoint (tested with dry runs on every render endpoint
+  here), and the UI repairs only the output selected.
+- Equalizer APO outputs whose config.txt does not include Isotone.txt were listed
+  as working, though edits did nothing. They are "Not attached" in Devices, with
+  Attach, and left out of the sidebar until attached. On this machine that is all
+  three Equalizer APO outputs.
+- "Off" on an Equalizer APO output is stored and sticks.
+- Settings Outputs keeps each row's result after the devices re-read; Retry after a
+  failed test retries the test; a busy restart shows as busy, not a Windows
+  restart; a declined or failed approval shows its reason; quitting stops between
+  steps; Attach with Remove include removes Peace only after the attach succeeds;
+  an empty Equalizer APO path is refused.
+- `--fake-devicetool` refuses to run without a sandbox compat directory, and fake
+  mode also follows the environment variable.
+
+**Window, keys, dialogs**
+- Delete, the arrows, Ctrl+Z and the other window keys acted on the band behind an
+  open dialog, popover or first run. They are off while one holds focus (global
+  hotkeys and the tray still act).
+- A press inside a dialog took focus out of it; a second close stacked a second
+  unsaved dialog; a tray preset pick asked in the hidden window. Fixed, with the
+  key, press and close logic in `WindowKeys`, `PressWatch` and `WindowClose` so it
+  is tested as Main uses it.
+- Ctrl+S on an untitled output opens Save as.
+- The tray shows a shortcut only for actions whose Global is on.
+- Custom theme: a light custom background left dark popovers and unreadable text.
+  The unset tokens now come from the matching light or dark set, and those between
+  background and text are mixed from the custom colours; text on a custom accent
+  picks the readable colour.
+
+**After the fixes** (lead): `ui_tests` 40, `ui_model_tests` 98, `ui_qml_tests` 237
+(run twice), the MSVC build with warnings as errors and its 7 ctest suites, the
+APO self test, the transport and reference-data checks, and the GCC build and tests
+all pass. The Devices table keeps each cell on one line.
+
+---
+
+# Where things stand (end of 2026-09-15)
 
 ## Done
 
@@ -2248,7 +2313,7 @@ as errors and its 7 ctest suites pass.
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
 | 2. Core | complete | 205 cases green on MSVC 19.51 and GCC 16.1.0 after the review's leftovers (2026-09-14) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
-| 4. UI | designed (17 screens, then an interactive prototype of every state reviewed 2026-09-14), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
+| 4. UI | built in Qt 6 Quick (`ui/`): every screen of the prototype except EQ by ear, reviewed and fixed 2026-09-15; not yet used for real installs or on a real listening output | `ui_tests`, `ui_model_tests`, `ui_qml_tests`; `docs/notes/stage4-*.md`; entries of 2026-09-14 and 2026-09-15 |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -2297,12 +2362,13 @@ points IntelliSense at `build/compile_commands.json`.
 
 1. **Linux daemon**, deferred with 1c.
 
-**Stage 4** is the UI in Qt 6 Quick, designed and not coded. Start with
-`docs/ui-spec.md`, "Start here". It does not wait on stage 3's remaining items:
-the core, transport, compat, devices library and devicetool it needs exist, and
-the multichannel controls can be built UI-first. The backend review before it is
-the entry "Final backend review before stage 4"; the UI's contracts are in
-`ui-spec.md`.
+**Stage 4** remaining: the owner's use of the app on real outputs, and what only
+the owner can run: a real install, repair or uninstall from Devices (with the
+Windows approval prompt), attaching config.txt, launch at sign-in, following a real
+default output change, the tray on the desktop, the native file dialogs and a real
+drag from Explorer. Open decisions for the owner: global hotkeys off by default;
+live propagation of preset edits to other outputs (now on save); the entries of
+2026-09-15 list the rest.
 
 **Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec.
 **Stage 6** (packaging) is not started.

@@ -88,7 +88,7 @@ Rectangle {
             readonly property real db: graph.revision >= 0 ? graph.compositeAt(root.hoverFrequency) : 0
             anchors.fill: parent
             Repeater {
-                model: Math.ceil(graph.plotHeight / 7)
+                model: Math.max(0, Math.ceil(graph.plotHeight / 7))   // 0 before the graph has a size
                 delegate: Rectangle {
                     required property int index
                     x: Math.round(readout.lineX)

@@ -222,8 +222,7 @@ Item {
                                     height: parent.height
                                     leftPadding: 16
                                     rightPadding: 16
-                                    wrapMode: Text.WordWrap
-                                    lineHeight: 0.95
+                                    elide: Text.ElideRight   // one line: the columns are sized to it
                                     verticalAlignment: Text.AlignVCenter
                                     text: row.engine
                                     font.family: Theme.font
@@ -239,9 +238,8 @@ Item {
                                         spacing: 8
                                         StatusDot { status: row.dot; anchors.verticalCenter: parent.verticalCenter }
                                         Text {
-                                            width: Math.min(implicitWidth, table.widths[1] - 46)
-                                            wrapMode: Text.WordWrap
-                                            lineHeight: 0.95
+                                            width: Math.min(implicitWidth, table.widths[1] - 30)
+                                            elide: Text.ElideRight
                                             text: row.statusLabel
                                             font.family: Theme.font
                                             font.pixelSize: 14
