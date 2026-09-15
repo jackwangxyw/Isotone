@@ -1,0 +1,639 @@
+{
+ "started": false,
+ "start": {
+  "error": 0
+ },
+ "commands": {},
+ "devices": [
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000001-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "USB DAC",
+    "connection": "Headphones",
+    "default_device": true,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "native",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "installed",
+    "remedies": [],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000002-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "HDMI",
+    "connection": "Living room 7.1",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 8,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "native",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "installed",
+    "remedies": [],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000003-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "Realtek",
+    "connection": "Speakers",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "equalizerapo",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "equalizerapo_post_mix"
+    },
+    {
+     "slot": "MFX",
+     "present": false
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "not_installed",
+    "remedies": [],
+    "in_slots": false,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": true
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000004-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "DisplayPort",
+    "connection": "Monitor",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "none",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": false
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "detached",
+    "remedies": [
+     "repair",
+     "uninstall"
+    ],
+    "in_slots": false,
+    "install_mode": {
+     "recorded": "SFX_MFX",
+     "effective": "SFX_MFX",
+     "source": "record"
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000005-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "VB-Audio",
+    "connection": "CABLE Input",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "conflict",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "equalizerapo_pre_mix"
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "alongside_equalizerapo",
+    "remedies": [
+     "install --replace-equalizerapo",
+     "uninstall"
+    ],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": true
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000006-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "Focusrite",
+    "connection": "Studio monitors",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 96000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "equalizerapo",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "equalizerapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "replaced_by_equalizerapo",
+    "remedies": [
+     "install --replace-equalizerapo",
+     "uninstall"
+    ],
+    "in_slots": false,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": true
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000007-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "Realtek",
+    "connection": "Laptop speakers",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": true
+   },
+   "backend": "native",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "installed",
+    "remedies": [
+     "enable-enhancements"
+    ],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000008-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "HDMI",
+    "connection": "TV",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "none",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": false
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "not_installed",
+    "remedies": [],
+    "in_slots": false,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000009-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "Bluetooth",
+    "connection": "Headset",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": true,
+    "channels": 2,
+    "sample_rate": 16000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "none",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": false
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "not_installed",
+    "remedies": [],
+    "in_slots": false,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000010-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "DisplayPort",
+    "connection": "Monitor 2",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "native",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "interrupted",
+    "remedies": [
+     "repair"
+    ],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  },
+  {
+   "command": "status",
+   "ok": true,
+   "guid": "{00000011-0000-4000-8000-000000000000}",
+   "flow": "render",
+   "device": {
+    "name": "Realtek",
+    "connection": "Line out",
+    "default_device": false,
+    "disabled": false,
+    "unplugged": false,
+    "channels": 2,
+    "sample_rate": 48000,
+    "channel_mask": "0x3",
+    "enhancements_disabled": false
+   },
+   "backend": "native",
+   "effect_slots": [
+    {
+     "slot": "LFX",
+     "present": false
+    },
+    {
+     "slot": "GFX",
+     "present": false
+    },
+    {
+     "slot": "SFX",
+     "present": false
+    },
+    {
+     "slot": "MFX",
+     "present": true,
+     "clsid": "{00000000-0000-0000-0000-000000000000}",
+     "kind": "isoapo_post_mix"
+    },
+    {
+     "slot": "EFX",
+     "present": false
+    }
+   ],
+   "isoapo": {
+    "state": "unrecorded",
+    "remedies": [],
+    "in_slots": true,
+    "install_mode": {
+     "recorded": null,
+     "effective": null,
+     "source": null
+    }
+   },
+   "equalizerapo": {
+    "in_slots": false
+   },
+   "default_install_mode": null
+  }
+ ],
+ "equalizer_apo": {
+  "installed": true,
+  "version": "1.4.2",
+  "uninstaller": "\"C:\\Program Files\\EqualizerAPO\\Uninstall.exe\""
+ }
+}

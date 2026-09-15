@@ -6,6 +6,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFont>
 #include <QFontDatabase>
 #include <QGuiApplication>
@@ -28,6 +29,18 @@ static const bool kPlatformChosen = [] {
     }
     // tst_export reads back the file it wrote.
     qputenv("QML_XHR_ALLOW_FILE_READ", "1");
+    // Devices work package: devicetool and the outputs come from a script, and
+    // Equalizer APO's config directory is a sandbox with a Peace include, never
+    // the installed one.
+    qputenv("ISOTONE_FAKE_DEVICETOOL", ISOTONE_FAKE_DEVICETOOL_SCRIPT);
+    if (!qEnvironmentVariableIsSet("ISOTONE_COMPAT_DIR")) {
+        const QString dir = QDir::temp().filePath(QStringLiteral("isotone-qml-compat-%1").arg(QCoreApplication::applicationPid()));
+        QDir(dir).removeRecursively();
+        QDir().mkpath(dir);
+        QFile config(QDir(dir).filePath(QStringLiteral("config.txt")));
+        if (config.open(QIODevice::WriteOnly)) config.write("Preamp: -3 dB\r\nInclude: peace.txt\r\nGraphicEQ: 25 0; 40 -1.5; 100 0\r\n");
+        qputenv("ISOTONE_COMPAT_DIR", dir.toUtf8());
+    }
     return true;
 }();
 

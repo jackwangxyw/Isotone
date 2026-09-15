@@ -24,6 +24,26 @@ Window {
     Component.onCompleted: {
         UiState.overlay = overlay
         EqSession.useOutput(Outputs)
+        // Devices work package: first run, until it is done, while no output works.
+        const done = AppSettings.value("general/firstRunDone", false)
+        if (!(done === true || done === "true") && Outputs.count === 0) showFirstRun()
+    }
+
+    // Devices work package. Engine changes raise no device notification: read
+    // the outputs again once devicetool has run.
+    Connections {
+        target: Devicetool
+        function onFinished() { Devices.refresh(); Outputs.refresh() }
+    }
+    // First run over the whole window (--first-run forces it).
+    function showFirstRun() { firstRun.active = true }
+    Loader {
+        id: firstRun
+        objectName: "firstRun"
+        anchors.fill: parent
+        z: 1500
+        active: false
+        sourceComponent: FirstRun { onFinished: firstRun.active = false }
     }
 
     // A shortcut, not a key handler: a field being typed in keeps Delete for its text.
