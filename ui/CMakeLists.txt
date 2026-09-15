@@ -89,6 +89,11 @@ qt_add_qml_module(isotone_ui
         qml/SettingsShortcuts.qml
         qml/SettingsAbout.qml
         qml/PresetsMenu.qml
+        qml/SpeakersPanel.qml
+        qml/TargetChips.qml
+        qml/ShowingPicker.qml
+        qml/LayoutDialog.qml
+        qml/NewGroupDialog.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf

@@ -176,6 +176,12 @@ Item {
             current: EqSession.viewChannel
             onPicked: (index) => EqSession.viewChannel = index
         }
+        // Surround: which speakers the graph shows.
+        ShowingPicker {
+            objectName: "showingPicker"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: EqSession.outputChannels > 2
+        }
 
         Row {
             spacing: 10

@@ -216,6 +216,14 @@ Item {
                     onPicked: (index) => EqSession.setChannels(root.row, index)
                 }
             }
+            // Surround: the band's target, a group or any speakers of the layout.
+            TargetChips {
+                objectName: "bandTarget"
+                width: parent.width
+                visible: EqSession.outputChannels > 2
+                row: root.row
+                mask: root.value(EqSession.ChannelMaskRole) ?? 0
+            }
             MenuRow {
                 label: "Enabled"
                 clickable: false
