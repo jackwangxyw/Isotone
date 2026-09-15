@@ -17,6 +17,7 @@
 #include "eqsession.h"
 #include "importpreview.h"
 #include "isotone/apo_config.h"
+#include "isotone/param_block.h"
 #include "isotone/response.h"
 #include "output_state.h"
 #include "outputs.h"
@@ -32,6 +33,7 @@ constexpr double kAutoPreampMatchDb = 0.01;
 double auto_value(const isotone::EqState& state, const isotone::ui::OutputLayout& layout) {
     static const std::vector<double> grid = isotone::log_grid(20.0, 20000.0, 512);
     isotone::EqState probe = state;
+    probe.bypass = false;   // as the bands play with EQ on, as EqSession computes it
     isotone::ui::clear_balance(layout.channels, &probe);
     return isotone::auto_preamp_db(probe, layout.channels, layout.speaker_mask, grid.data(), grid.size(),
                                    layout.sample_rate > 0 ? layout.sample_rate : 48000.0);
@@ -239,6 +241,9 @@ void Presets::writeTo(const isotone::ui::OutputTarget& target, const isotone::Eq
     isotone::EqState state;
     if (link.load_current(&state)) isotone::remap_channels(&state, layout);
     isotone::EqState moved = eq;
+    // The region holds kParamMaxBands: an IsoAPO output gets the first ones, as EqSession loads them.
+    if (target.backend == isotone::ui::Backend::native && moved.bands.size() > isotone::kParamMaxBands)
+        moved.bands.resize(isotone::kParamMaxBands);
     isotone::remap_channels(&moved, layout);
     state.bands = std::move(moved.bands);
     state.auto_preamp = eq.auto_preamp;
@@ -247,7 +252,7 @@ void Presets::writeTo(const isotone::ui::OutputTarget& target, const isotone::Eq
     state.layout_speaker_mask = target.layout.speaker_mask;
     if (state.auto_preamp) state.preamp_db = auto_value(state, target.layout);
     link.commit(state);
-    if (target.backend == isotone::ui::Backend::native) link.save(state);
+    if (target.backend == isotone::ui::Backend::native) link.save(state, state);
 }
 
 void Presets::propagate(const QString& id) {

@@ -31,7 +31,8 @@ class ImportPreview : public QObject {
     Q_PROPERTY(QString outputGuid READ outputGuid WRITE setOutputGuid NOTIFY changed)
     Q_PROPERTY(double preampDb READ preampDb NOTIFY changed)
     Q_PROPERTY(int filterCount READ filterCount NOTIFY changed)
-    // [{line, text}]: each line with a warning, as the file has it.
+    // [{line, text}]: each line with a warning, and each filter past the 64th
+    // (kParamMaxBands), as the file has it.
     Q_PROPERTY(QVariantList skipped READ skipped NOTIFY changed)
     // False when no filter imports.
     Q_PROPERTY(bool usable READ usable NOTIFY changed)

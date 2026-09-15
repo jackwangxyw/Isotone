@@ -202,7 +202,7 @@ if(ISOTONE_BUILD_TESTS)
     add_test(NAME ui_tests COMMAND ui_tests)
 
     add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp
-                   tests/test_devices.cpp tests/test_settings.cpp)
+                   tests/test_devices.cpp tests/test_settings.cpp tests/test_session_fixes.cpp)
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)

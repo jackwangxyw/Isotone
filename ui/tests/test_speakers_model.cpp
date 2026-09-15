@@ -198,15 +198,9 @@ TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state
 }
 
 TEST_CASE("solo and test tones reach the output and are never saved") {
-    wchar_t temp[MAX_PATH];
-    REQUIRE(GetTempPathW(MAX_PATH, temp) > 0);
-    const std::filesystem::path dir =
-        std::filesystem::path(temp) / (L"isotone-speakers-saved-" + std::to_wstring(GetCurrentProcessId()));
-    std::filesystem::remove_all(dir);
     const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000050101e}";   // no such endpoint: no region, no audio
-
-    EqSession session;
-    session.setSavedStateDir(dir.wstring());
+    // A Local\ link: the saved state is the self test's, never %ProgramData%.
+    EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("solo.json")));
     session.useTarget(surround(8, k71, Backend::native, guid));
@@ -216,7 +210,8 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
     s.speakers.swap_left_right = true;
     s.speakers.muted = 0x80;
     session.loadState(&s);
-    const std::wstring path = isotone::win::persisted_state_path(dir.wstring(), guid);
+    const std::wstring path = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(true), guid);
+    std::filesystem::remove(path);
     const auto saved = [&] {
         ParamBlock block{};
         REQUIRE(isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded);
@@ -290,13 +285,12 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
         CHECK_FALSE(speakers.testTones());
         CHECK_FALSE(session.engineState().bypass);
     }
-    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
     QFile::remove(temp_path("solo.json"));
 }
 
 TEST_CASE("a failure of a tone already stopped does not end test tones") {
-    EqSession session;
-    session.setSavedStateDir(QDir::temp().filePath(QStringLiteral("isotone-speakers-stale")).toStdWString());
+    EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("stale.json")));
     session.useTarget(surround(8, k71, Backend::native, L"{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
@@ -311,7 +305,6 @@ TEST_CASE("a failure of a tone already stopped does not end test tones") {
     CHECK(speakers.testTones());
     CHECK(failed.isEmpty());
     speakers.setTestTones(false);
-    QDir(QDir::temp().filePath(QStringLiteral("isotone-speakers-stale"))).removeRecursively();
     QFile::remove(temp_path("stale.json"));
 }
 

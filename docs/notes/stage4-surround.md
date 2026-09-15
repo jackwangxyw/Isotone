@@ -212,3 +212,34 @@ on CABLE Input, saved state redirected to a scratch directory, while
   state today).
 - Undo: `editSpeakers` is one committed step each.
 - A distance mode kept across sessions (now per session).
+
+## Fixes after review
+
+Tests in `ui/tests/test_session_fixes.cpp`, each failing before its fix.
+
+- **Switching output left solo and test tones on the old output**, where the next
+  load read them as real speaker mutes and bypass: `useTarget` moved the link
+  before `Speakers` cleared the overrides, so the clearing write went to the new
+  output. `useTarget` now clears the overrides and writes the real state to the
+  current output and layout first; `Speakers::reloadOutput` then only resets its
+  UI (its `setLiveOverrides({})` finds nothing to change). The same fixes a layout
+  change writing the old layout's solo mask on the new layout (both stereo
+  speakers muted).
+- **Undo or redo of a speaker change did not save the speaker setup**: `restore`
+  saves the speaker part (levels, setup, layout) when it differs, file first, as
+  `editSpeakers` does.
+- **Undoing a distance change left `farthest_` behind**, so every distance read
+  wrong. EqSession's undo snapshot has a generic extra value
+  (`setUndoExtra(value, loaded)`, `undoExtra()`): `Speakers` sets it with each
+  distance or delay edit and when an output loads, and takes it back (and stores
+  it) when a restore changes it. Undo and redo of a distance are exact.
+- **`editSpeakers` wrote the region before the file**; it now saves, then commits.
+- **Saved-state directory**: `editSpeakers` used `saved_state_dir_` (ProgramData
+  unless a test set it) while `DeviceLink::save` used the region namespace. Both
+  use `DeviceLink::saved_state_path()` now; `setSavedStateDir` is removed and the
+  two tests that used it run on a `Local\` link.
+
+Mutation checks: no clearing write before the link moves (switch and layout
+tests); restore not saving the speaker part; restore not restoring the extra;
+`Speakers` ignoring the restored extra; region before file; speaker save outside
+the link's directory (order and undo tests). All caught.

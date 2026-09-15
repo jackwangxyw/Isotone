@@ -77,6 +77,9 @@ struct ApoParseMessage {
 struct ApoParseResult {
     EqState state;
 
+    // The 1-based line each of state.bands was read from, in the same order.
+    std::vector<size_t> band_lines;
+
     // Lines the importer understood but cannot represent: convolution, VST,
     // GraphicEQ, Delay, Copy, Include, If/Else. Kept verbatim so an exporter
     // can write them back out and a user's config is not silently destroyed on
