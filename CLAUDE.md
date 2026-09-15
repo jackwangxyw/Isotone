@@ -2,8 +2,8 @@
 
 A system-wide parametric EQ. A C++ DSP core runs inside IsoAPO (a Windows audio
 processing object forked from Equalizer APO) or drives a stock Equalizer APO
-through its config files (the compat backend). Stage 4, the Qt 6 Quick UI, is
-next.
+through its config files (the compat backend). The Qt 6 Quick UI (stage 4) is in
+`ui/`; EQ by ear (stage 5) and packaging (stage 6) are next.
 
 Read first:
 - `docs/ui-spec.md`: the stage 4 build brief, including "Engine contracts the UI
@@ -27,6 +27,22 @@ python tools\check_shm_transport.py build                                       
 python tools\gen_reference.py --check                                          # scipy reference data
 ```
 
+The UI builds separately (Qt 6.11.2 MSVC kit in `C:\Qt\6.11.2\msvc2022_64`), off by default so CI is unchanged:
+
+```powershell
+cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" -S . -B build-ui -G Ninja -DISOTONE_BUILD_UI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.11.2/msvc2022_64 -DISOTONE_WARNINGS_AS_ERRORS=ON"
+cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" --build build-ui --target isotone ui_tests ui_model_tests ui_qml_tests"
+$env:PATH = "C:\Qt\6.11.2\msvc2022_64\bin;$env:PATH"
+.\build-ui\ui\ui_tests.exe; .\build-ui\ui\ui_model_tests.exe
+.\build-ui\ui\ui_qml_tests.exe -o "$env:TEMP\qml.txt,txt"    # read the file; add -input ui\tests\qml\tst_x.qml for one
+```
+
+- Run the app for checks only with `--data-dir <scratch> --compat-dir <scratch>
+  --output {798436d2-8c71-4834-9248-00ccbaaca00a}`: without them it uses the
+  owner's `%APPDATA%\Isotone` and writes the real Equalizer APO directory on an
+  Equalizer APO output. `--screenshot`, `--click`, `--key`, `--add-band`,
+  `--view`, `--fake-devicetool`, `--first-run` are listed at the top of
+  `ui/src/main.cpp`.
 - A single core test: `build\core\tests\core_tests.exe -tc="name*"`.
 - GCC (stand-in for the Linux CI job): WinLibs g++ under
   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_*\mingw64\bin`,
@@ -52,8 +68,15 @@ windows/devices/      isotone_devices: render endpoints, their format and engine
                       speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
+ui/backend/           the UI without Qt: DeviceLink (where edits go), spectrum, typed values, speaker setup,
+                      test tone, config.txt attach, diagnostics
+ui/src/               EqSession (the edited state, undo), Outputs, Presets, Devices and Devicetool, Speakers,
+                      ResponseGraph, settings, shortcuts, tray
+ui/qml/               the screens; Main.qml is the window, Theme.qml the tokens
+ui/tests/             ui_tests, ui_model_tests (doctest), qml/ (Qt Quick Test)
 tools/                gen_reference.py, check_shm_transport.py
-docs/design/          approved screens and their generator; gitignored, this machine only
+docs/design/          approved screens, the prototype's source, their generator; gitignored, this machine only
+docs/notes/           the stage 4 work packages' records (force-added: docs/* is gitignored)
 ```
 
 ## Rules
