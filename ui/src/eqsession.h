@@ -125,18 +125,20 @@ public:
     Q_INVOKABLE void useOutput(Outputs* outputs);
     // The same for a target: another output loads what it plays; the same output
     // in another layout keeps what is edited, its speaker values moved by
-    // speaker role (remap_channels).
+    // speaker role (remap_channels), and starts the undo history again. Solo and
+    // test tones end first, on the output and layout they were for.
     void useTarget(const isotone::ui::OutputTarget& target);
     // Replaces what is edited with `state` (flat when null), as useOutput does
     // with what the output plays. Writes nothing to the output. Starts the undo
-    // history again.
+    // history again. A native output keeps the first kParamMaxBands bands, as
+    // setEqPart and adoptEqPart do.
     void loadState(const isotone::EqState* state);
 
     Q_INVOKABLE void select(int row);
     Q_INVOKABLE void setGain(int row, double db);
     Q_INVOKABLE void setFrequency(int row, double hz);
     // In the band's own width unit: Q, octaves or dB per octave. Committed at
-    // once unless `commitNow` is false (a held key, committed on release).
+    // once unless `commitNow` is false (a held key or a wheel spin, committed when done).
     Q_INVOKABLE void setWidth(int row, double width, bool commitNow = true);
     Q_INVOKABLE void setEnabled(int row, bool on);
     // An isotone::FilterType. Keeps the band's id, frequency, gain and width; a
@@ -175,11 +177,17 @@ public:
     // Solo and test tones: written to the output on top of the edited state, never saved.
     void setLiveOverrides(const isotone::ui::LiveOverrides& overrides);
     const isotone::ui::LiveOverrides& liveOverrides() const { return overrides_; }
+    // A value outside the state that undo and redo restore with it (the Speakers
+    // farthest distance): set before the edit it goes with is committed, or with
+    // `loaded` for the value of what was just loaded (no step). A restore emits
+    // stateChanged with it in place.
+    void setUndoExtra(double value, bool loaded);
+    double undoExtra() const { return extra_; }
     // What the output gets, and what a speaker change saves (no overrides).
     isotone::EqState engineState() const;
     isotone::EqState savedState() const;
-    // Where the saved state files are; persisted_state_dir(false) unless a test moves it.
-    void setSavedStateDir(const std::wstring& dir) { saved_state_dir_ = dir; }
+    // The current output's saved state file (DeviceLink's: the self test's directory on a Local\ link).
+    std::wstring savedStatePath() const { return link_->saved_state_path(); }
     // Presets. Edits `target` from now on, starting from what it plays (useOutput's work).
     explicit EqSession(std::unique_ptr<isotone::ui::DeviceLink> link, QObject* parent = nullptr);
     // Bands, preamp and Auto, for the output's layout (presetstore.h).
@@ -215,6 +223,7 @@ private:
     struct Snapshot {
         isotone::EqState state;
         double balance = 0.0;
+        double extra = 0.0;   // setUndoExtra's
     };
     struct Step {
         Snapshot before, after;
@@ -227,10 +236,14 @@ private:
     void resetHistory();
     void replaceEq(const isotone::EqState& eq);
     void write();    // what is edited, to the output
+    // The speaker part of what is edited, to the saved state file (native).
+    void saveSpeakerSetup();
 
     std::vector<size_t> displayOrder() const;
     void rebuildOrder();
     uint32_t nextBandId() const;
+    // The first kParamMaxBands of `bands` on a native output.
+    void limitBands(std::vector<isotone::Band>* bands) const;
     // Inserts `b` at `at` in the state, selected, and commits.
     void insertBand(size_t at, const isotone::Band& b);
     void bandChanged(int row, const QList<int>& roles);
@@ -249,7 +262,7 @@ private:
     isotone::ChannelMask showing_mask_ = 0;
     std::vector<isotone::ui::SpeakerGroup> user_groups_;
     isotone::ui::LiveOverrides overrides_;
-    std::wstring saved_state_dir_;
+    double extra_ = 0.0;
     QString preset_name_;
 
     std::unique_ptr<isotone::ui::DeviceLink> link_;

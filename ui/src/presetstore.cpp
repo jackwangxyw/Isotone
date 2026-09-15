@@ -300,7 +300,10 @@ bool PresetStore::remove(const QString& id) {
         a.preset.clear();
         assigned = true;
     }
-    return !assigned || writeOutputs();
+    // The preset is gone from memory and disk either way. An assignment
+    // outputs.json keeps when it cannot be written names no preset, as it reads.
+    if (assigned) writeOutputs();
+    return true;
 }
 
 QString PresetStore::assignment(const QString& guid) const {

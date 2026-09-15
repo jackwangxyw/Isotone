@@ -13,6 +13,24 @@ Rectangle {
     color: Theme.plot
     height: 14 + 404 + 4   // the 1440 x 900 board; the view sets it from the window
 
+    // A wheel spin on a handle is one edit: each notch live, committed once the
+    // wheel has been still for 300 ms, or when a band is pressed or picked. On an
+    // Equalizer APO output every commit rewrites Isotone.txt.
+    Timer {
+        id: wheelCommit
+        interval: 300
+        onTriggered: EqSession.finishEdit()
+    }
+    function commitWheel() {
+        if (!wheelCommit.running) return
+        wheelCommit.stop()
+        EqSession.finishEdit()
+    }
+    Connections {
+        target: EqSession
+        function onSelectionChanged() { root.commitWheel() }
+    }
+
     ResponseGraph {
         id: graph
         objectName: "responseGraph"
@@ -173,6 +191,7 @@ Rectangle {
                     property real startDb
                     property real startGain
                     onPressed: (mouse) => {
+                        root.commitWheel()
                         EqSession.select(handle.index)
                         if (mouse.button === Qt.RightButton) {
                             // Centred on the handle, above it, or below where there is no room.
@@ -192,8 +211,10 @@ Rectangle {
                     }
                     onReleased: EqSession.finishEdit()
                     onWheel: (wheel) => {
+                        if (!handle.selected) root.commitWheel()   // before the selection moves: undo selects that band
                         EqSession.select(handle.index)
-                        EqSession.setWidth(handle.index, handle.q * (wheel.angleDelta.y > 0 ? 1.08 : 1 / 1.08))
+                        EqSession.setWidth(handle.index, handle.q * (wheel.angleDelta.y > 0 ? 1.08 : 1 / 1.08), false)
+                        wheelCommit.restart()
                     }
                 }
             }

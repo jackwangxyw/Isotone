@@ -68,9 +68,13 @@ public:
     DWORD apply(const EqState& state);
     // An edit that is done (release, a toggle, a typed value).
     DWORD commit(const EqState& state);
-    // The saved state file, and the region when there is one (write the file
-    // first, then the region, as the contract asks). Native only.
-    DWORD save(const EqState& state);
+    // `state` to the saved state file, and `engine_state` (the same state with
+    // what is only live, such as a solo) to the region when there is one: the
+    // file first, then the region, as the contract asks. Native only.
+    DWORD save(const EqState& state, const EqState& engine_state);
+    // The target's saved state file: the self test's directory unless the region
+    // namespace is Global\.
+    std::wstring saved_state_path() const;
 
     // What the output plays now: native, the region, or the saved state when the
     // engine is idle; Equalizer APO, its block in Isotone.txt. False when there is

@@ -103,6 +103,10 @@ void Speakers::sessionChanged() {
         reloadOutput();
         return;
     }
+    if (session_ && session_->undoExtra() != farthest_) {   // a distance change undone or redone
+        farthest_ = session_->undoExtra();
+        if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
+    }
     updateOverrides();   // what solo leaves playing follows the small speakers
     emit setupChanged();
 }
@@ -124,6 +128,7 @@ void Speakers::reloadOutput() {
     speakers_ = channels_ > 2 ? isotone::ui::layout_speakers(channels_, mask_) : std::vector<isotone::ui::Speaker>{};
     user_groups_ = store_.groups(guid_);
     farthest_ = store_.farthest(guid_);
+    if (session_) session_->setUndoExtra(farthest_, true);
     endResetModel();
     supported_.clear();
     if (session_) session_->setUserGroups(user_groups_);
@@ -310,7 +315,10 @@ void Speakers::setLevel(int row, double db) {
 void Speakers::setDistance(int row, double metres) {
     if (!validRow(row)) return;
     const uint32_t c = speakers_[static_cast<size_t>(row)].channel;
-    edit([&](isotone::EqState* s) { isotone::ui::set_speaker_distance(&s->speakers, channels_, &farthest_, c, metres); });
+    edit([&](isotone::EqState* s) {
+        isotone::ui::set_speaker_distance(&s->speakers, channels_, &farthest_, c, metres);
+        session_->setUndoExtra(farthest_, false);
+    });
     if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
     rowsChanged();
 }
@@ -318,7 +326,10 @@ void Speakers::setDistance(int row, double metres) {
 void Speakers::setDelay(int row, double ms) {
     if (!validRow(row)) return;
     const uint32_t c = speakers_[static_cast<size_t>(row)].channel;
-    edit([&](isotone::EqState* s) { isotone::ui::set_speaker_delay(&s->speakers, &farthest_, c, ms); });
+    edit([&](isotone::EqState* s) {
+        isotone::ui::set_speaker_delay(&s->speakers, &farthest_, c, ms);
+        session_->setUndoExtra(farthest_, false);
+    });
     if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
     rowsChanged();
 }

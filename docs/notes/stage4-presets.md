@@ -297,3 +297,57 @@ assignment: implicitWidth is a read-only property"), seen before the fix.
   old EQ and shows modified when selected; applying the saved preset then would
   need a decision on what wins.
 - The native file dialogs and a real drag from Explorer, by hand.
+
+## Fixes after review
+
+A review of the merged stage 4 found these; each has a test in
+`ui/tests/test_session_fixes.cpp` (or `tst_graphwheel.qml`) that failed before
+the fix, and a scripted mutation of the fix that fails it again.
+
+- **Saving or loading a preset dropped solo and test tones** from a native output:
+  `saveToOutput` wrote the region with the saved state. `DeviceLink::save` now
+  takes two states, the file's (`savedState()`) and the region's
+  (`engineState()`). `Presets::writeTo` passes the same state twice.
+- **A layout change was an undo step**, and undo put the old layout's values on
+  the new layout (older steps too). The remap is written, the history starts
+  again with its baseline taken after the write, and `committed` is emitted.
+- **Auto preamp was computed with EQ off** (`composite_peak_db` leaves the bands
+  out under bypass), so EQ back on could clip, and an output left with EQ off
+  came back with Auto off and modified. `EqSession::autoPreampValue` and
+  `auto_value` compute on a copy with `bypass = false`.
+- **More than 64 bands** (engine contract): import keeps the first 64 filters and
+  lists the rest as skipped lines with the file's text (the parser now reports
+  each band's line, `ApoParseResult::band_lines`). On a native output `loadState`,
+  `setEqPart`, `adoptEqPart` and `Presets::writeTo` keep the first 64. Decision:
+  a stored preset over 64 (a hand-edited file, or Save as on an Equalizer APO
+  output that had more) loads its first 64 bands on an IsoAPO output and reads
+  modified, since the output does not play the whole preset; Save then stores
+  the 64. An Equalizer APO output keeps them all.
+- **Removing a preset whose assignments could not be written** (`outputs.json`)
+  returned false after the preset was gone from memory and disk, so the model,
+  the current name and the outputs' memory were not updated. `PresetStore::remove`
+  now returns false only when nothing changed (no such preset, or its file could
+  not be removed); an assignment `outputs.json` keeps names no preset and reads
+  as none.
+- **A wheel spin on a handle committed every notch**, so a fast spin on an
+  Equalizer APO output rewrote Isotone.txt per notch. Each notch is applied live
+  (`setWidth(..., false)`) and committed once the wheel has been still for 300 ms,
+  or when a handle is pressed or another band is picked (`GraphCard.qml`).
+- **The saved-state directory had two sources**: `DeviceLink::saved_state_path()`
+  is now the only one (the self test's directory on a `Local\` link), used by
+  `DeviceLink::save`, `load_current` and the speaker save; `setSavedStateDir` is
+  gone. A test session on a `Local\` link cannot write `%ProgramData%\IsoAPO\devices`.
+
+Mutation checks (script, each built and its tests run, source restored): 19, all
+caught. Session Auto with bypass (2 tests); presets `auto_value` with bypass;
+region saved without overrides; layout remap as a step; import keeps every
+filter; `band_lines` off by one (import test); native session keeps more than
+64; `writeTo` keeps more than 64; `remove` false on an `outputs.json` failure;
+wheel commits every notch (3 tests), picking a band does not commit, no commit
+when still (2 tests). The surround fixes' mutations are in stage4-surround.md.
+`core_tests` has a check of `band_lines`. The directory mutation points the
+speaker save at a scratch directory, not ProgramData.
+
+Found, not fixed: `Presets::writeTo` commits the other output's region before
+`save` writes its file (region, file, region), against "file first"; no test
+observes the order there.

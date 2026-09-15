@@ -69,7 +69,8 @@ public:
     bool update(const QString& id, const isotone::EqState& eq);
     // The name it now has (unique), or empty when it could not be written.
     QString rename(const QString& id, const QString& name);
-    // Removes the file and every assignment to it.
+    // Removes the file and every assignment to it. False, with nothing changed,
+    // when there is no such preset or its file could not be removed.
     bool remove(const QString& id);
 
     // The preset id assigned to an output, or empty.

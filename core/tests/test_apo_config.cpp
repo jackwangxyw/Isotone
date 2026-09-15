@@ -395,6 +395,8 @@ TEST_CASE("an OFF filter with its parameters is a disabled band; OFF or None alo
     CHECK_FALSE(r.state.bands[1].enabled);
     CHECK(r.state.bands[2].fc == doctest::Approx(3000.0));
     CHECK(r.state.bands[2].enabled);
+    // Each band's own line, the skipped lines between them not counted.
+    CHECK(r.band_lines == std::vector<size_t>{1, 2, 4});
 
     // An OFF line with parameters that do not make a filter is reported.
     CHECK_FALSE(parse_apo_config("Filter 1: OFF PK Fc 2000 Hz Gain 6 dB\n").ok());

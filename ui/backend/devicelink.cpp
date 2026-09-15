@@ -111,20 +111,22 @@ DWORD DeviceLink::commit(const EqState& state) {
     return ERROR_SUCCESS;
 }
 
-DWORD DeviceLink::save(const EqState& state) {
+DWORD DeviceLink::save(const EqState& state, const EqState& engine_state) {
     if (target_.backend != Backend::native) return ERROR_NOT_SUPPORTED;
     ParamBlock block{};
     to_param_block(state, &block);
-    const std::wstring path = saved_state_path(namespace_, target_.guid);
+    const std::wstring path = saved_state_path();
     if (path.empty()) return ERROR_INVALID_NAME;
     const DWORD error = isotone::win::write_persisted_state(path, block);
     if (error != ERROR_SUCCESS) return error;
     // IsoAPO reads the file before it creates the region: a stream that started
     // in between would otherwise keep the old state. So the region too, now.
     last_open_attempt_ = 0;
-    write_region(state);
+    write_region(engine_state);
     return ERROR_SUCCESS;
 }
+
+std::wstring DeviceLink::saved_state_path() const { return isotone::ui::saved_state_path(namespace_, target_.guid); }
 
 bool DeviceLink::load_current(EqState* out) {
     if (target_.backend == Backend::native) {
@@ -133,7 +135,7 @@ bool DeviceLink::load_current(EqState* out) {
             from_param_block(block, out);
             return true;
         }
-        const std::wstring path = saved_state_path(namespace_, target_.guid);
+        const std::wstring path = saved_state_path();
         if (!path.empty() && isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded) {
             from_param_block(block, out);
             return true;

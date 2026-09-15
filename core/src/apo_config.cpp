@@ -857,6 +857,7 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& gi
             band.shelf_corner = is_shelf && info.corner_freq && have_width;
 
             result.state.bands.push_back(band);
+            result.band_lines.push_back(line_no);
             continue;
         }
 
