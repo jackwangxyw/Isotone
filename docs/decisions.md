@@ -2155,6 +2155,85 @@ from the same brief, and the lead merged and tested them.
   the right channel dashed and the ends marked L and R, replacing the fainter
   line chosen the day before.
 
+**The packages.** Each package's full record (what it built, every decision where
+the spec and prototype were silent, its tests and mutation table, what is not
+verified) is in `docs/notes/stage4-<presets|devices|settings|surround>.md`. The
+decisions that change behaviour the owner will notice:
+
+- **Presets** (`presetstore`, `Presets`, `PresetsMenu`, import, export, undo).
+  - One JSON file per preset in `%APPDATA%\Isotone\presets`, assignments in
+    `outputs.json`.
+  - An output with no preset is "Untitled"; no preset is created behind the user's
+    back.
+  - `modified` compares what the output plays with its preset, so it survives a
+    restart and an undo back clears it. Balance, mute and speakers never mark it.
+  - A preset assigned to several outputs reaches the others when it is saved, not
+    on every live edit (the safer reading of "changes on all of them when edited";
+    one line to change).
+  - Loading, saving and assigning write the saved state.
+  - Undo is per output, a drag is one step, 500 steps; "Band N deleted" has Undo.
+- **Devices** (`Devices`, `Devicetool`, the Replace, Attach and Uninstall dialogs,
+  Settings Outputs, first run).
+  - Status comes from `windows/devices` and `isotone-devicetool status` run
+    unelevated; the mapping is in the notes.
+  - Every change runs `restart-audio` then `test`; a failed restart offers a
+    restart of Windows.
+  - Attach needs no elevation: Users have full control of Equalizer APO's config
+    directory on this machine.
+  - First run shows only while no output works and it was never finished.
+  - `--fake-devicetool <script>` drives every state for tests and screenshots.
+    Nothing real was installed, repaired or restarted.
+- **Settings** (General, Appearance, Shortcuts, About, tray, window).
+  - Launch at sign-in writes the HKCU Run value (tests use their own key).
+  - Graph gain and frequency ranges, spectrum resolution, release, peak hold and
+    tilt.
+  - A colour picker for the custom accent and colours.
+  - Rebinding with conflicts; the selected band's keys apply while held and commit
+    once on release (the compat contract).
+  - Global hotkeys through `RegisterHotKey`.
+  - Close hides to the tray or quits; one instance per user and data directory.
+  - About reads `DisableProtectedAudioDG` as upstream does.
+- **Surround** (Speakers panel and view, targets, Showing picker, test tones).
+  - Speaker chips add or remove speakers from a band's target; group chips set it.
+  - The graph draws the channel in view with the most bands, others dashed.
+  - Distances are derived from the delays and one stored farthest distance.
+  - Bass management is on while any speaker is small.
+  - Solo and test tones end with the view and are never saved.
+  - A speaker change saves the saved state's speaker part and keeps its saved
+    bands.
+  - Measured live at 7.1 on CABLE Input: level -6.0000 dB, 2 ms delay exact in
+    phase, test tone -29.994 dBFS RMS on one channel only. The cable is back to
+    stereo.
+
+**Merging** (the lead). The surround and presets packages had both split
+`useOutput` into `useTarget`, and both changed `commit()`; resolved by keeping
+both, with `commit()` recording the undo step and then writing `engineState()`.
+The tray test needed `Presets`' real constructor. After the merges: `ui_tests` 38
+cases, `ui_model_tests` 75, `ui_qml_tests` 200, and the non-UI build with warnings
+as errors and its 7 ctest suites pass.
+
+**Changed by the lead after merging.**
+- Closing the window and the tray's Quit both ask about unsaved changes through
+  the presets package's `PresetActions.confirmUnsaved`.
+- Global hotkeys are off until turned on per action. The boards show Global on for
+  EQ, Mute, Next and Previous preset, but the settings package verified that a
+  global Ctrl+Left/Right takes word navigation from every other app while Isotone
+  runs. This is for the owner to confirm.
+- An output's layout name ("2.1", "5.1" with back or side speakers, "7.1" or wide)
+  is one function, used by the outputs list and the Speakers view; the list called
+  2.1 "5.1".
+- Devices keeps Engine and Status on one line and cuts a long output name short;
+  the presets popover opens where the prototype puts it; the toast's action is in
+  the accent.
+
+**Left for the owner.**
+- `C:\ProgramData\IsoAPO\devices\{8f4d2a10-0000-4000-8000-00000000d157}.bin` was
+  written by one of the surround package's mutation runs: a saved state for a GUID
+  no endpoint has. It does nothing; delete it when convenient. Tests since write
+  saved states only to scratch or self-test directories.
+- IsoAPO.dll has no version resource, so About shows only its output count.
+- Empty table cells show U+2014, as the prototype and Devices.png draw them.
+
 ---
 
 # Where things stand (end of 2026-09-13)
