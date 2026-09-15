@@ -14,6 +14,8 @@ to LF to match the repository; nothing else changed except as listed.
 | `AbstractAPOInfo.cpp`, `AbstractAPOInfo.h` | top level |
 | `helpers/RegistryHelper.cpp`, `helpers/RegistryHelper.h` | `helpers/` |
 | `helpers/StringHelper.cpp`, `helpers/StringHelper.h` | `helpers/` |
+| `helpers/ServiceHelper.cpp`, `helpers/ServiceHelper.h` | `helpers/` |
+| `helpers/PrecisionTimer.h` | `helpers/`, included by `ServiceHelper.cpp` |
 | `stdafx.h` | top level, modified |
 | `License.txt` | top level |
 
@@ -65,3 +67,12 @@ to LF to match the repository; nothing else changed except as listed.
   would not import as written. `uninstall()` restores from the `Child APOs`
   record, not from that file. (Read in the source, not executed.)
 - `load()` throws if a `Child APOs` record has a `Version` other than `2`.
+- `ServiceHelper::restartService` (unmodified; read in the source, not executed
+  here): stops the service's active dependents, then the service, and starts
+  them in reverse. One timer covers the whole restart, so stopping and starting
+  every service share 30 seconds. A service found `START_PENDING` is never sent
+  a stop and times out. A service still not running 5 seconds into the restart
+  is started again, and `StartService` on a service that is by then
+  `START_PENDING` fails with `ERROR_SERVICE_ALREADY_RUNNING`, which throws. The
+  `Service` constructor computes `desiredAccess` from `allowEnumerate` and then
+  opens the service with `SERVICE_ENUMERATE_DEPENDENTS` regardless.

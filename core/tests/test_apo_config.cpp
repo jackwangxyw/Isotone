@@ -433,7 +433,7 @@ TEST_CASE("disabled bands survive export and import") {
     const ApoParseResult r = parse_apo_config(text);
     CHECK(r.warnings.empty());
     REQUIRE(r.state.bands.size() == s.bands.size());
-    // The exporter groups bands by channel mask; compare by frequency.
+    // Compare by frequency; the order has its own test.
     for (const Band& want : s.bands) {
         CAPTURE(want.id);
         const auto it = std::find_if(r.state.bands.begin(), r.state.bands.end(),
@@ -556,6 +556,37 @@ TEST_CASE("a filter line longer than any filter is skipped before it is matched"
     // The longest line a real preset writes still reads.
     const std::string longest = "Filter 1: ON LSC 12 dB Fc " + std::string(40, '1') + ".5 Hz Gain -12.345678901234 dB Q 0.707106781187\n";
     CHECK(parse_apo_config(longest).state.bands.size() == 1);
+}
+
+TEST_CASE("a gain or width too large for a double skips its filter, with a warning") {
+    // from_chars calls these out of range, and they were read as 0: a 400-digit
+    // gain imported as a 0 dB band with nothing reported (review 2026-09-14).
+    // Upstream's wcstod reads them as infinity, which designs no usable filter.
+    const std::string big(400, '9');
+    for (const std::string& line : {"Filter 1: ON PK Fc 100 Hz Gain " + big + " dB Q 1",
+                                    "Filter 1: ON PK Fc 100 Hz Gain -" + big + " dB Q 1",
+                                    "Filter 1: ON PK Fc 100 Hz Gain -3 dB Q " + big,
+                                    std::string("Filter 1: ON PK Fc 100 Hz Gain -3 dB BW Oct 1e999"),
+                                    std::string("Filter 1: ON LS 1e999 dB Fc 100 Hz Gain -3 dB"),
+                                    "Filter 1: ON LP Fc 100 Hz Q " + big}) {
+        CAPTURE(line);
+        const ApoParseResult r = parse_apo_config(line + "\nFilter 2: ON PK Fc 200 Hz Gain -3 dB Q 1\n");
+        REQUIRE(r.state.bands.size() == 1);
+        CHECK(r.state.bands[0].fc == 200.0);
+        REQUIRE(r.warnings.size() == 1);
+        CHECK(r.warnings[0].line == 1);
+    }
+    // A width too large that a later width replaces is not the one used, as
+    // upstream reads them: Q, then bandwidth.
+    const ApoParseResult replaced = parse_apo_config("Filter 1: ON PK Fc 100 Hz Gain -3 dB Q " + big + " BW Oct 1\n");
+    REQUIRE(replaced.state.bands.size() == 1);
+    CHECK(replaced.state.bands[0].width_mode == WidthMode::BandwidthOct);
+    CHECK(replaced.warnings.empty());
+    // Too small reads as 0, as wcstod reads it.
+    const ApoParseResult tiny = parse_apo_config("Filter 1: ON PK Fc 100 Hz Gain 1e-999 dB Q 1\n");
+    REQUIRE(tiny.state.bands.size() == 1);
+    CHECK(tiny.state.bands[0].gain_db == 0.0);
+    CHECK(tiny.warnings.empty());
 }
 
 TEST_CASE("a channel count larger than a stream can carry is bounded, with a warning") {
@@ -920,6 +951,39 @@ TEST_CASE("an export writes for the layout asked for, else the state's own, else
         CHECK(text.find("Channel: 3\n") != std::string::npos);
         CHECK(text.find("Copy: L=0 R=0\n") != std::string::npos);
     }
+}
+
+TEST_CASE("an export read back keeps the bands in their order") {
+    // The exporter wrote one group per channel mask, so bands on different
+    // channels came back reordered: the manual order the user arranged was lost
+    // (review 2026-09-14). Cascaded filters sound the same in any order.
+    EqState s;
+    s.bands.push_back(band_on(1, 100, kAllChannels));
+    s.bands.push_back(band_on(2, 200, bit(0)));
+    s.bands.push_back(band_on(3, 300, kAllChannels));
+    s.bands.push_back(band_on(4, 400, bit(1)));
+    s.bands.push_back(band_on(5, 500, bit(1)));
+    s.bands.push_back(band_on(6, 600, bit(0) | bit(1)));
+    const std::string text = format_apo_config(s);
+    CAPTURE(text);
+    const ApoParseResult r = parse_apo_config(text);
+    CHECK(r.warnings.empty());
+    REQUIRE(r.state.bands.size() == s.bands.size());
+    for (size_t i = 0; i < s.bands.size(); ++i) {
+        CAPTURE(i);
+        CHECK(r.state.bands[i].fc == s.bands[i].fc);
+    }
+    CHECK(r.state.bands[0].channels == kAllChannels);
+    CHECK(r.state.bands[1].channels == bit(0));
+    CHECK(r.state.bands[2].channels == kAllChannels);
+    CHECK(r.state.bands[3].channels == bit(1));
+    CHECK(r.state.bands[4].channels == bit(1));
+    // One Channel line per change, none before bands that start on every channel.
+    CHECK(text.find("Channel: all\n") < text.find("Fc 300"));
+    size_t lines = 0;
+    for (size_t at = text.find("Channel:"); at != std::string::npos; at = text.find("Channel:", at + 1)) ++lines;
+    CHECK(lines == 4);
+    CHECK(text.rfind("Channel:", text.find("Fc 100")) == std::string::npos);
 }
 
 TEST_CASE("remap_channels moves every per-channel value to the same speaker on another layout") {

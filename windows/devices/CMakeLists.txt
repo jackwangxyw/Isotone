@@ -1,9 +1,11 @@
 # Render endpoints for the UI: enumeration, mix format, engine per endpoint,
-# change notifications, and whether IsoAPO is running. Read-only.
+# change notifications, whether IsoAPO is running, and speaker layouts. Read-only
+# except set_speaker_layout, which changes an endpoint's device format.
 add_library(isotone_devices STATIC
     devices.cpp
     device_watcher.cpp
     engine_probe.cpp
+    speaker_layout.cpp
 )
 target_include_directories(isotone_devices PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(isotone_devices PUBLIC isotone_core isotone_transport PRIVATE advapi32 ole32 uuid)

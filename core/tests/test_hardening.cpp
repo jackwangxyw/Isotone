@@ -186,6 +186,39 @@ TEST_CASE("widening a band's channels leaves it untouched where it already was")
     }
 }
 
+TEST_CASE("narrowing a band's channels leaves it untouched where it stays") {
+    // The other direction of the case above: the same bell on both channels,
+    // narrowed to the left. The code was already right; this guards it. Keeping
+    // the state only when the new mask is a superset of the old fails here with
+    // a 0.65 difference on the left (checked 2026-09-14).
+    constexpr uint32_t kAt = 24000;
+    const auto run = [](bool narrow) {
+        EqState s;
+        s.bands.push_back(peaking(40.0, -12.0, 10.0));
+        s.bands[0].channels = (ChannelMask{1} << 0) | (ChannelMask{1} << 1);
+        Mutation m{[=, &s](uint32_t pos) {
+            if (narrow && pos == kAt) {
+                s.bands[0].channels = ChannelMask{1} << 0;
+                return true;
+            }
+            return false;
+        }, nullptr};
+        return render(s, 2.0, 48, m, 40.0);
+    };
+    const Stereo narrowed = run(true);
+    const Stereo both = run(false);
+    double worst = 0.0;
+    for (size_t i = 0; i < narrowed.l.size(); ++i) {
+        worst = std::max(worst, std::abs(static_cast<double>(narrowed.l[i]) - static_cast<double>(both.l[i])));
+    }
+    CAPTURE(worst);
+    CHECK(worst < 1e-6);
+    // The right channel fades the band out without a click and ends flat.
+    CAPTURE(worst_step(narrowed.r));
+    CHECK(worst_step(narrowed.r) < sine_step_limit(1.0, 40.0) * 1.10);
+    CHECK(std::abs(level_db(narrowed.r, narrowed.r.size() - 24000, narrowed.r.size(), 40.0)) < 0.01);
+}
+
 TEST_CASE("re-enabling a band while it is still fading out does not click") {
     EqState s;
     s.bands.push_back(peaking(1000.0, 12.0, 1.0));

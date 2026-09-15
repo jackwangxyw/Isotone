@@ -1806,6 +1806,167 @@ capture.
 The Equalizer APO config dir matched its snapshot after every batch;
 `%ProgramData%\IsoAPO\devices` is empty; no region is held.
 
+## 2026-09-14: Stage 4 prototype, owner's decisions
+
+The owner reviewed an interactive prototype of every screen and state (published
+as an artifact from `docs/design`-derived tokens; the 17 boards stay the look).
+`ui-spec.md` is updated where a screen changed.
+
+**Screens**
+- The first-run output table is also Settings, Outputs, for when outputs change.
+- EQ by ear: the third mark shows its value like the others; a separate Add band
+  button creates the band. The boards had it created on the third mark.
+- The band popover is centred on its band, from the column or the handle.
+- No scale labels under the balance slider.
+- One typeface, Instrument Sans, everywhere: config lines, skipped import lines,
+  hex values and error reasons. A failure's reason is a plain sentence, with no
+  "reason:" label.
+- The curve does not include the preamp. The spectrum has its own dBFS scale and
+  must not clip at the top of the graph.
+- Preamp: a slider and a typed value. Auto is a mode that follows every edit,
+  not a one-off button; moving or typing the preamp turns it off. The slider's
+  −24 to +6 dB range is the prototype's choice.
+- Protected audio "Disabled" in amber stays.
+- The sidebar and tray list only working outputs; orange, red and grey ones are
+  in Devices. Devices has no per-output auto-switch toggle (General has it).
+- With the EQ off, the handles stay where they are, faded.
+- EQ by ear has no speaker picker on surround outputs.
+- Replacing Equalizer APO: the two options keep their fact lines; IsoAPO is
+  preselected and marked Recommended.
+- A preset assigned to several outputs changes on all of them when edited.
+- Closing to the tray with unsaved changes asks to save. Don't save, there or
+  when switching presets, puts the output back to its saved preset.
+- The minimum window size is mocked at 1120 × 760 (sidebar and panel collapsed).
+
+**Devices and install**
+- The Speakers view's layout picker changes the Windows speaker setup, offering
+  only layouts the output supports (the recommendation: an Isotone-only layout
+  would disagree with the channels Windows sends).
+- After an install, repair or uninstall the UI restarts the audio service and
+  tests the outputs, as Equalizer APO's Device Selector does: read in upstream
+  `DeviceSelector/DeviceTestThread.cpp:49` (restart, then a test per device,
+  retrying other install modes with another restart) and `DeviceSelector.cpp:228`
+  (a Windows restart is offered only when the service restart failed).
+- Windows approval is asked once, when a change is first made (Settings, Outputs;
+  first run; or a Devices action), and covers every change until the app exits.
+  Per-output actions stay in Devices.
+- Audio enhancements turned off on an output (FxProperties
+  `{1da5d803-...},5`) are turned back on, as Equalizer APO's install does
+  (`DeviceAPOInfo.cpp:607`, "force-enable enhancements") and its Device Selector
+  offers for an installed device ("Audio enhancements will be enabled").
+  devicetool's install does it already; `repair` skips an endpoint IsoAPO is in
+  (`plan_repair`), so an installed output with enhancements off has no command.
+
+**Backend work these need:** built the same day (next entry); the live tests
+need the owner.
+
+## 2026-09-14: Backend for the prototype's decisions
+
+Built in two parallel worktrees, merged, then reviewed and extended by the lead.
+None of it was run for real: every registry, service and format change here
+was a dry run or a check.
+
+- **`restart-audio [--dry-run]`** (elevated, machine lock) calls upstream's
+  `ServiceHelper::restartService(L"AudioSrv")`, vendored unmodified with
+  `PrecisionTimer.h`; its quirks are listed in VENDORED.md (one 30 s timer for
+  stop and start, a service found starting is not stopped). The dry run reads
+  the service and the running services that depend on it.
+- **`enable-enhancements <endpoint> [--dry-run]`** (elevated, machine lock)
+  deletes FxProperties `{1da5d803-...},5` when present, as upstream's install
+  does. Not journaled (one delete), but it undoes an interrupted command's
+  journal first. The install record is left alone: it holds the flag as it was
+  before IsoAPO, which uninstall restores. `status` offers it as a remedy when
+  IsoAPO is in a slot and the flag is non-zero (not while interrupted), and
+  `roundtrip` checks it with the flag set, clear and absent.
+- **`serve --pipe <name> --parent <pid>`** and **`DevicetoolSession`**: the app
+  creates the pipe (first instance, one instance, no remote clients; the user,
+  SYSTEM and Administrators), launches serve with ShellExecuteEx "runas", and
+  checks the process that connected is the one it launched. Serve opens the
+  pipe with identification-only security, refuses a pipe whose server is not
+  `--parent`, and runs each request (fields separated by U+001F) as a child of
+  its own exe, read through an anonymous pipe, so every check, journal, lock
+  and exit code is the command's own. A temp file in the user's folder was
+  rejected: an unelevated process could swap it between the child writing it
+  and serve reading it. Refused in a request: serve, roundtrip, `--output`.
+  Administrators is in the DACL for serve running as another account (an
+  administrator's password typed at a standard user's prompt); an unelevated
+  token holds that group deny-only.
+- **Speaker layout** (`windows/devices/speaker_layout.h`, the library's one
+  write): the four layouts (masks checked against ksmedia.h and the core),
+  `supported_speaker_layouts` (exclusive-mode `IsFormatSupported` at the
+  device's rate and depth, after checking the current format passes, so a
+  check that says nothing is an error, not an empty list),
+  `check_speaker_layout` and `set_speaker_layout` over the undocumented
+  `IPolicyConfig` (IID `{f8679f50-...}`, vtable from six public sources, listed
+  in the header). The set refuses unless `GetDeviceFormat` matches
+  `PKEY_AudioEngine_DeviceFormat` first, and compares the device and mix
+  formats read back field by field. `PKEY_AudioEndpoint_PhysicalSpeakers` is not
+  set: it is absent on every active render endpoint here, and upstream reads it
+  only for a format without a mask. devicetool's **`layouts <endpoint>`** and
+  **`set-layout <endpoint> --layout stereo|2.1|5.1|7.1 [--dry-run]`** wrap it;
+  the dry run is the check.
+
+Read-only results on this machine: CABLE Input and CABLE In 16ch support all
+four layouts, Steam Streaming stereo, 5.1 and 7.1, the two monitors and the
+Anker stereo only; on all 7 active endpoints `IPolicyConfig`'s reads matched the
+property and `IAudioClient::GetMixFormat`, and the format builder reproduced
+each endpoint's stored device and mix format field for field.
+
+**Tests:** `devicetool_tests` (new, 14 cases: the session against direct runs
+byte for byte, argument quoting, refusals, a wrong `--parent`, serve exiting
+when the app does, enable-enhancements dry runs on every render endpoint,
+layouts and every layout's set-layout dry run agreeing on every endpoint),
+`devices_tests` (format builder, supported layouts read-only). The test helpers
+refuse any changing command without `--dry-run`, since CI runners are elevated.
+Mutation-checked: 10 mutations of serve, enable-enhancements, restart-audio
+and the remedy, 11 of the format builder, 4 of the layout commands (two of
+which passed a first version of the test, which was then tightened). ctest 7
+of 7, the APO self test, transport and reference checks pass.
+
+**Not verified, needs the owner:** the approval prompt and its decline; a real
+`restart-audio` (cuts all audio for a few seconds); a real `enable-enhancements`
+(CABLE Input's flag is absent, so it would change nothing unless enhancements
+are first turned off in Sound settings); a real `set-layout` on CABLE Input,
+unelevated first (0x80070005 means it needs elevation), then back to stereo;
+whether open streams are invalidated by it. **Found, not investigated:**
+`roundtrip` on the Headset endpoint `{136126fa-...}` fails with "the prepared
+install hosts the APO in its slot", with the committed build as well.
+
+## 2026-09-14: Leftovers of the final backend review
+
+A spot check of the review (a fresh build, every test, and mutation checks of
+eight of its fixes) found no wrong fix, and these gaps. Each fix below has a test
+that fails without it, mutation-checked (fix reverted or broken, test fails, fix
+restored).
+
+- **Narrowing a band's channels had no test.** Only widening was tested. The code
+  was right; `narrowing a band's channels leaves it untouched where it stays`
+  guards it. Keeping filter state only when the new mask is a superset of the old
+  fails it with a 0.646 difference on the left channel.
+- **A Gain or width too large for a double imported as 0.** `from_chars` calls it
+  out of range and `number_or_zero` read 0: a 400-digit gain was a 0 dB band, with
+  no warning. Upstream's `wcstod` reads infinity, which designs no usable filter
+  (`BiQuadFilterFactory.cpp:121`, `:138`). The line is now skipped with a warning.
+  A value too small still reads as 0, as `wcstod` reads it, and a too-large width
+  that a later width replaces is not the one used.
+- **Export reordered bands.** `format_apo_config` wrote one group per channel
+  mask, so bands on different channels came back in another order and the manual
+  order was lost. It now writes the bands in order with a `Channel:` line wherever
+  the channels change. Cascaded filters sound the same either way.
+- **Two transport fixes were only in the APO self test**: every form of an
+  endpoint GUID naming the same region, and the saved file's header being stamped.
+  `transport_tests` (new, in ctest) checks both without IsoAPO or the registry;
+  naming the region from the raw string, or removing the stamp, fails it.
+- **The parser's `catch (regex_error)` is still unreached.** 47 hostile Filter
+  lines under the length limit (30 in the review's check, 17 more on 2026-09-14:
+  long digit, no-break space and `e` runs without their unit, repeated Fc, Gain,
+  Q and BW fields, long type tokens) made MSVC's regex throw none. The catch stays,
+  as upstream's loader has one; it has no test.
+
+**Tests:** `core_tests` 205 cases on MSVC 19.51 and GCC 16.1 (warnings as errors),
+ctest 6 of 6 with `transport_tests`, the APO self test, the transport check and
+the reference check pass.
+
 ---
 
 # Where things stand (end of 2026-09-13)
@@ -1818,9 +1979,9 @@ The Equalizer APO config dir matched its snapshot after every batch;
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 202 cases green on MSVC 19.51 and GCC 16.1.0 after the final backend review |
+| 2. Core | complete | 205 cases green on MSVC 19.51 and GCC 16.1.0 after the review's leftovers (2026-09-14) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
-| 4. UI | designed (17 screens), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
+| 4. UI | designed (17 screens, then an interactive prototype of every state reviewed 2026-09-14), Qt 6 Quick chosen, not coded | `docs/ui-spec.md`, `docs/design/screens/*.png` |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push

@@ -3,6 +3,8 @@
 //
 // isotone_devices. Read-only against this machine's endpoints: nothing here
 // changes a device, the registry or a real shared region, or opens a stream.
+// set_speaker_layout is never called; check_speaker_layout makes its checks
+// without the write.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -12,13 +14,16 @@
 #include <windows.h>
 #include <winsvc.h>
 
+#include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
 #include <mmreg.h>
 #include <ks.h>
 #include <ksmedia.h>
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -32,7 +37,10 @@
 #include "device_watcher.h"
 #include "devices.h"
 #include "engine_probe.h"
+#include "speaker_layout.h"
+#include "isotone/apo_config.h"
 #include "isotone/param_block.h"
+#include "isotone/speakers.h"
 #include "shared_mapping.h"
 
 using namespace isotone::devices;
@@ -282,50 +290,50 @@ std::string state_of(const Facts& f) { return isoapo_state_name(classify_isoapo_
 }  // namespace
 
 // Each case is the first branch of devicetool's isoapo_state
-// (windows/devicetool/main.cpp lines 1688 to 1705) that the facts reach, and a
+// (windows/devicetool/main.cpp lines 1733 to 1754) that the facts reach, and a
 // neighbour that differs only in the fact that branch tests.
 TEST_CASE("classify_isoapo_state follows devicetool's isoapo_state") {
     //                      iso_slot eapo_slot record over  journal
-    SUBCASE("interrupted: the journal wins over everything (1691)") {
+    SUBCASE("interrupted: the journal wins over everything (1736)") {
         CHECK(state_of({false, false, false, false, true}) == "interrupted");
         CHECK(state_of({true, true, true, true, true}) == "interrupted");
         CHECK(state_of({true, false, false, false, true}) == "interrupted");     // would be unrecorded
         CHECK(state_of({false, false, true, false, true}) == "interrupted");     // would be detached
         CHECK(state_of({false, false, false, false, false}) == "not_installed");
     }
-    SUBCASE("unrecorded: IsoAPO in a slot without a record (1692)") {
+    SUBCASE("unrecorded: IsoAPO in a slot without a record (1738)") {
         CHECK(state_of({true, false, false, false, false}) == "unrecorded");
         CHECK(state_of({true, true, false, true, false}) == "unrecorded");       // before alongside
         CHECK(state_of({true, false, true, false, false}) == "installed");
     }
-    SUBCASE("alongside_equalizerapo: both in slots, IsoAPO recorded (1693)") {
+    SUBCASE("alongside_equalizerapo: both in slots, IsoAPO recorded (1739)") {
         CHECK(state_of({true, true, true, false, false}) == "alongside_equalizerapo");
         CHECK(state_of({true, true, true, true, false}) == "alongside_equalizerapo");   // over does not matter here
         CHECK(state_of({true, false, true, true, false}) == "installed");
     }
-    SUBCASE("installed: IsoAPO in a slot, recorded, no Equalizer APO in slots (1695)") {
+    SUBCASE("installed: IsoAPO in a slot, recorded, no Equalizer APO in slots (1740)") {
         CHECK(state_of({true, false, true, false, false}) == "installed");
         CHECK(state_of({true, false, true, true, false}) == "installed");
     }
-    SUBCASE("not_installed: IsoAPO in no slot, no record (1699)") {
+    SUBCASE("not_installed: IsoAPO in no slot, no record (1748)") {
         CHECK(state_of({false, false, false, false, false}) == "not_installed");
         CHECK(state_of({false, true, false, false, false}) == "not_installed");
         CHECK(state_of({false, true, false, true, false}) == "not_installed");   // Equalizer APO's record alone
         CHECK(state_of({false, false, true, false, false}) == "detached");
     }
-    SUBCASE("replaced_by_equalizerapo: record, no slot, Equalizer APO's record names IsoAPO (1700)") {
+    SUBCASE("replaced_by_equalizerapo: record, no slot, Equalizer APO's record names IsoAPO (1749)") {
         CHECK(state_of({false, true, true, true, false}) == "replaced_by_equalizerapo");
         CHECK(state_of({false, false, true, true, false}) == "replaced_by_equalizerapo");   // slots not consulted
         CHECK(state_of({false, true, true, false, false}) == "detached");
     }
-    SUBCASE("detached: record, no slot, the rest (1702 to 1704)") {
+    SUBCASE("detached: record, no slot, the rest (1751 to 1753)") {
         CHECK(state_of({false, false, true, false, false}) == "detached");
         CHECK(state_of({false, true, true, false, false}) == "detached");
     }
 }
 
 TEST_CASE("classify_backend follows devicetool's backend") {
-    // windows/devicetool/main.cpp lines 606 and 676: slots only.
+    // windows/devicetool/main.cpp lines 622 and 692: slots only.
     CHECK(std::string(backend_name(classify_backend(facts({false, false, true, true, true})))) == "none");
     CHECK(std::string(backend_name(classify_backend(facts({true, false, false, false, false})))) == "native");
     CHECK(std::string(backend_name(classify_backend(facts({false, true, false, false, false})))) == "equalizerapo");
@@ -942,4 +950,379 @@ TEST_CASE("endpoints, formats and engines match isotone-devicetool") {
     }
     CHECK(render == mine.size());
     MESSAGE(render << " render endpoints compared, " << compared_formats << " with a format");
+}
+
+// ---------------------------------------------------------------------------
+
+TEST_CASE("speaker layouts match ksmedia.h and the core") {
+    using namespace isotone;
+    REQUIRE(std::size(kSpeakerLayouts) == 4);
+    for (size_t i = 0; i < std::size(kSpeakerLayouts); ++i) {
+        const SpeakerLayoutSpec& s = kSpeakerLayouts[i];
+        CHECK(static_cast<size_t>(s.layout) == i);
+        CHECK(speaker_layout_spec(s.layout) == &s);
+        CHECK(std::popcount(s.mask) == s.channels);
+        SpeakerLayout parsed = SpeakerLayout::seven_point_one;
+        CHECK(parse_speaker_layout(s.name, &parsed));
+        CHECK(parsed == s.layout);
+    }
+    CHECK(kSpeakerLayouts[0].channels == 2);
+    CHECK(kSpeakerLayouts[0].mask == KSAUDIO_SPEAKER_STEREO);
+    CHECK(kSpeakerLayouts[0].mask == (kSpeakerFrontLeft | kSpeakerFrontRight));
+    CHECK(kSpeakerLayouts[0].mask == default_speaker_mask(2));
+    CHECK(kSpeakerLayouts[1].channels == 3);
+    CHECK(kSpeakerLayouts[1].mask == KSAUDIO_SPEAKER_2POINT1);
+    CHECK(kSpeakerLayouts[1].mask == (kSpeakerFrontLeft | kSpeakerFrontRight | kSpeakerLowFrequency));
+    CHECK(default_speaker_mask(3) == 0);   // 2.1 exists only with its mask
+    CHECK(kSpeakerLayouts[2].channels == 6);
+    CHECK(kSpeakerLayouts[2].mask == KSAUDIO_SPEAKER_5POINT1_SURROUND);
+    CHECK(kSpeakerLayouts[2].mask == (kSpeakerFrontLeft | kSpeakerFrontRight | kSpeakerFrontCenter |
+                                      kSpeakerLowFrequency | kSpeakerSideLeft | kSpeakerSideRight));
+    CHECK(kSpeakerLayouts[2].mask == default_speaker_mask(6));
+    CHECK(kSpeakerLayouts[3].channels == 8);
+    CHECK(kSpeakerLayouts[3].mask == KSAUDIO_SPEAKER_7POINT1_SURROUND);
+    CHECK(kSpeakerLayouts[3].mask == (kSpeakerFrontLeft | kSpeakerFrontRight | kSpeakerFrontCenter |
+                                      kSpeakerLowFrequency | kSpeakerBackLeft | kSpeakerBackRight |
+                                      kSpeakerSideLeft | kSpeakerSideRight));
+    CHECK(kSpeakerLayouts[3].mask == default_speaker_mask(8));
+    CHECK(std::string(kSpeakerLayouts[0].name) == "stereo");
+    CHECK(std::string(kSpeakerLayouts[1].name) == "2.1");
+    CHECK(std::string(kSpeakerLayouts[2].name) == "5.1");
+    CHECK(std::string(kSpeakerLayouts[3].name) == "7.1");
+
+    SpeakerLayout untouched = SpeakerLayout::five_point_one;
+    for (const char* bad : {"", "Stereo", "7.1 ", "quad", "5.1surround", "2"}) {
+        CHECK_FALSE(parse_speaker_layout(bad, &untouched));
+    }
+    CHECK(untouched == SpeakerLayout::five_point_one);
+    CHECK(speaker_layout_spec(static_cast<SpeakerLayout>(4)) == nullptr);
+    CHECK(speaker_layout_spec(static_cast<SpeakerLayout>(-1)) == nullptr);
+
+    SUBCASE("current_speaker_layout") {
+        const auto layout_of = [](const std::vector<uint8_t>& b) {
+            SpeakerLayout l = SpeakerLayout::two_point_one;
+            const bool found = current_speaker_layout(parse_device_format(b.data(), b.size()), &l);
+            return found ? std::string(speaker_layout_spec(l)->name) : std::string("none");
+        };
+        CHECK(layout_of(blob_ex(WAVE_FORMAT_PCM, 2, 48000, 16)) == "stereo");   // defaulted mask
+        CHECK(layout_of(blob_extensible(3, 48000, 24, 24, 0xB, KSDATAFORMAT_SUBTYPE_PCM)) == "2.1");
+        CHECK(layout_of(blob_extensible(6, 48000, 24, 24, 0x60F, KSDATAFORMAT_SUBTYPE_PCM)) == "5.1");
+        CHECK(layout_of(blob_extensible(8, 48000, 24, 24, 0x63F, KSDATAFORMAT_SUBTYPE_PCM)) == "7.1");
+        CHECK(layout_of(blob_extensible(6, 48000, 24, 24, 0x3F, KSDATAFORMAT_SUBTYPE_PCM)) == "none");   // back 5.1
+        CHECK(layout_of(blob_extensible(3, 48000, 24, 24, 0, KSDATAFORMAT_SUBTYPE_PCM)) == "none");
+        CHECK(layout_of(blob_extensible(4, 48000, 24, 24, 0x33, KSDATAFORMAT_SUBTYPE_PCM)) == "none");
+        CHECK(layout_of(blob_extensible(2, 48000, 24, 24, 0x30, KSDATAFORMAT_SUBTYPE_PCM)) == "none");
+        SpeakerLayout l = SpeakerLayout::two_point_one;
+        CHECK_FALSE(current_speaker_layout(DeviceFormat{}, &l));
+        CHECK(l == SpeakerLayout::two_point_one);
+    }
+}
+
+namespace {
+
+struct Expect {
+    WORD channels;
+    DWORD rate;
+    WORD bits;
+    WORD valid;
+    WORD block;
+    DWORD bytes_per_second;
+    DWORD mask;
+    GUID sub;
+};
+
+void check_format(const WAVEFORMATEXTENSIBLE& f, const Expect& e) {
+    CHECK(f.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE);
+    CHECK(f.Format.nChannels == e.channels);
+    CHECK(f.Format.nSamplesPerSec == e.rate);
+    CHECK(f.Format.wBitsPerSample == e.bits);
+    CHECK(f.Format.nBlockAlign == e.block);
+    CHECK(f.Format.nAvgBytesPerSec == e.bytes_per_second);
+    CHECK(f.Format.cbSize == 22);
+    CHECK(f.Samples.wValidBitsPerSample == e.valid);
+    CHECK(f.dwChannelMask == e.mask);
+    CHECK(IsEqualGUID(f.SubFormat, e.sub));
+    // And as the rest of the library reads it.
+    const DeviceFormat d = parse_device_format(reinterpret_cast<const uint8_t*>(&f), sizeof(f));
+    REQUIRE(d.present);
+    CHECK(d.channels == e.channels);
+    CHECK(d.channel_mask == e.mask);
+    CHECK_FALSE(d.mask_defaulted);
+}
+
+DeviceFormat parsed(const std::vector<uint8_t>& b) { return parse_device_format(b.data(), b.size()); }
+
+}  // namespace
+
+TEST_CASE("build_layout_formats") {
+    const GUID pcm = KSDATAFORMAT_SUBTYPE_PCM;
+    const GUID flt = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    LayoutFormats f;
+
+    SUBCASE("16-bit PCM, plain WAVEFORMATEX, to 5.1") {
+        REQUIRE(build_layout_formats(parsed(blob_ex(WAVE_FORMAT_PCM, 2, 44100, 16)), SpeakerLayout::five_point_one, &f) ==
+                S_OK);
+        check_format(f.endpoint, {6, 44100, 16, 16, 12, 529200, 0x60F, pcm});
+        check_format(f.mix, {6, 44100, 32, 32, 24, 1058400, 0x60F, flt});
+    }
+    SUBCASE("24-bit in 32, extensible, to 7.1") {
+        REQUIRE(build_layout_formats(parsed(blob_extensible(2, 48000, 32, 24, 0x3, pcm)), SpeakerLayout::seven_point_one,
+                                     &f) == S_OK);
+        check_format(f.endpoint, {8, 48000, 32, 24, 32, 1536000, 0x63F, pcm});
+        check_format(f.mix, {8, 48000, 32, 32, 32, 1536000, 0x63F, flt});
+    }
+    SUBCASE("float32, extensible, to 2.1") {
+        REQUIRE(build_layout_formats(parsed(blob_extensible(8, 96000, 32, 32, 0x63F, flt)), SpeakerLayout::two_point_one,
+                                     &f) == S_OK);
+        check_format(f.endpoint, {3, 96000, 32, 32, 12, 1152000, 0xB, flt});
+        check_format(f.mix, {3, 96000, 32, 32, 12, 1152000, 0xB, flt});
+    }
+    SUBCASE("float32, plain WAVEFORMATEX, to stereo") {
+        REQUIRE(build_layout_formats(parsed(blob_ex(WAVE_FORMAT_IEEE_FLOAT, 6, 44100, 32)), SpeakerLayout::stereo, &f) ==
+                S_OK);
+        check_format(f.endpoint, {2, 44100, 32, 32, 8, 352800, 0x3, flt});
+        check_format(f.mix, {2, 44100, 32, 32, 8, 352800, 0x3, flt});
+    }
+    SUBCASE("24-bit PCM, extensible, to stereo, as the cable is") {
+        REQUIRE(build_layout_formats(parsed(blob_extensible(8, 48000, 24, 24, 0x63F, pcm)), SpeakerLayout::stereo, &f) ==
+                S_OK);
+        check_format(f.endpoint, {2, 48000, 24, 24, 6, 288000, 0x3, pcm});
+        check_format(f.mix, {2, 48000, 32, 32, 8, 384000, 0x3, flt});
+    }
+    SUBCASE("the scratch tool's 7.1 bytes") {
+        // What fmt.cpp passed for "set <id> 8 0x63F 24" on 2026-09-12, built by
+        // hand as it did: the formats the owner's change was made with.
+        WAVEFORMATEXTENSIBLE want{};
+        want.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        want.Format.nChannels = 8;
+        want.Format.nSamplesPerSec = 48000;
+        want.Format.wBitsPerSample = 24;
+        want.Format.nBlockAlign = 24;
+        want.Format.nAvgBytesPerSec = 48000 * 24;
+        want.Format.cbSize = 22;
+        want.Samples.wValidBitsPerSample = 24;
+        want.dwChannelMask = 0x63F;
+        want.SubFormat = pcm;
+        WAVEFORMATEXTENSIBLE mix = want;
+        mix.Format.wBitsPerSample = 32;
+        mix.Format.nBlockAlign = 32;
+        mix.Format.nAvgBytesPerSec = 48000 * 32;
+        mix.Samples.wValidBitsPerSample = 32;
+        mix.SubFormat = flt;
+        REQUIRE(build_layout_formats(parsed(blob_extensible(2, 48000, 24, 24, 0x3, pcm)), SpeakerLayout::seven_point_one,
+                                     &f) == S_OK);
+        CHECK(std::memcmp(&f.endpoint, &want, sizeof(want)) == 0);
+        CHECK(std::memcmp(&f.mix, &mix, sizeof(mix)) == 0);
+    }
+    SUBCASE("refusals leave the output alone") {
+        const HRESULT invalid = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        const DeviceFormat good = parsed(blob_extensible(2, 48000, 24, 24, 0x3, pcm));
+        LayoutFormats sentinel;
+        sentinel.endpoint.Format.nChannels = 77;
+        const auto refused = [&](const DeviceFormat& current, SpeakerLayout layout) {
+            LayoutFormats out = sentinel;
+            const HRESULT hr = build_layout_formats(current, layout, &out);
+            CHECK(out.endpoint.Format.nChannels == 77);
+            return hr;
+        };
+        CHECK(build_layout_formats(good, SpeakerLayout::stereo, nullptr) == E_POINTER);
+        CHECK(refused(good, static_cast<SpeakerLayout>(4)) == E_INVALIDARG);
+        CHECK(refused(DeviceFormat{}, SpeakerLayout::stereo) == invalid);   // not present
+        CHECK(refused(parsed(blob_extensible(2, 48000, 16, 16, 0x3, KSDATAFORMAT_SUBTYPE_ALAW)), SpeakerLayout::stereo) ==
+              invalid);
+        DeviceFormat d = good;
+        d.bits_per_sample = 0;
+        CHECK(refused(d, SpeakerLayout::stereo) == invalid);
+        d = good;
+        d.bits_per_sample = 12;
+        d.valid_bits = 12;
+        CHECK(refused(d, SpeakerLayout::stereo) == invalid);
+        d = good;
+        d.valid_bits = 0;
+        CHECK(refused(d, SpeakerLayout::stereo) == invalid);
+        d = good;
+        d.valid_bits = 32;   // above the 24-bit container
+        CHECK(refused(d, SpeakerLayout::stereo) == invalid);
+        d = good;
+        d.bits_per_sample = 0xFFF8;   // block align fits a WORD at 8 channels, bytes per second does not
+        d.valid_bits = 24;
+        d.sample_rate = 192000;
+        CHECK(refused(d, SpeakerLayout::seven_point_one) == invalid);
+    }
+}
+
+namespace {
+
+// IAudioClient::GetMixFormat, documented, to compare IPolicyConfig's with.
+DeviceFormat client_mix_format(const std::wstring& device_id) {
+    DeviceFormat out;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                reinterpret_cast<void**>(&enumerator)))) {
+        return out;
+    }
+    IMMDevice* device = nullptr;
+    HRESULT hr = enumerator->GetDevice(device_id.c_str(), &device);
+    enumerator->Release();
+    if (FAILED(hr)) return out;
+    IAudioClient* client = nullptr;
+    hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client));
+    device->Release();
+    if (FAILED(hr)) return out;
+    WAVEFORMATEX* mix = nullptr;
+    if (SUCCEEDED(client->GetMixFormat(&mix)) && mix != nullptr) {
+        out = parse_device_format(reinterpret_cast<const uint8_t*>(mix), sizeof(WAVEFORMATEX) + mix->cbSize);
+    }
+    CoTaskMemFree(mix);
+    client->Release();
+    return out;
+}
+
+void check_same(const DeviceFormat& got, const DeviceFormat& want) {
+    REQUIRE_MESSAGE(got.present, got.error);
+    REQUIRE_MESSAGE(want.present, want.error);
+    CHECK(got.channels == want.channels);
+    CHECK(got.sample_rate == want.sample_rate);
+    CHECK(got.bits_per_sample == want.bits_per_sample);
+    CHECK(got.valid_bits == want.valid_bits);
+    CHECK(got.sample_format == want.sample_format);
+    CHECK(got.channel_mask == want.channel_mask);
+    CHECK(got.mask_defaulted == want.mask_defaulted);
+}
+
+std::string describe(const DeviceFormat& f) {
+    if (!f.present) return "none (" + f.error + ")";
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%u ch %u Hz %u/%u bits %s mask 0x%x%s", f.channels, f.sample_rate,
+                  f.bits_per_sample, f.valid_bits,
+                  f.sample_format == SampleFormat::pcm ? "pcm" : f.sample_format == SampleFormat::ieee_float ? "float" : "other",
+                  f.channel_mask, f.mask_defaulted ? " (defaulted)" : "");
+    return buf;
+}
+
+}  // namespace
+
+TEST_CASE("supported_speaker_layouts and check_speaker_layout refuse bad arguments") {
+    Com com;
+    REQUIRE(SUCCEEDED(com.hr));
+    CHECK(supported_speaker_layouts(L"{798436d2-8c71-4834-9248-00ccbaaca00a}", nullptr) == E_POINTER);
+    CHECK(check_speaker_layout(L"{798436d2-8c71-4834-9248-00ccbaaca00a}", SpeakerLayout::stereo, nullptr) == E_POINTER);
+    LayoutChange change;
+    change.error = "stale";
+    // The layout is refused before the endpoint is looked up.
+    CHECK(check_speaker_layout(L"junk", static_cast<SpeakerLayout>(4), &change) == E_INVALIDARG);
+    CHECK(change.error == "not a speaker layout");
+    if (const std::string why = no_audio_reason(); !why.empty()) {
+        MESSAGE("SKIPPED the endpoint refusals: " << why);
+        return;
+    }
+    std::vector<SpeakerLayout> layouts{SpeakerLayout::stereo};
+    for (const wchar_t* missing : {L"junk", L"", L"{00000000-0000-0000-0000-000000000001}"}) {
+        CHECK(supported_speaker_layouts(missing, &layouts) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+        CHECK(layouts.empty());
+        CHECK(check_speaker_layout(missing, SpeakerLayout::stereo, &change) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+        CHECK_FALSE(change.error.empty());
+        CHECK_FALSE(change.set_called);
+    }
+
+    std::vector<Endpoint> endpoints;
+    REQUIRE(enumerate_render_endpoints(&endpoints) == S_OK);
+    const auto inactive = std::find_if(endpoints.begin(), endpoints.end(),
+                                       [](const Endpoint& e) { return e.state != DEVICE_STATE_ACTIVE; });
+    if (inactive == endpoints.end()) {
+        MESSAGE("no inactive render endpoint; ERROR_NOT_READY not exercised");
+        return;
+    }
+    INFO("inactive endpoint " << narrow(inactive->friendly_name) << " " << narrow(inactive->guid));
+    layouts = {SpeakerLayout::stereo};
+    CHECK(supported_speaker_layouts(inactive->guid, &layouts) == HRESULT_FROM_WIN32(ERROR_NOT_READY));
+    CHECK(layouts.empty());
+    CHECK(check_speaker_layout(inactive->id, SpeakerLayout::stereo, &change) == HRESULT_FROM_WIN32(ERROR_NOT_READY));
+}
+
+TEST_CASE("supported_speaker_layouts and check_speaker_layout on every active render endpoint") {
+    Com com;
+    REQUIRE(SUCCEEDED(com.hr));
+    if (const std::string why = no_audio_reason(); !why.empty()) {
+        MESSAGE("SKIPPED: " << why);
+        return;
+    }
+    std::vector<Endpoint> endpoints;
+    REQUIRE(enumerate_render_endpoints(&endpoints) == S_OK);
+    size_t probed = 0;
+    for (const Endpoint& e : endpoints) {
+        if (e.state != DEVICE_STATE_ACTIVE) continue;
+        ++probed;
+        INFO("endpoint " << narrow(e.friendly_name) << " " << narrow(e.guid) << ", " << describe(e.format));
+
+        std::vector<SpeakerLayout> layouts;
+        const HRESULT hr = supported_speaker_layouts(e.id, &layouts);
+        std::string names;
+        for (SpeakerLayout l : layouts) names += std::string(" ") + speaker_layout_spec(l)->name;
+        MESSAGE(narrow(e.friendly_name) << " " << narrow(e.guid) << ": " << describe(e.format) << "; hr "
+                                        << hex(hr) << ", supported:" << (names.empty() ? " none" : names));
+        const bool documented = hr == S_OK || hr == kCurrentFormatRefused || hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+                                hr == AUDCLNT_E_SERVICE_NOT_RUNNING || hr == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED ||
+                                hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        CHECK_MESSAGE(documented, hex(hr));
+        if (hr != S_OK) {
+            CHECK(layouts.empty());
+            continue;
+        }
+        // A subset of the four, in their order, each once.
+        CHECK(layouts.size() <= std::size(kSpeakerLayouts));
+        for (size_t i = 1; i < layouts.size(); ++i) CHECK(static_cast<int>(layouts[i - 1]) < static_cast<int>(layouts[i]));
+        // The layout the output has now is one it supports: its format is the
+        // current format, which was asked first.
+        SpeakerLayout now = SpeakerLayout::stereo;
+        const bool has_now = current_speaker_layout(e.format, &now);
+        if (has_now) {
+            CHECK(std::find(layouts.begin(), layouts.end(), now) != layouts.end());
+        }
+        // Asking again gives the same answer.
+        std::vector<SpeakerLayout> again;
+        CHECK(supported_speaker_layouts(e.guid, &again) == S_OK);
+        CHECK(again == layouts);
+
+        for (const SpeakerLayoutSpec& spec : kSpeakerLayouts) {
+            INFO("layout " << spec.name);
+            LayoutChange c;
+            const HRESULT check = check_speaker_layout(e.guid, spec.layout, &c);
+            const bool supported = std::find(layouts.begin(), layouts.end(), spec.layout) != layouts.end();
+            CHECK_FALSE(c.set_called);
+            CHECK_FALSE(c.after.present);
+            CHECK_FALSE(c.mix_after.present);
+            CHECK_FALSE(c.property_after.present);
+            CHECK(c.device_id == e.id);
+            if (!supported) {
+                CHECK(check == AUDCLNT_E_UNSUPPORTED_FORMAT);
+                CHECK_FALSE(c.policy_before.present);   // IPolicyConfig not reached
+                continue;
+            }
+            REQUIRE_MESSAGE(check == S_OK, hex(check) << " " << c.error);
+            CHECK(c.error.empty());
+            // IPolicyConfig's slots 0 and 1 read what the documented calls read.
+            check_same(c.policy_before, e.format);
+            check_same(c.mix_before, client_mix_format(e.id));
+            LayoutFormats want;
+            REQUIRE(build_layout_formats(e.format, spec.layout, &want) == S_OK);
+            CHECK(std::memcmp(&c.requested, &want, sizeof(want)) == 0);
+            if (has_now && spec.layout == now) {
+                // The formats built for the layout the output has are the ones it
+                // has: the device format from the property, the mix format from
+                // IAudioClient::GetMixFormat. Upstream's reading of a format
+                // without a mask aside, field for field.
+                DeviceFormat built = parse_device_format(reinterpret_cast<const uint8_t*>(&c.requested.endpoint),
+                                                         sizeof(WAVEFORMATEXTENSIBLE));
+                built.mask_defaulted = e.format.mask_defaulted;
+                check_same(built, e.format);
+                DeviceFormat built_mix = parse_device_format(reinterpret_cast<const uint8_t*>(&c.requested.mix),
+                                                             sizeof(WAVEFORMATEXTENSIBLE));
+                const DeviceFormat mix = client_mix_format(e.id);
+                built_mix.mask_defaulted = mix.mask_defaulted;
+                check_same(built_mix, mix);
+            }
+        }
+    }
+    MESSAGE(probed << " active render endpoints probed");
 }

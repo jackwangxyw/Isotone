@@ -4,7 +4,8 @@
 // Render endpoints as the UI's Devices table needs them: identity, state,
 // default roles, the engine's mix format, and which EQ engine the registry puts
 // on each. Read-only: nothing here changes a device, its format or the
-// registry, and nothing opens an audio stream.
+// registry, and nothing opens an audio stream. The library's one write is
+// set_speaker_layout (speaker_layout.h).
 //
 // COM: the caller initialises COM on the calling thread, in either apartment
 // (the MMDevice API objects used here are free-threaded). Every function that

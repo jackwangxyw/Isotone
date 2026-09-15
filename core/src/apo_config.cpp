@@ -767,6 +767,12 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& gi
 
             if (std::regex_search(rest, m, re.gain)) {
                 if (type_uses_gain(info.type)) {
+                    // Past double's range wcstod gives infinity, which designs no
+                    // usable filter; from_chars refuses it, which read as 0 dB.
+                    if (std::isinf(read_like_wcstod(m.str(1)))) {
+                        result.warnings.push_back({line_no, "Gain too large to read, filter ignored"});
+                        continue;
+                    }
                     band.gain_db = number_or_zero(m.str(1));
                 }
             } else if (type_uses_gain(info.type)) {
@@ -781,18 +787,25 @@ ApoParseResult parse_apo_config(const std::string& text, const ChannelLayout& gi
             // written before Fc for shelves only; each one found replaces the last.
             double width = 0.0;
             WidthMode mode = WidthMode::Q;
+            std::string width_found;
             if (std::regex_search(rest, m, re.q)) {
-                width = number_or_zero(m.str(1));
+                width_found = m.str(1);
                 mode = WidthMode::Q;
             }
             if (!is_shelf && std::regex_search(rest, m, re.bw)) {
-                width = number_or_zero(m.str(1));
+                width_found = m.str(1);
                 mode = WidthMode::BandwidthOct;
             }
             if (is_shelf && std::regex_search(rest, m, re.slope)) {
-                width = number_or_zero(m.str(1));
+                width_found = m.str(1);
                 mode = WidthMode::SlopeDb;
             }
+            if (std::isinf(read_like_wcstod(width_found))) {
+                // As with the gain: the width upstream uses would be infinite.
+                result.warnings.push_back({line_no, "width too large to read, filter ignored"});
+                continue;
+            }
+            width = number_or_zero(width_found);
             if (width < 0.0) {
                 // Upstream designs this, unstable; the processor would play it as
                 // nothing. Neither is what the file meant.
@@ -939,58 +952,48 @@ std::string format_apo_config(const EqState& written, const ApoFormatOptions& op
         out << "Preamp: " << format_double(std::clamp(state.preamp_db, kMinLevelDb, kMaxLevelDb)) << " dB\n";
     }
 
-    // Group bands by channel mask so a Channel: line is written once per group
-    // rather than once per band.
-    std::vector<ChannelMask> masks;
-    for (const Band& b : state.bands) {
-        if (std::find(masks.begin(), masks.end(), b.channels) == masks.end()) {
-            masks.push_back(b.channels);
-        }
-    }
-
+    // Bands in their own order, with a Channel: line wherever the channels
+    // change, so an export read back keeps the order the user arranged. A file
+    // starts on every channel.
+    ChannelMask selected = kAllChannels;
     int index = 1;
-    for (ChannelMask mask : masks) {
-        if (mask == kAllChannels) {
-            if (masks.size() > 1) {
+    for (const Band& given : state.bands) {
+        // As the processor plays it: width clamped, and off with no width.
+        const Band b = effective_band(given);
+        // A band that cannot be written as numbers is left out.
+        if (!std::isfinite(b.fc) || !std::isfinite(b.gain_db) || !std::isfinite(b.width)) {
+            continue;
+        }
+        if (!b.enabled && !options.write_disabled_as_none) {
+            continue;
+        }
+        if (given.channels != selected) {
+            if (given.channels == kAllChannels) {
                 out << "Channel: all\n";
-            }
-        } else {
-            out << "Channel:";
-            for (uint32_t c = 0; c < kMaskChannels; ++c) {
-                if ((mask & (ChannelMask{1} << c)) != 0) {
-                    out << " " << channel_name(c);
+            } else {
+                out << "Channel:";
+                for (uint32_t c = 0; c < kMaskChannels; ++c) {
+                    if ((given.channels & (ChannelMask{1} << c)) != 0) {
+                        out << " " << channel_name(c);
+                    }
                 }
+                out << "\n";
             }
-            out << "\n";
+            selected = given.channels;
         }
 
-        for (const Band& given : state.bands) {
-            if (given.channels != mask) {
-                continue;
-            }
-            // As the processor plays it: width clamped, and off with no width.
-            const Band b = effective_band(given);
-            // A band that cannot be written as numbers is left out.
-            if (!std::isfinite(b.fc) || !std::isfinite(b.gain_db) || !std::isfinite(b.width)) {
-                continue;
-            }
-            if (!b.enabled && !options.write_disabled_as_none) {
-                continue;
-            }
-
-            // A disabled band is the same line with OFF, which upstream skips and
-            // the parser reads back as a disabled band.
-            const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
-            out << "Filter " << index++ << ": " << (b.enabled ? "ON " : "OFF ") << token(b) << " ";
-            if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
-                out << format_double(written_slope(b)) << " dB ";
-            }
-            out << "Fc " << fc_text(b) << " Hz";
-            if (type_uses_gain(b.type)) {
-                out << " Gain " << format_double(written_gain(b)) << " dB";
-            }
-            out << width_text(b, width_rate) << "\n";
+        // A disabled band is the same line with OFF, which upstream skips and
+        // the parser reads back as a disabled band.
+        const bool is_shelf = b.type == FilterType::LowShelf || b.type == FilterType::HighShelf;
+        out << "Filter " << index++ << ": " << (b.enabled ? "ON " : "OFF ") << token(b) << " ";
+        if (b.width_mode == WidthMode::SlopeDb && is_shelf) {
+            out << format_double(written_slope(b)) << " dB ";
         }
+        out << "Fc " << fc_text(b) << " Hz";
+        if (type_uses_gain(b.type)) {
+            out << " Gain " << format_double(written_gain(b)) << " dB";
+        }
+        out << width_text(b, width_rate) << "\n";
     }
 
     // Channel trims ride on Preamp inside a Channel block, which is how Peace

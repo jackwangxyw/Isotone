@@ -14,6 +14,11 @@ file and `isotone-plan.md` section 7 disagree, this file wins.
    core curve, draggable handles. Screenshot it at 1440 × 900 and compare with
    `docs/design/screens/Main.png` before building anything else.
 
+The 17 boards below are the approved look. The interactive prototype of 2026-09-14
+(every screen and state, published as an artifact; its decisions are in
+`decisions.md`, "Stage 4 prototype: owner's decisions") overrides a board where
+they disagree.
+
 ## Sources
 
 - **Screens (source of truth for look):** `docs/design/screens/<Board>.png`, one
@@ -37,7 +42,7 @@ file and `isotone-plan.md` section 7 disagree, this file wins.
 | `SurroundCollapsed` | Dark, 7.1 output, sidebar and Speakers collapsed |
 | `Speakers` | Speakers view for outputs with more than two channels |
 | `Appearance` | Settings, Appearance |
-| `EqByEar` | EQ by ear, sweep: cursor and S/T/E marks on the graph, play, nudge, log slider, Start/Top/End buttons (each captures the current frequency), Peak/Dip, Clear. Setting the third mark creates the band in the preset; no create button |
+| `EqByEar` | EQ by ear, sweep: cursor and S/T/E marks on the graph, play, nudge, log slider, Start/Top/End buttons (each captures the current frequency), Peak/Dip, Clear, Add band. Each mark only records its frequency; Add band, enabled once all three are set, creates the band |
 | `EqByEarAB` | EQ by ear, A/B: reference and test tones, alternate, test level, recorded points on the graph, threshold, Clear points. Recording a point refits the bands automatically; no fit button |
 | `Devices` | Outputs table (engine, status, format, preset) and a detail panel with Repair, Test, Uninstall |
 | `SettingsGeneral` | Startup, presets, graph range, spectrum options |
@@ -53,7 +58,10 @@ number, type icon and name, frequency, gain, Q, channels, enable; values
 click-to-edit. The list scrolls; a band EQ by ear creates is added at the end,
 selected, scrolled into view, and drawn on the graph.
 
-Settings pages share one header with tabs: General, Appearance, Shortcuts, About.
+Settings pages share one header with tabs: General, Outputs, Appearance, Shortcuts,
+About. Outputs is the first-run table (output, format, current engine, engine
+choice): Change asks for Windows approval once, Apply runs every change, restarts
+audio and tests.
 
 ## Framework: Qt 6 Quick
 
@@ -85,15 +93,28 @@ Settings pages share one header with tabs: General, Appearance, Shortcuts, About
   which exists only while a stream is open.
 - Endpoint identifiers: every API takes the braced GUID, the bare GUID or the
   full device ID `IMMDevice::GetId` returns (`canonical_endpoint_guid`).
-- Device operations shell out to `isotone-devicetool` elevated, with
-  `--output <new file>` so the elevated process's JSON can be read back (the
-  UI waits for exit, then reads the file). Exit codes: 0 ok, 1 refused or
+- Device operations go through one elevated `isotone-devicetool serve` for the
+  life of the app: `DevicetoolSession` (`windows/devicetool/session.h`) creates
+  the pipe, launches serve with the Windows approval prompt the first time a
+  change is made (`start` returns `ERROR_CANCELLED` when it is declined), and
+  `run` returns each command's exit code and JSON; drive it from one worker
+  thread. Served: list, status, test, install, uninstall, repair,
+  enable-enhancements, restart-audio, layouts, set-layout. After an install,
+  repair or uninstall the UI runs `restart-audio`, then `test` on the outputs
+  changed, as Equalizer APO's Device Selector does; it offers a Windows restart
+  only when `restart-audio` fails. An output with enhancements off shows the
+  `enable-enhancements` remedy. Exit codes: 0 ok, 1 refused or
   failed (`reason`), 2 bad arguments, 3 not elevated, 4 another run holds the
   lock. `status` reports `isoapo.state` (`not_installed`, `installed`,
   `alongside_equalizerapo`, `replaced_by_equalizerapo`, `detached`,
   `unrecorded`, `interrupted`) and `isoapo.remedies`, the commands that fix
   it; Repair, Uninstall and the replace choice follow those. Engine changes
   raise no device notification: re-read the engine after devicetool exits.
+- Speaker layout (the Speakers view's picker): `supported_speaker_layouts` and
+  `set_speaker_layout` in `windows/devices/speaker_layout.h`, called from the UI
+  directly (whether `SetDeviceFormat` needs elevation is not yet measured; if it
+  does, `set-layout` runs through the session). The picker offers only the
+  supported layouts. A format change raises `DeviceWatcher`'s `format_changed`.
 - Tray presence for device auto-switch (plan 7.6).
 
 Verify before building: the current Qt 6 LTS and that its open-source modules
@@ -159,33 +180,43 @@ small labels 11–12.
 
 **Sidebar:** 248 px open, 72 px collapsed, toggled by the panel icon.
 - Open: logo, nav (Equalizer, Speakers when surround, EQ by ear, Devices),
-  Outputs list (name, backend, status dot), Settings.
+  Outputs list (name, backend, status dot) of working outputs only (IsoAPO
+  installed, or Equalizer APO active); the rest are in Devices. Settings.
 - Collapsed: icon rail; Outputs becomes a button with a status dot that opens the
   same list as a popover; the device name moves under the preset name in the top
   bar.
 
 **Top bar** (76 px): preset name + chevron, which opens the presets popover
 (switch, rename, duplicate, delete, new, save, import, export). Under the name
-only the output name, and only when the sidebar is collapsed. Right side: Preamp value + Auto (Auto sets
-preamp to `auto_preamp_db` with the device's speaker mask, which covers routing and bass management and never boosts); L / R /
+only the output name, and only when the sidebar is collapsed. Right side: Preamp slider (−24 to +6 dB, filled from 0), its click-to-edit
+value, and Auto. Auto is a mode saved with the preset (`EqState::auto_preamp`):
+while on, the preamp is `auto_preamp_db` with the device's speaker mask after
+every edit, which covers routing and bass management and never boosts; moving
+the slider or typing a value turns it off. L / R /
 L+R (stereo) or "Showing: All speakers" group picker (surround); Spectrum On /
 Off; EQ toggle. The spectrum is the processed output; there is no pre-EQ view.
 
 **Graph:** log 20 Hz–20 kHz, ±15 dB view with labels at ±12/±6/0, spectrum
 behind, per-band bells, composite curve and fill. Handles r 12, selected r 14
 with a ring at r 20; number inside, numbered by position. Hover readout chip
-(frequency and composite dB).
+(frequency and composite dB). The curve does not include the preamp. The
+spectrum has its own scale, 0 dBFS at the top of the plot to −90 dBFS at the
+bottom, so it reaches the top only at full scale. With the EQ off the handles
+stay where they are, faded.
 
 **Band strip:** header "Bands 12" and a Manual / By frequency segmented control, with no label or icon. Columns
 112 px: number badge + type, vertical gain slider 132 px (±12 dB, fill from 0),
 gain, fc, Q, target (L+R, or a speaker group) + enable toggle. Gain, fc and Q
 are click-to-edit values: click, type, Enter. The type name opens the band
-popover. Double-click a slider resets it to 0 dB (plan 7.2). Scrolls sideways
+popover, centred on the band's column; right-clicking a handle opens it centred
+on the handle, below it where there is no room above. Double-click a slider
+resets it to 0 dB (plan 7.2). Scrolls sideways
 with a right-edge fade and a thumb. Add band and the right-hand panel stay pinned.
 
 **Channels panel** (stereo): 240 px, collapses to a 52 px strip with a vertical
 label and the balance value.
-- Balance: number −1.0 to +1.0, step 0.1, plus slider filled from centre.
+- Balance: number −1.0 to +1.0, step 0.1, plus slider filled from centre, with
+  no scale labels under it.
   Only the opposite side is turned down, linearly: at balance b its gain is
   1 − |b| (0.5 is −6.02 dB), and at ±1.0 it is muted with the speaker mute bit,
   since a trim cannot reach silence. The favoured side never changes. Written as
@@ -195,7 +226,9 @@ label and the balance value.
 **Speakers panel** (surround): 240 px, collapses to a 52 px strip showing the
 layout. Rows Layout, Crossover, Upmix, Lip sync; Speaker setup button; Mute.
 
-**Speakers view:** layout picker (Stereo, 2.1, 5.1, 7.1) and Test tones. Table:
+**Speakers view:** layout picker (Stereo, 2.1, 5.1, 7.1) and Test tones. The
+picker changes the Windows speaker setup for the output, after a confirmation,
+and offers only the layouts the output supports. Table:
 speaker, level dB, distance (m) or delay (ms) by toggle, polarity, test tone,
 mute, solo. Distance sets delay: (farthest − this) / 343 m/s. Test tone: pink
 noise, one speaker at a time, −30 dBFS RMS (the level home-theatre test discs

@@ -21,7 +21,7 @@ $vs = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools'
 $cm = "$vs\Common7\IDE\CommonExtensions\Microsoft\CMake"
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" -S . -B build -G Ninja"
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" --build build"
-cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\ctest.exe`" --test-dir build"   # core, compat, measure, devices tests
+cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\ctest.exe`" --test-dir build"   # core, transport, devicetool, compat, measure, devices tests
 Push-Location build\windows\apo; .\isotone-apo-selftest.exe; Pop-Location      # IsoAPO hosted in-process
 python tools\check_shm_transport.py build                                       # cross-process transport
 python tools\gen_reference.py --check                                          # scipy reference data
@@ -46,8 +46,10 @@ core/tests/           doctest; reference/ is scipy-generated response data
 windows/transport/    named shared region (ParamBlock + ring), per-endpoint saved state
 windows/apo/          IsoAPO.dll, IsoAPO-selftest.dll (Local\ namespace), isotone-apo-selftest
 windows/compat/       isotone-compat and its library: Isotone.txt, config.txt attach, loopback
-windows/devicetool/   isotone-devicetool: list/status/test/install/uninstall/repair/roundtrip; upstream code vendored
-windows/devices/      isotone_devices: render endpoints, their format and engine, change notifications, engine probe
+windows/devicetool/   isotone-devicetool: list/status/test/install/uninstall/repair/roundtrip, enable-enhancements,
+                      restart-audio, layouts/set-layout, serve; DevicetoolSession (session.h); upstream code vendored
+windows/devices/      isotone_devices: render endpoints, their format and engine, change notifications, engine probe,
+                      speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
 tools/                gen_reference.py, check_shm_transport.py

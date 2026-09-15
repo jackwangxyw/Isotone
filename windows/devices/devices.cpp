@@ -344,7 +344,7 @@ EngineInfo read_engine(const std::wstring& endpoint) {
     return info;
 }
 
-// windows/devicetool/main.cpp cmd_list and cmd_status (lines 606 and 676).
+// windows/devicetool/main.cpp cmd_list and cmd_status (lines 622 and 692).
 Backend classify_backend(const EngineInfo& f) {
     return f.isoapo_in_slots && f.equalizerapo_in_slots ? Backend::conflict
            : f.isoapo_in_slots                          ? Backend::native
@@ -352,16 +352,16 @@ Backend classify_backend(const EngineInfo& f) {
                                                         : Backend::none;
 }
 
-// windows/devicetool/main.cpp isoapo_state (lines 1688 to 1705), without the
+// windows/devicetool/main.cpp isoapo_state (lines 1733 to 1754), without the
 // remedies: its branches that differ only in remedies are one state here.
 IsoApoState classify_isoapo_state(const EngineInfo& f) {
-    if (f.journal) return IsoApoState::interrupted;                                            // 1691
-    if (f.isoapo_in_slots && !f.isoapo_record) return IsoApoState::unrecorded;                 // 1692
-    if (f.isoapo_in_slots && f.equalizerapo_in_slots) return IsoApoState::alongside_equalizerapo;   // 1693
-    if (f.isoapo_in_slots) return IsoApoState::installed;                                      // 1695 to 1697
-    if (!f.isoapo_record) return IsoApoState::not_installed;                                   // 1699
-    if (f.equalizerapo_over_isoapo) return IsoApoState::replaced_by_equalizerapo;              // 1700
-    return IsoApoState::detached;                                                              // 1702 to 1704
+    if (f.journal) return IsoApoState::interrupted;                                            // 1736
+    if (f.isoapo_in_slots && !f.isoapo_record) return IsoApoState::unrecorded;                 // 1738
+    if (f.isoapo_in_slots && f.equalizerapo_in_slots) return IsoApoState::alongside_equalizerapo;   // 1739
+    if (f.isoapo_in_slots) return IsoApoState::installed;                                      // 1740 to 1741
+    if (!f.isoapo_record) return IsoApoState::not_installed;                                   // 1748
+    if (f.equalizerapo_over_isoapo) return IsoApoState::replaced_by_equalizerapo;              // 1749
+    return IsoApoState::detached;                                                              // 1751 to 1753
 }
 
 const char* backend_name(Backend backend) {

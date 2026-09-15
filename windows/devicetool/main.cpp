@@ -11,7 +11,12 @@
 //   isotone-devicetool uninstall <endpoint> [--dry-run]
 //   isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]
 //   isotone-devicetool test      <endpoint>
+//   isotone-devicetool enable-enhancements <endpoint> [--dry-run]
+//   isotone-devicetool restart-audio [--dry-run]
+//   isotone-devicetool layouts   <endpoint>
+//   isotone-devicetool set-layout <endpoint> --layout stereo|2.1|5.1|7.1 [--dry-run]
 //   isotone-devicetool roundtrip <endpoint> [...]
+//   isotone-devicetool serve     --pipe <name> --parent <pid>
 // Every command also takes --output <absolute path>.
 //
 // <endpoint> is an endpoint GUID, with or without braces, or a full device ID
@@ -22,7 +27,12 @@
 //
 // --dry-run runs upstream's install and uninstall logic unchanged with every
 // registry write intercepted (RegistryDryRun), prints the writes, and needs no
-// elevation. Without it, install/uninstall/repair require an elevated process.
+// elevation. Without it, install/uninstall/repair/enable-enhancements require
+// an elevated process; so does restart-audio, whose dry run only reads the
+// service's state.
+//
+// serve runs commands for the UI in one elevated process, so Windows asks for
+// approval once: see cmd_serve.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -52,7 +62,10 @@
 
 #include "DeviceAPOInfo.h"
 #include "dry_run.h"
+#include "helpers/PrecisionTimer.h"
 #include "helpers/RegistryHelper.h"
+#include "speaker_layout.h"
+#include "helpers/ServiceHelper.h"
 
 using isotone::devicetool::DryRunRegistry;
 using isotone::devicetool::OperationLog;
@@ -177,9 +190,12 @@ int fail(const std::string& command, const std::string& reason, const std::strin
 }
 
 // A failure the caller tells apart by its exit code and `error` field, not its text.
+std::string failure_json(const char* error, const std::string& command, const std::string& reason) {
+    return std::string("{\"command\":") + (command.empty() ? "null" : quote(command)) + ",\"ok\":false,\"error\":\"" +
+           error + "\",\"reason\":" + quote(reason) + "}";
+}
 int fail_with(int exit_code, const char* error, const std::string& command, const std::string& reason) {
-    std::printf("{\"command\":%s,\"ok\":false,\"error\":\"%s\",\"reason\":%s}\n",
-                command.empty() ? "null" : quote(command).c_str(), error, quote(reason).c_str());
+    std::printf("%s\n", failure_json(error, command, reason).c_str());
     return exit_code;
 }
 
@@ -192,8 +208,13 @@ int usage(const std::string& command, const std::string& reason) {
                  "  isotone-devicetool uninstall <endpoint> [--dry-run]\n"
                  "  isotone-devicetool repair    [--mode mfx|efx|gfx] [--dry-run]\n"
                  "  isotone-devicetool test      <endpoint>\n"
+                 "  isotone-devicetool enable-enhancements <endpoint> [--dry-run]\n"
+                 "  isotone-devicetool restart-audio [--dry-run]\n"
+                 "  isotone-devicetool layouts   <endpoint>\n"
+                 "  isotone-devicetool set-layout <endpoint> --layout stereo|2.1|5.1|7.1 [--dry-run]\n"
                  "  isotone-devicetool roundtrip <endpoint> [--mode mfx|efx|gfx] [--replace-equalizerapo\n"
                  "                               [--simulate-equalizerapo PRE,POST[,unhosted|unregistered][,deleted|fallback]]]\n"
+                 "  isotone-devicetool serve     --pipe <name> --parent <pid>\n"
                  "Every command takes --output <absolute path>: the JSON goes to that new file.\n"
                  "<endpoint>: {guid}, guid, {0.0.0.00000000}.{guid} (render) or {0.0.1.00000000}.{guid} (capture).\n"
                  "Without --mode: the mode of Equalizer APO's post-mix slot where it is on the endpoint,\n"
@@ -908,6 +929,33 @@ void restore_extras(const Endpoint& e, const Extras& x) {
     }
 }
 
+// Enhancements are off, as upstream's DeviceAPOInfo::load reads the flag: a
+// REG_DWORD other than 0. A flag that cannot be read reads as not set, as
+// try_read_string reads a value.
+bool enhancements_disabled(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    bool present = false;
+    try {
+        return value_type(fx, kDisableEnhancements, &present) == REG_DWORD && present &&
+               read_dword(fx, kDisableEnhancements) != 0;
+    } catch (RegistryException&) {
+        return false;
+    }
+}
+
+// enable-enhancements: what upstream's install does to the flag ("force-enable
+// enhancements", DeviceAPOInfo::install), deleting it whatever its value.
+// Returns whether it was there. The install record is left alone: its
+// Isotone.DisableEnhancements is the flag as it was before IsoAPO, which
+// uninstall puts back, and turning enhancements on later does not change what
+// the device had then. Throws RegistryException.
+bool enable_enhancements(const Endpoint& e) {
+    const std::wstring fx = e.key + L"\\FxProperties";
+    if (!RegistryHelper::keyExists(fx) || !RegistryHelper::valueExists(fx, kDisableEnhancements)) return false;
+    RegistryHelper::deleteValue(fx, kDisableEnhancements);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Replacing Equalizer APO
 
@@ -1483,6 +1531,8 @@ std::string error_text(const std::function<void()>& step) {
         message = utf8(ex.getMessage());
     } catch (DeviceException& ex) {
         message = utf8(ex.getMessage());
+    } catch (ServiceException& ex) {
+        message = utf8(ex.getMessage());
     } catch (std::exception& ex) {
         message = ex.what();
     } catch (...) {
@@ -1689,12 +1739,16 @@ IsoState isoapo_state(const Endpoint& e) {
     const Slots slots = read_slots(e);
     const bool record = read_record(kIsoChildApos, e.guid).exists;
     if (RegistryHelper::keyExists(journal_key(e))) return {"interrupted", {"repair"}};
-    if (slots.isoapo && !record) return {"unrecorded", {}};
-    if (slots.isoapo && slots.equalizerapo)
-        return {"alongside_equalizerapo", {"install --replace-equalizerapo", "uninstall"}};
     if (slots.isoapo) {
-        if (isoapo_replaced_equalizerapo(e)) return {"installed", {"install --replace-equalizerapo"}};
-        return {"installed", {}};
+        IsoState s = !record              ? IsoState{"unrecorded", {}}
+                     : slots.equalizerapo ? IsoState{"alongside_equalizerapo", {"install --replace-equalizerapo", "uninstall"}}
+                     : isoapo_replaced_equalizerapo(e) ? IsoState{"installed", {"install --replace-equalizerapo"}}
+                                                       : IsoState{"installed", {}};
+        // With IsoAPO in a slot, install does not touch the flag again and
+        // repair skips the endpoint: enhancements turned off since have this
+        // command only.
+        if (enhancements_disabled(e)) s.remedies.push_back("enable-enhancements");
+        return s;
     }
     if (!record) return {"not_installed", {}};
     if (equalizerapo_over_isoapo(e))
@@ -2009,6 +2063,117 @@ int cmd_repair(std::optional<DeviceAPOInfo::InstallMode> mode, bool dry_run) {
     return all_ok ? 0 : kExitFailed;
 }
 
+// One value deleted or none, so no journal: a run cut short has either written
+// it or not. An interrupted command's journal is still undone first, as the
+// other registry-changing commands do, or undoing it later would put the flag
+// back from its snapshot.
+int cmd_enable_enhancements(const Endpoint& e, bool dry_run) {
+    if (e.input) return fail("enable-enhancements", "capture endpoints are not supported: IsoAPO is an output EQ");
+    CommandScope scope(dry_run);
+    std::string undone;
+    if (const std::string error = error_text([&] { undone = recover_interrupted(e); }); !error.empty())
+        return fail("enable-enhancements", error, scope.operations_field());
+    const bool was_disabled = enhancements_disabled(e);
+    bool changed = false;
+    if (const std::string error = error_text([&] { changed = enable_enhancements(e); }); !error.empty())
+        return fail("enable-enhancements", error, scope.operations_field());
+    std::printf("{\"command\":\"enable-enhancements\",\"ok\":true,\"dry_run\":%s,\"guid\":%s,\"undid_interrupted\":%s,"
+                "\"enhancements_were_disabled\":%s,\"changed\":%s,\"operations\":%s}\n",
+                boolean(dry_run), quote(e.guid).c_str(), undone.empty() ? "null" : quote(undone).c_str(),
+                boolean(was_disabled), boolean(changed), operations_json(scope.operations()).c_str());
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// restart-audio: what Equalizer APO's Device Selector does after it changes
+// devices (DeviceSelector/DeviceTestThread.cpp), with upstream's ServiceHelper:
+// the running services that depend on AudioSrv stop first, AudioSrv starts
+// again before them, and 30 seconds is the limit for the whole restart.
+
+const wchar_t* const kAudioService = L"AudioSrv";   // upstream's spelling
+
+const char* service_state_name(DWORD state) {
+    switch (state) {
+        case SERVICE_STOPPED: return "stopped";
+        case SERVICE_START_PENDING: return "start_pending";
+        case SERVICE_STOP_PENDING: return "stop_pending";
+        case SERVICE_RUNNING: return "running";
+        case SERVICE_CONTINUE_PENDING: return "continue_pending";
+        case SERVICE_PAUSE_PENDING: return "pause_pending";
+        case SERVICE_PAUSED: return "paused";
+    }
+    return "unknown";
+}
+
+struct ServiceView {
+    std::string error;                 // empty when read
+    DWORD state = 0;
+    std::vector<std::string> restarts;   // in the order upstream stops them: active dependents, then the service
+};
+
+// With query rights only, so a dry run needs no elevation: the state, and the
+// services upstream's restartService would restart (the active dependents only
+// when the service is running).
+ServiceView view_service(const wchar_t* name) {
+    ServiceView v;
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (scm == nullptr) {
+        v.error = "OpenSCManager failed (error " + std::to_string(GetLastError()) + ")";
+        return v;
+    }
+    SC_HANDLE service = OpenServiceW(scm, name, SERVICE_QUERY_STATUS | SERVICE_ENUMERATE_DEPENDENTS);
+    SERVICE_STATUS_PROCESS status{};
+    DWORD needed = 0, count = 0;
+    if (service == nullptr) {
+        v.error = "OpenService " + utf8(name) + " failed (error " + std::to_string(GetLastError()) + ")";
+    } else if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed)) {
+        v.error = "QueryServiceStatusEx failed (error " + std::to_string(GetLastError()) + ")";
+    } else {
+        v.state = status.dwCurrentState;
+        // A first call that succeeds found no dependents (upstream's getActiveDependentServices).
+        if (v.state == SERVICE_RUNNING && !EnumDependentServicesW(service, SERVICE_ACTIVE, nullptr, 0, &needed, &count)) {
+            const DWORD first_error = GetLastError();
+            std::vector<BYTE> buffer(needed);
+            const LPENUM_SERVICE_STATUSW list = reinterpret_cast<LPENUM_SERVICE_STATUSW>(buffer.data());
+            if (first_error != ERROR_MORE_DATA || !EnumDependentServicesW(service, SERVICE_ACTIVE, list, needed, &needed, &count)) {
+                v.error = "EnumDependentServices failed (error " +
+                          std::to_string(first_error != ERROR_MORE_DATA ? first_error : GetLastError()) + ")";
+                count = 0;
+            }
+            for (DWORD i = 0; i < count; ++i) v.restarts.push_back(utf8(list[i].lpServiceName));
+        }
+        v.restarts.push_back(utf8(name));
+    }
+    if (service != nullptr) CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    return v;
+}
+
+int cmd_restart_audio(bool dry_run) {
+    const ServiceView before = view_service(kAudioService);
+    if (!before.error.empty()) return fail("restart-audio", before.error, std::string(",\"dry_run\":") + boolean(dry_run));
+    const std::string facts = std::string(",\"dry_run\":") + boolean(dry_run) + ",\"service\":" + quote(std::wstring(kAudioService)) +
+                              ",\"state_before\":\"" + service_state_name(before.state) + "\",\"restarts\":" +
+                              string_array(before.restarts);
+    if (dry_run) {
+        std::printf("{\"command\":\"restart-audio\",\"ok\":true%s,\"state_after\":null,\"seconds\":null}\n", facts.c_str());
+        return 0;
+    }
+    PrecisionTimer timer;
+    timer.start();
+    const std::string error = error_text([] { ServiceHelper::restartService(kAudioService); });
+    const double seconds = timer.stop();
+    const ServiceView after = view_service(kAudioService);
+    char elapsed[32];
+    std::snprintf(elapsed, sizeof(elapsed), "%.3f", seconds);
+    const std::string outcome = facts + ",\"state_after\":" +
+                                (after.error.empty() ? quote(std::string(service_state_name(after.state))) : "null") +
+                                ",\"seconds\":" + elapsed;
+    if (!error.empty()) return fail("restart-audio", error, outcome);
+    std::printf("{\"command\":\"restart-audio\",\"ok\":true%s}\n", outcome.c_str());
+    return 0;
+}
+
 struct Simulation {
     std::wstring pre, post;         // vendor APOs Equalizer APO replaced, pre-mix and post-mix
     bool hosted = true;             // false: "use original APO" was off in Equalizer APO
@@ -2314,6 +2479,76 @@ std::string check_kills(const Endpoint& e, const DryRunRegistry& start, const ch
            (error.empty() ? "" : ",\"error\":" + quote(error)) + ",\"failed\":" + string_array(failed) + "}";
 }
 
+// enable-enhancements and the remedy status offers for it, in copies of `start`
+// with the flag at 1, at 0 and absent, IsoAPO in a slot (its class put in MFX
+// with a record, where it is in none) and in none, and an interrupted command.
+std::string check_enhancements(const Endpoint& e, const DryRunRegistry& start, bool* ok) {
+    Expectations expect;
+    const std::wstring fx = e.key + L"\\FxProperties";
+    const auto offered = [&] {
+        const IsoState s = isoapo_state(e);
+        return std::find(s.remedies.begin(), s.remedies.end(), "enable-enhancements") != s.remedies.end();
+    };
+    const auto set_flag = [&](int flag) {   // -1: absent
+        if (flag >= 0) RegistryHelper::writeDWORDValue(fx, kDisableEnhancements, static_cast<unsigned long>(flag));
+        else if (RegistryHelper::valueExists(fx, kDisableEnhancements)) RegistryHelper::deleteValue(fx, kDisableEnhancements);
+    };
+    const std::string error = error_text([&] {
+        for (bool in_slot : {true, false}) {
+            DryRunRegistry state = start;
+            ScopedDryRun scope(&state);
+            if (RegistryHelper::keyExists(journal_key(e))) RegistryHelper::deleteKey(journal_key(e));
+            if (!RegistryHelper::keyExists(fx)) {
+                // As upstream's install makes it.
+                RegistryHelper::takeOwnership(e.key);
+                RegistryHelper::makeWritable(e.key);
+                RegistryHelper::createKey(fx);
+            }
+            if (in_slot && !read_slots(e).isoapo) {
+                RegistryHelper::writeValue(fx, kEffectSlots[3].value, RegistryHelper::getGuidString(ISOAPO_POST_MIX_GUID));
+                RegistryHelper::createKey(kIsoChildApos);
+                RegistryHelper::createKey(iso_record_key(e));
+            }
+            for (const SlotName& slot : kEffectSlots) {
+                std::wstring clsid;
+                if (!in_slot && try_read_string(fx, slot.value, &clsid) && is_isoapo(clsid)) RegistryHelper::deleteValue(fx, slot.value);
+            }
+            for (int flag : {1, 0, -1}) {
+                DryRunRegistry flagged = state;
+                ScopedDryRun flagged_scope(&flagged);
+                set_flag(flag);
+                const std::string name = std::string(in_slot ? "IsoAPO in a slot" : "IsoAPO in no slot") + ", flag " +
+                                         (flag < 0 ? "absent" : std::to_string(flag));
+                expect(enhancements_disabled(e) == (flag == 1), name + ": read as upstream reads it");
+                expect(offered() == (in_slot && flag == 1), name + ": status offers enable-enhancements");
+                const size_t before = flagged.operations().size();
+                const bool changed = enable_enhancements(e);
+                const std::vector<RegistryOperation> ops(flagged.operations().begin() + static_cast<std::ptrdiff_t>(before),
+                                                         flagged.operations().end());
+                expect(changed == (flag >= 0) && ops.size() == (flag >= 0 ? 1u : 0u), name + ": deletes the flag when present, and nothing else");
+                expect(ops.empty() || (ops[0].operation == L"delete value" && _wcsicmp(ops[0].key.c_str(), fx.c_str()) == 0 &&
+                                       _wcsicmp(ops[0].valuename.c_str(), kDisableEnhancements) == 0),
+                       name + ": the write is the flag's deletion");
+                expect(!RegistryHelper::valueExists(fx, kDisableEnhancements) && !enhancements_disabled(e) && !offered(),
+                       name + ": enhancements on after");
+                expect(!enable_enhancements(e) && flagged.operations().size() == before + ops.size(), name + ": a second run writes nothing");
+            }
+            if (in_slot) {
+                // An interrupted command: repair is the remedy, whatever the flag.
+                DryRunRegistry interrupted = state;
+                ScopedDryRun interrupted_scope(&interrupted);
+                set_flag(1);
+                RegistryHelper::createKey(kPending);
+                RegistryHelper::createKey(journal_key(e));
+                expect(!offered() && isoapo_state(e).name == std::string("interrupted"), "interrupted: repair, not enable-enhancements");
+            }
+        }
+    });
+    expect(error.empty(), "threw: " + error);
+    *ok = expect.ok();
+    return std::string("{\"ok\":") + boolean(*ok) + ",\"failed\":" + string_array(expect.failed) + "}";
+}
+
 // A device with no Equalizer APO on it (its own uninstall run, or its classes
 // deleted where it left no record), with `vendor` in the slot `mode` writes
 // IsoAPO to and `deleted_vendor` in a slot `mode` deletes, when given, and
@@ -2383,9 +2618,12 @@ int cmd_roundtrip_installed(const Endpoint& e) {
     DryRunRegistry outer;
     ScopedDryRun outer_scope(&outer);
     Expectations expect;
-    std::string retick, kills, legacy;
+    std::string retick, kills, legacy, enhancements = "null";
     const std::string error = error_text([&] {
         DryRunRegistry installed;
+        bool enhancements_ok = false;
+        enhancements = check_enhancements(e, installed, &enhancements_ok);
+        expect(enhancements_ok, "enable-enhancements cases");
         std::vector<std::wstring> device;
         std::wstring child;
         KnownMode known;
@@ -2435,9 +2673,9 @@ int cmd_roundtrip_installed(const Endpoint& e) {
     });
     expect(error.empty(), "threw: " + error);
     std::printf("{\"command\":\"roundtrip\",\"ok\":%s,\"already_installed\":true,\"failed\":%s,\"legacy_repair\":%s,"
-                "\"device_selector_retick\":[%s],\"kills\":[%s]}\n",
+                "\"device_selector_retick\":[%s],\"kills\":[%s],\"enable_enhancements\":%s}\n",
                 boolean(expect.ok()), string_array(expect.failed).c_str(), legacy.empty() ? "null" : legacy.c_str(),
-                retick.c_str(), kills.c_str());
+                retick.c_str(), kills.c_str(), enhancements.c_str());
     return expect.ok() ? 0 : kExitFailed;
 }
 
@@ -2719,9 +2957,14 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
     // device prepared without Equalizer APO (with a vendor APO in IsoAPO's slot
     // and another in a slot the mode deletes, or with none).
     Expectations more;
-    std::string retick_json, kills_json;
+    std::string retick_json, kills_json, enhancements_json = "null";
     const std::string more_error = error_text([&] {
         const std::wstring fx_key = e.key + L"\\FxProperties";
+        {
+            bool enhancements_ok = false;
+            enhancements_json = check_enhancements(e, DryRunRegistry(), &enhancements_ok);
+            more(enhancements_ok, "enable-enhancements cases");
+        }
         const auto restore_driver_slot = [&](const std::vector<std::wstring>& device) {
             // A driver update: IsoAPO's slot back to what the driver declares.
             for (size_t i = 0; i < device.size(); ++i) {
@@ -2973,7 +3216,7 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                 "\"extras_after_simulated_driver_update\":%s,\"extras_after_repair_and_uninstall\":%s,"
                 "\"survives_missing_fx_properties\":%s,\"record_only_uninstall_restores\":%s,"
                 "\"rollback_restores\":%s,\"no_dangling_equalizerapo\":%s,\"failed\":%s,\"device_selector_retick\":[%s],"
-                "\"kills\":[%s],\"operations\":%s}\n",
+                "\"kills\":[%s],\"enable_enhancements\":%s,\"operations\":%s}\n",
                 boolean(ok), quote(mode_name(chosen)).c_str(), boolean(replace_eapo),
                 sim ? (sim->eapo_unregistered ? "\"hosted, then Equalizer APO uninstalled\""
                            : sim->hosted          ? "\"hosted\""
@@ -2987,8 +3230,92 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                 extras_json(extras_after_update).c_str(), extras_json(extras_after).c_str(),
                 boolean(survives_missing_fx_properties), boolean(record_only_uninstall_restores),
                 boolean(rollback_restores), boolean(no_dangling_eapo), string_array(more.failed).c_str(),
-                retick_json.c_str(), kills_json.c_str(), operations_json(dry.operations()).c_str());
+                retick_json.c_str(), kills_json.c_str(), enhancements_json.c_str(), operations_json(dry.operations()).c_str());
     return ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Speaker layouts (windows/devices/speaker_layout.h): the Speakers view's picker.
+
+std::string hresult_hex(HRESULT hr) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08lx", static_cast<unsigned long>(hr));
+    return buf;
+}
+
+std::string format_json(const isotone::devices::DeviceFormat& f) {
+    if (!f.present) return "{\"present\":false,\"error\":" + quote(f.error) + "}";
+    char mask[16];
+    std::snprintf(mask, sizeof(mask), "0x%lx", static_cast<unsigned long>(f.channel_mask));
+    const char* kind = f.sample_format == isotone::devices::SampleFormat::pcm          ? "pcm"
+                       : f.sample_format == isotone::devices::SampleFormat::ieee_float ? "float"
+                                                                                       : "other";
+    return "{\"present\":true,\"channels\":" + std::to_string(f.channels) + ",\"sample_rate\":" +
+           std::to_string(f.sample_rate) + ",\"bits\":" + std::to_string(f.bits_per_sample) + ",\"valid_bits\":" +
+           std::to_string(f.valid_bits) + ",\"sample_format\":\"" + kind + "\",\"channel_mask\":" +
+           quote(std::string(mask)) + ",\"mask_defaulted\":" + boolean(f.mask_defaulted) + "}";
+}
+
+isotone::devices::DeviceFormat extensible_format(const WAVEFORMATEXTENSIBLE& f) {
+    return isotone::devices::parse_device_format(reinterpret_cast<const uint8_t*>(&f), sizeof(f));
+}
+
+// What the library's documented failures mean, for the reason field.
+std::string layout_failure(HRESULT hr, const std::string& detail) {
+    if (hr == HRESULT_FROM_WIN32(ERROR_NOT_READY)) return "the endpoint is not active";
+    if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) return "no such render endpoint";
+    if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) return "the endpoint's current format cannot be the base of a layout";
+    if (hr == isotone::devices::kCurrentFormatRefused)
+        return "the output refuses its own format in exclusive mode, so its layouts cannot be told";
+    if (!detail.empty()) return detail;
+    return "failed with " + hresult_hex(hr);
+}
+
+int cmd_layouts(const Endpoint& e) {
+    if (e.input) return fail("layouts", "capture endpoints have no speaker layout here");
+    std::vector<isotone::devices::SpeakerLayout> supported;
+    const HRESULT hr = isotone::devices::supported_speaker_layouts(e.guid, &supported);
+    if (FAILED(hr)) return fail("layouts", layout_failure(hr, ""), ",\"hresult\":" + quote(hresult_hex(hr)));
+    isotone::devices::Endpoint info;
+    const HRESULT read = isotone::devices::read_render_endpoint(e.guid, &info);
+    if (FAILED(read)) return fail("layouts", layout_failure(read, ""), ",\"hresult\":" + quote(hresult_hex(read)));
+    isotone::devices::SpeakerLayout current{};
+    const bool known = isotone::devices::current_speaker_layout(info.format, &current);
+    std::vector<std::string> names;
+    for (isotone::devices::SpeakerLayout l : supported) names.push_back(isotone::devices::speaker_layout_spec(l)->name);
+    std::printf("{\"command\":\"layouts\",\"ok\":true,\"guid\":%s,\"format\":%s,\"current\":%s,\"supported\":%s}\n",
+                quote(e.guid).c_str(), format_json(info.format).c_str(),
+                known ? quote(std::string(isotone::devices::speaker_layout_spec(current)->name)).c_str() : "null",
+                string_array(names).c_str());
+    return 0;
+}
+
+// --dry-run makes every check set_speaker_layout makes (check_speaker_layout)
+// and sets nothing.
+int cmd_set_layout(const Endpoint& e, isotone::devices::SpeakerLayout layout, bool dry_run) {
+    if (e.input) return fail("set-layout", "capture endpoints have no speaker layout here");
+    isotone::devices::LayoutChange change;
+    const HRESULT hr = dry_run ? isotone::devices::check_speaker_layout(e.guid, layout, &change)
+                               : isotone::devices::set_speaker_layout(e.guid, layout, &change);
+    const bool built = change.requested.endpoint.Format.nChannels != 0;
+    const std::string requested = built ? "{\"endpoint\":" + format_json(extensible_format(change.requested.endpoint)) +
+                                              ",\"mix\":" + format_json(extensible_format(change.requested.mix)) + "}"
+                                        : "null";
+    const auto maybe = [](const isotone::devices::DeviceFormat& f, bool filled) {
+        return filled ? format_json(f) : std::string("null");
+    };
+    const std::string facts =
+        std::string(",\"dry_run\":") + boolean(dry_run) + ",\"guid\":" + quote(e.guid) + ",\"layout\":" +
+        quote(std::string(isotone::devices::speaker_layout_spec(layout)->name)) + ",\"hresult\":" +
+        quote(hresult_hex(hr)) + ",\"device_id\":" + quote(change.device_id) + ",\"set_called\":" +
+        boolean(change.set_called) + ",\"before\":" + maybe(change.before, !change.device_id.empty()) +
+        ",\"policy_before\":" + maybe(change.policy_before, change.policy_before.present) + ",\"mix_before\":" +
+        maybe(change.mix_before, change.mix_before.present) + ",\"requested\":" + requested + ",\"after\":" +
+        maybe(change.after, change.set_called) + ",\"mix_after\":" + maybe(change.mix_after, change.set_called) +
+        ",\"property_after\":" + maybe(change.property_after, change.set_called);
+    if (FAILED(hr)) return fail("set-layout", layout_failure(hr, change.error), facts);
+    std::printf("{\"command\":\"set-layout\",\"ok\":true%s}\n", facts.c_str());
+    return 0;
 }
 
 int cmd_test(const Endpoint& e) {
@@ -3143,6 +3470,203 @@ private:
 
 const DWORD kLockTimeoutMs = 60000;
 
+// ---------------------------------------------------------------------------
+// serve: one elevated process for the life of the UI, so Windows asks for
+// approval once (the owner's decision, 2026-09-14).
+//
+// The UI creates the pipe \\.\pipe\<name> (its first instance, open to the UI's
+// user and SYSTEM only) and starts `serve --pipe <name> --parent <its pid>`
+// elevated (session.h). serve connects, refuses unless the pipe's server is
+// --parent, then answers one request at a time until the pipe breaks, which is
+// the UI closing it or exiting:
+//   request:  the command and its arguments, UTF-8, separated by U+001F, ending in \n
+//   response: {"exit":<code>,"result":<the command's JSON object, or null>}\n
+// The command runs as a child isotone-devicetool with the same arguments, which
+// inherits the elevated token, so every check, journal, lock and exit code is
+// the command's own. Its stdout comes back through an anonymous pipe rather than
+// an --output file: a file in the user's temp directory could be swapped or
+// linked by an unelevated process between the child writing it and serve
+// reading and deleting it; a pipe has no path.
+
+const char* const kServedCommands[] = {"list", "status", "test", "install", "uninstall", "repair",
+                                       "enable-enhancements", "restart-audio", "layouts", "set-layout"};
+const size_t kMaxRequest = 65536;
+
+// One argument as CommandLineToArgvW and the CRT read it back: quoted, with the
+// backslashes before a quote, or before the closing quote, doubled.
+std::wstring quote_argument(const std::wstring& arg) {
+    std::wstring out = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        out.append(c == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+        backslashes = 0;
+        out += c;
+    }
+    out.append(backslashes * 2, L'\\');
+    return out + L"\"";
+}
+
+// Why the request cannot run, or empty.
+std::string refuse_request(const std::vector<std::string>& fields) {
+    const std::string& command = fields[0];
+    if (std::find(std::begin(kServedCommands), std::end(kServedCommands), command) == std::end(kServedCommands))
+        return "serve runs list, status, test, install, uninstall, repair, enable-enhancements and restart-audio, not " +
+               (command.empty() ? std::string("an empty command") : command);
+    if (std::find(fields.begin(), fields.end(), "--output") != fields.end())
+        return "serve returns the output itself; a request takes no --output";
+    return "";
+}
+
+struct ChildRun {
+    std::string error;   // empty when the child ran
+    DWORD exit = 0;
+    std::string output;
+};
+
+ChildRun run_child(const std::vector<std::wstring>& args) {
+    ChildRun r;
+    std::wstring self(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
+    if (length == 0 || length >= self.size()) {
+        r.error = "GetModuleFileName failed (error " + std::to_string(GetLastError()) + ")";
+        return r;
+    }
+    self.resize(length);
+    std::wstring command_line = quote_argument(self);
+    for (const std::wstring& a : args) command_line += L" " + quote_argument(a);
+
+    SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+    HANDLE read = nullptr, write = nullptr;
+    if (!CreatePipe(&read, &write, &inherit, 0)) {
+        r.error = "CreatePipe failed (error " + std::to_string(GetLastError()) + ")";
+        return r;
+    }
+    SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = write;   // no stdin, and no stderr: usage() text is not part of the result
+    PROCESS_INFORMATION process{};
+    const BOOL started = CreateProcessW(self.c_str(), command_line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                                        nullptr, nullptr, &startup, &process);
+    const DWORD start_error = GetLastError();
+    CloseHandle(write);   // the child's copy is the only writer left, so the read ends when it exits
+    if (!started) {
+        CloseHandle(read);
+        r.error = "CreateProcess failed (error " + std::to_string(start_error) + ")";
+        return r;
+    }
+    char buffer[4096];
+    DWORD n = 0;
+    while (ReadFile(read, buffer, sizeof(buffer), &n, nullptr) && n > 0) r.output.append(buffer, n);
+    CloseHandle(read);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    GetExitCodeProcess(process.hProcess, &r.exit);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return r;
+}
+
+int cmd_serve(const std::string& pipe_name, const std::string& parent_text) {
+    // A name only: no separator, so \\.\pipe\ cannot be left through "..".
+    if (pipe_name.empty() || pipe_name.size() > 200 || pipe_name.find_first_of("\\/") != std::string::npos ||
+        pipe_name == "." || pipe_name == "..")
+        return usage("serve", "--pipe is a pipe name: not . or .., and without \\ or /");
+    if (parent_text.empty() || parent_text.size() > 10 ||
+        !std::all_of(parent_text.begin(), parent_text.end(), [](unsigned char c) { return std::isdigit(c) != 0; }) ||
+        std::stoull(parent_text) == 0 || std::stoull(parent_text) > 0xFFFFFFFFull)
+        return usage("serve", "--parent is a process ID");
+    const DWORD parent = static_cast<DWORD>(std::stoull(parent_text));
+
+    // Identification only: the UI, which runs unelevated, may learn who connected
+    // but cannot impersonate this elevated process.
+    const std::wstring path = L"\\\\.\\pipe\\" + wide(pipe_name);
+    HANDLE pipe = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                              SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) return fail("serve", "cannot open " + utf8(path) + " (error " + std::to_string(GetLastError()) + ")");
+    ULONG server = 0;
+    if (!GetNamedPipeServerProcessId(pipe, &server) || server != parent) {
+        CloseHandle(pipe);
+        return fail("serve", "the pipe's server is process " + std::to_string(server) + ", not --parent " + parent_text);
+    }
+
+    size_t requests = 0;
+    std::string pending;
+    for (;;) {
+        size_t newline;
+        while ((newline = pending.find('\n')) == std::string::npos) {
+            if (pending.size() > kMaxRequest) {
+                CloseHandle(pipe);
+                return fail("serve", "a request is longer than " + std::to_string(kMaxRequest) + " bytes");
+            }
+            char buffer[4096];
+            DWORD n = 0;
+            if (!ReadFile(pipe, buffer, sizeof(buffer), &n, nullptr)) {
+                const DWORD error = GetLastError();
+                CloseHandle(pipe);
+                if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
+                    std::printf("{\"command\":\"serve\",\"ok\":true,\"requests\":%zu}\n", requests);
+                    return 0;
+                }
+                return fail("serve", "reading the pipe failed (error " + std::to_string(error) + ")");
+            }
+            pending.append(buffer, n);
+        }
+        const std::string line = pending.substr(0, newline);
+        pending.erase(0, newline + 1);
+        ++requests;
+
+        std::vector<std::string> fields;
+        for (size_t start = 0;;) {
+            const size_t separator = line.find('\x1f', start);
+            fields.push_back(line.substr(start, separator == std::string::npos ? std::string::npos : separator - start));
+            if (separator == std::string::npos) break;
+            start = separator + 1;
+        }
+        std::vector<std::wstring> args;
+        std::string refusal = refuse_request(fields);
+        for (const std::string& f : fields) {
+            const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, f.data(), static_cast<int>(f.size()), nullptr, 0);
+            if (!f.empty() && length == 0) refusal = "a request is not UTF-8";
+            args.push_back(wide(f));
+        }
+
+        std::string response;
+        if (!refusal.empty()) {
+            response = "{\"exit\":" + std::to_string(kExitBadArguments) + ",\"result\":" +
+                       failure_json("bad_arguments", fields[0], refusal) + "}\n";
+        } else {
+            ChildRun child = run_child(args);
+            if (!child.error.empty()) {
+                CloseHandle(pipe);
+                return fail("serve", child.error);
+            }
+            // The child prints one JSON object on one line; the CRT's text mode ends it in \r\n.
+            while (!child.output.empty() && std::isspace(static_cast<unsigned char>(child.output.back()))) child.output.pop_back();
+            const bool object = !child.output.empty() && child.output.front() == '{' && child.output.back() == '}' &&
+                                child.output.find_first_of("\r\n") == std::string::npos;
+            response = "{\"exit\":" + std::to_string(child.exit) + ",\"result\":" + (object ? child.output : "null") + "}\n";
+        }
+        for (size_t written = 0; written < response.size();) {
+            DWORD n = 0;
+            if (!WriteFile(pipe, response.data() + written, static_cast<DWORD>(response.size() - written), &n, nullptr)) {
+                const DWORD error = GetLastError();
+                CloseHandle(pipe);
+                if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA || error == ERROR_PIPE_NOT_CONNECTED) {
+                    std::printf("{\"command\":\"serve\",\"ok\":true,\"requests\":%zu}\n", requests);
+                    return 0;
+                }
+                return fail("serve", "writing the pipe failed (error " + std::to_string(error) + ")");
+            }
+            written += n;
+        }
+    }
+}
+
 int dispatch(int argc, wchar_t** wargv) {
     std::vector<std::string> argv_utf8;
     for (int i = 0; i < argc; ++i) argv_utf8.push_back(utf8(std::wstring(wargv[i])));
@@ -3160,15 +3684,20 @@ int dispatch(int argc, wchar_t** wargv) {
     bool dry_run = false, replace_eapo = false;
     std::optional<std::string> mode_text;
     std::optional<std::string> simulation_text;
+    std::string pipe_text, parent_text;
+    std::optional<std::string> layout_text;
     int outputs = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string& a = argv_utf8[i];
-        const bool takes_value = a == "--mode" || a == "--simulate-equalizerapo" || a == "--output";
+        const bool takes_value = a == "--mode" || a == "--simulate-equalizerapo" || a == "--output" || a == "--pipe" || a == "--parent" || a == "--layout";
         if (takes_value && i + 1 >= argc) return usage("", a + " needs a value");
         if (a == "--dry-run") dry_run = true;
         else if (a == "--replace-equalizerapo") replace_eapo = true;
         else if (a == "--mode") mode_text = argv_utf8[++i];
         else if (a == "--simulate-equalizerapo") simulation_text = argv_utf8[++i];
+        else if (a == "--pipe") pipe_text = argv_utf8[++i];
+        else if (a == "--parent") parent_text = argv_utf8[++i];
+        else if (a == "--layout") layout_text = argv_utf8[++i];
         else if (a == "--output") { ++i; ++outputs; continue; }
         else if (a.rfind("--", 0) == 0) return usage("", "unknown flag " + a);
         else { args.push_back(a); continue; }
@@ -3187,6 +3716,11 @@ int dispatch(int argc, wchar_t** wargv) {
         {"uninstall", {"--dry-run"}},
         {"repair", {"--mode", "--dry-run"}},
         {"roundtrip", {"--mode", "--replace-equalizerapo", "--simulate-equalizerapo"}},
+        {"enable-enhancements", {"--dry-run"}},
+        {"restart-audio", {"--dry-run"}},
+        {"layouts", {}},
+        {"set-layout", {"--layout", "--dry-run"}},
+        {"serve", {"--pipe", "--parent"}},
     };
     const auto found_command = accepted.find(command);
     if (found_command == accepted.end()) return usage(command, "unknown command " + command);
@@ -3195,9 +3729,20 @@ int dispatch(int argc, wchar_t** wargv) {
         if (std::find(found_command->second.begin(), found_command->second.end(), f) == found_command->second.end())
             return usage(command, command + " does not take " + f);
     }
-    const bool takes_endpoint = command != "list" && command != "repair";
+    const bool takes_endpoint = command != "list" && command != "repair" && command != "restart-audio" && command != "serve";
     if (args.size() != (takes_endpoint ? 2u : 1u))
         return usage(command, takes_endpoint ? command + " takes one endpoint" : command + " takes no endpoint");
+    if (command == "serve") {
+        if (pipe_text.empty() || parent_text.empty()) return usage(command, "serve needs --pipe and --parent");
+        return cmd_serve(pipe_text, parent_text);
+    }
+
+    isotone::devices::SpeakerLayout layout{};
+    if (command == "set-layout") {
+        if (!layout_text) return usage(command, "set-layout needs --layout");
+        if (!isotone::devices::parse_speaker_layout(*layout_text, &layout))
+            return usage(command, "--layout is stereo, 2.1, 5.1 or 7.1");
+    }
 
     std::optional<DeviceAPOInfo::InstallMode> mode;
     if (mode_text) {
@@ -3253,9 +3798,12 @@ int dispatch(int argc, wchar_t** wargv) {
         if (found == 1) return fail(command, "no endpoint with ID " + args[1]);
     }
 
-    // The registry-changing commands: an elevated process, one run at a time.
+    // The registry-changing commands, and the audio service restart: an elevated
+    // process, one run at a time.
     MachineLock lock;
-    if ((command == "install" || command == "uninstall" || command == "repair") && !dry_run) {
+    if ((command == "install" || command == "uninstall" || command == "repair" || command == "enable-enhancements" ||
+         command == "restart-audio") &&
+        !dry_run) {
         if (!is_elevated())
             return fail_with(kExitNotElevated, "not_elevated", command, "needs an elevated process; use --dry-run to preview");
         bool busy = false;
@@ -3270,6 +3818,10 @@ int dispatch(int argc, wchar_t** wargv) {
     if (command == "install") return cmd_install(endpoint, mode, replace_eapo, dry_run);
     if (command == "uninstall") return cmd_uninstall(endpoint, dry_run);
     if (command == "roundtrip") return cmd_roundtrip(endpoint, mode, replace_eapo, sim);
+    if (command == "enable-enhancements") return cmd_enable_enhancements(endpoint, dry_run);
+    if (command == "restart-audio") return cmd_restart_audio(dry_run);
+    if (command == "layouts") return cmd_layouts(endpoint);
+    if (command == "set-layout") return cmd_set_layout(endpoint, layout, dry_run);
     return cmd_test(endpoint);
 }
 

@@ -62,6 +62,8 @@ endif()
 
 # After enable_testing(), so their tests are registered with CTest.
 if(WIN32 AND MSVC)
+    add_subdirectory(windows/transport/tests)
+    add_subdirectory(windows/devicetool/tests)
     add_subdirectory(windows/compat)
     add_subdirectory(windows/measure)
     add_subdirectory(windows/devices)
