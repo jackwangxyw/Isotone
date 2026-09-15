@@ -164,8 +164,7 @@ QString statusDot(const QString& key) {
 }
 
 bool equalizerApoPresent(const DeviceFacts& f) {
-    return f.backend == Backend::equalizerapo || f.backend == Backend::conflict ||
-           f.isoapo == IsoApoState::replaced_by_equalizerapo;
+    return f.backend == Backend::equalizerapo || f.backend == Backend::conflict;
 }
 
 QString engineColumn(const DeviceFacts& f) {

@@ -84,28 +84,42 @@ Item {
                 width: parent.width
                 height: 36 + Devices.count * 48
 
-                // Column widths from their content, and the room left shared in
-                // proportion, as the prototype's HTML table lays out; when there
-                // is no room the output's column gives way.
-                readonly property var natural: {
+                // Column widths as the prototype's HTML table lays them out: each
+                // column's widest content (max) and widest word (min); room to
+                // spare is shared in proportion to max, and with too little every
+                // column gives up the same share of max - min, so Engine and Status
+                // wrap. Names do not wrap.
+                function longestWord(text) {
+                    return Math.max(...text.split(" ").map((w) => root.textWidth(w, 14)))
+                }
+                readonly property var extents: {
                     const revision = Devices.revision
-                    const w = revision < 0 ? [] : [root.textWidth("Output", 13), root.textWidth("Engine", 13), root.textWidth("Status", 13),
-                               root.textWidth("Format", 13), root.textWidth("Preset", 13)]
-                    for (let i = 0; i < Devices.count; ++i) {
+                    const header = ["Output", "Engine", "Status", "Format", "Preset"].map((h) => root.textWidth(h, 13))
+                    const max = header.slice(), min = header.slice()
+                    for (let i = 0; revision >= 0 && i < Devices.count; ++i) {
                         const d = Devices.row(Devices.data(Devices.index(i, 0), Qt.UserRole + 1))
-                        w[0] = Math.max(w[0], root.textWidth(d.name, 14, Font.Medium) + (d.isDefault ? 10 + root.textWidth("Default", 11, Font.Medium) + 18 : 0))
-                        w[1] = Math.max(w[1], root.textWidth(d.engine, 14))
-                        w[2] = Math.max(w[2], 14 + root.textWidth(d.statusLabel, 14))
-                        w[3] = Math.max(w[3], root.textWidth(d.format, 14))
-                        w[4] = Math.max(w[4], root.textWidth(Presets.assignedName(d.guid) || root.dash, 14))
+                        const name = root.textWidth(d.name, 14, Font.Medium) + (d.isDefault ? 10 + root.textWidth("Default", 11, Font.Medium) + 18 : 0)
+                        const preset = Presets.assignedName(d.guid) || root.dash
+                        max[0] = Math.max(max[0], name)
+                        min[0] = Math.max(min[0], name)
+                        max[1] = Math.max(max[1], root.textWidth(d.engine, 14))
+                        min[1] = Math.max(min[1], longestWord(d.engine))
+                        max[2] = Math.max(max[2], 14 + root.textWidth(d.statusLabel, 14))
+                        min[2] = Math.max(min[2], 14 + longestWord(d.statusLabel))
+                        max[3] = Math.max(max[3], root.textWidth(d.format, 14))
+                        min[3] = max[3]
+                        max[4] = Math.max(max[4], root.textWidth(preset, 14))
+                        min[4] = Math.max(min[4], longestWord(preset))
                     }
-                    return w.map((x) => x + 32)
+                    return { max: max.map((x) => x + 32), min: min.map((x) => x + 32) }
                 }
                 readonly property var columnWidths: {
-                    const total = natural.reduce((a, b) => a + b, 0)
-                    if (total <= width) return natural.map((x) => x + (width - total) * x / total)
-                    const rest = natural[1] + natural[2] + natural[3] + natural[4]
-                    return [Math.max(80, width - rest), natural[1], natural[2], natural[3], natural[4]]
+                    const max = extents.max, min = extents.min
+                    const sum = (list) => list.reduce((a, b) => a + b, 0)
+                    const most = sum(max), least = sum(min)
+                    if (most <= width) return max.map((x) => x + (width - most) * x / most)
+                    if (least >= width) return min
+                    return max.map((x, i) => min[i] + (x - min[i]) * (width - least) / (most - least))
                 }
                 readonly property real outputWidth: columnWidths[0]
                 readonly property var widths: columnWidths.slice(1)
@@ -195,6 +209,9 @@ Item {
                                     width: table.widths[0]
                                     height: parent.height
                                     leftPadding: 16
+                                    rightPadding: 16
+                                    wrapMode: Text.WordWrap
+                                    lineHeight: 0.95
                                     verticalAlignment: Text.AlignVCenter
                                     text: row.engine
                                     font.family: Theme.font
@@ -210,6 +227,9 @@ Item {
                                         spacing: 8
                                         StatusDot { status: row.dot; anchors.verticalCenter: parent.verticalCenter }
                                         Text {
+                                            width: Math.min(implicitWidth, table.widths[1] - 46)
+                                            wrapMode: Text.WordWrap
+                                            lineHeight: 0.95
                                             text: row.statusLabel
                                             font.family: Theme.font
                                             font.pixelSize: 14

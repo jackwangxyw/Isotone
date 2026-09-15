@@ -15,8 +15,15 @@ DialogFrame {
 
     Item { width: 1; height: 18 }
     Row {
+        id: cards
         width: parent.width
         spacing: 12
+        // Both cards as tall as the taller one, as the prototype's grid row.
+        readonly property real tallest: {
+            let h = 0
+            for (let i = 0; i < children.length; ++i) h = Math.max(h, children[i].contentHeight || 0)
+            return h
+        }
         Repeater {
             model: [["iso", "IsoAPO", ["Live edits", "Engine spectrum", "Removes Equalizer APO from this output"]],
                     ["eapo", "Equalizer APO", ["Edits apply on release", "Loopback spectrum", "Keeps config.txt and its includes"]]]
@@ -25,8 +32,9 @@ DialogFrame {
                 required property var modelData
                 readonly property bool on: root.choice === modelData[0]
                 objectName: "choice_" + modelData[0]
+                readonly property real contentHeight: cardColumn.implicitHeight + 32
                 width: (parent.width - 12) / 2
-                height: cardColumn.implicitHeight + 32
+                height: cards.tallest
                 radius: 12
                 color: on ? Theme.surface : "transparent"
                 border.width: on ? 1.5 : 1
@@ -81,6 +89,8 @@ DialogFrame {
                         model: card.modelData[2]
                         delegate: Text {
                             required property string modelData
+                            width: cardColumn.width
+                            wrapMode: Text.Wrap
                             topPadding: 8
                             text: modelData
                             font.family: Theme.font

@@ -70,7 +70,7 @@ QString statusKey(const DeviceFacts& f);
 QString statusLabel(const QString& key);   // "Replaced by Equalizer APO"
 QString statusDot(const QString& key);     // StatusDot's ok, warn, bad, off
 
-bool equalizerApoPresent(const DeviceFacts& f);   // in a slot, or holding IsoAPO's slot
+bool equalizerApoPresent(const DeviceFacts& f);   // in one of the output's effect slots
 QString engineColumn(const DeviceFacts& f);       // "Native", "Equalizer APO", "Native + Equalizer APO", or a dash
 QString engineDetail(const DeviceFacts& f);       // "Native (IsoAPO)", "IsoAPO + Equalizer APO", or a dash
 QString formatLabel(const DeviceFacts& f);        // "48 kHz · 2 ch"

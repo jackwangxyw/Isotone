@@ -36,8 +36,8 @@ Item {
     readonly property int changeCount: rows.filter(changed).length
     function plans() { return rows.filter(changed).map((d) => Devices.plan(d.guid, want(d))) }
 
-    readonly property var columns: firstRun ? [["Output", 0], ["Format", 150], ["Engine", 300], ["", 170]]
-                                            : [["Output", 0], ["Format", 150], ["Now", 190], ["Engine", 300], ["", 170]]
+    readonly property var columns: firstRun ? [["Output", 0], ["Format", 130], ["Engine", 250], ["", 170]]
+                                            : [["Output", 0], ["Format", 130], ["Now", 190], ["Engine", 250], ["", 170]]
     readonly property real outputWidth: {
         let w = width
         for (let i = 1; i < columns.length; ++i) w -= columns[i][1]
@@ -79,7 +79,6 @@ Item {
                 objectName: "setupRow_" + d.guid
                 width: root.width
                 height: 48
-                radius: 10
                 color: root.phase === "edit" && isChanged ? Qt.alpha(Theme.accent, 0.07) : "transparent"
 
                 Row {
@@ -98,7 +97,7 @@ Item {
                         color: Theme.text
                     }
                     Text {
-                        width: 150
+                        width: 130
                         height: parent.height
                         leftPadding: 16
                         verticalAlignment: Text.AlignVCenter
@@ -119,7 +118,7 @@ Item {
                         color: Theme.muted
                     }
                     Item {
-                        width: 300
+                        width: 250
                         height: parent.height
                         Segmented {
                             objectName: "engineChoice"
@@ -167,6 +166,9 @@ Item {
                             Text {
                                 objectName: "setupStatusText"
                                 anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(implicitWidth, 170 - 32 - 14)
+                                wrapMode: Text.WordWrap
+                                lineHeight: 0.95
                                 text: {
                                     switch (parent.step) {
                                     case "device": return row.d.statusLabel

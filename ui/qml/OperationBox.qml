@@ -20,7 +20,8 @@ Rectangle {
                                  : phase === "reboot" || phase === "failed" || phase === "busy" ? "warning" : ""
     readonly property color iconColour: phase === "done" ? Theme.ok
                                       : phase === "failed" ? Theme.danger
-                                      : phase === "reboot" || phase === "busy" ? Theme.warning : Theme.muted
+                                      : phase === "reboot" || phase === "busy" ? Theme.warning
+                                      : phase === "uac" ? Theme.text : Theme.muted
     readonly property string headline: {
         switch (phase) {
         case "uac": return "Waiting for administrator approval"

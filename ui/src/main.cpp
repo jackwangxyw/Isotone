@@ -12,6 +12,7 @@
 //   --fake-devicetool <file>  devicetool's answers and the Devices outputs from a script
 //                             (devicetoolrunner.h, devicesmodel.h); nothing is installed or restarted
 //   --first-run               show first run
+//   --view <view>[/<tab>]     open a view, and a Settings tab (settings/outputs)
 
 #include <QCommandLineParser>
 #include <QFont>
@@ -66,8 +67,11 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption fake_devicetool(QStringLiteral("fake-devicetool"), QStringLiteral("Answer devicetool from <script>."),
                                              QStringLiteral("script"));
     const QCommandLineOption first_run(QStringLiteral("first-run"), QStringLiteral("Show first run."));
+    const QCommandLineOption view(QStringLiteral("view"), QStringLiteral("Open <view> (eq, devices, settings, settings/outputs)."),
+                                  QStringLiteral("view"));
     parser.addOption(fake_devicetool);
     parser.addOption(first_run);
+    parser.addOption(view);
     parser.process(app);
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
@@ -118,6 +122,13 @@ int main(int argc, char* argv[]) {
         });
     }
     if (parser.isSet(first_run)) QMetaObject::invokeMethod(engine.rootObjects().constFirst(), "showFirstRun");
+    if (parser.isSet(view)) {
+        const QStringList parts = parser.value(view).split(QLatin1Char('/'));
+        if (auto* ui = engine.singletonInstance<QObject*>("Isotone", "UiState")) {
+            ui->setProperty("view", parts[0]);
+            if (parts.size() > 1) ui->setProperty("settingsTab", parts[1]);
+        }
+    }
 
     if (parser.isSet(output)) {
         auto* outputs = engine.singletonInstance<Outputs*>("Isotone", "Outputs");
@@ -140,13 +151,17 @@ int main(int argc, char* argv[]) {
     auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
     const QStringList clicks = parser.values(click);
     for (qsizetype i = 0; i < clicks.size(); ++i) {
-        QTimer::singleShot(static_cast<int>(800 + 100 * i), &app, [window, spec = clicks[i]] {
+        QTimer::singleShot(static_cast<int>(800 + 100 * i), &app, [window, spec = clicks[i], i] {
             const QStringList parts = spec.split(QLatin1Char(','));
             if (parts.size() < 2) return;
             const QPointF at(parts[0].toDouble(), parts[1].toDouble());
             const Qt::MouseButton button = parts.size() > 2 && parts[2] == QLatin1String("right") ? Qt::RightButton : Qt::LeftButton;
             QMouseEvent press(QEvent::MouseButtonPress, at, window->mapToGlobal(at), button, button, Qt::NoModifier);
             QMouseEvent release(QEvent::MouseButtonRelease, at, window->mapToGlobal(at), button, Qt::NoButton, Qt::NoModifier);
+            // Seconds apart on the events' clock, so the next click is not taken for a double click
+            // (Devices work package: a dialog's button clicked after the button that opened it).
+            press.setTimestamp(static_cast<quint64>(10000 * (i + 1)));
+            release.setTimestamp(static_cast<quint64>(10000 * (i + 1) + 10));
             QGuiApplication::sendEvent(window, &press);
             QGuiApplication::sendEvent(window, &release);
         });
