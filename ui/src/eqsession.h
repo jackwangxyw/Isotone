@@ -16,12 +16,14 @@
 #include <QTimer>
 #include <QtQml/qqmlregistration.h>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "devicelink.h"
 #include "isotone/types.h"
 #include "outputs.h"
+#include "speaker_setup.h"
 #include "spectrum.h"
 
 class EqSession : public QAbstractListModel {
@@ -43,6 +45,8 @@ class EqSession : public QAbstractListModel {
     Q_PROPERTY(int outputChannels READ outputChannels NOTIFY stateChanged)
     // Stereo: 0 L, 1 R, 2 L+R.
     Q_PROPERTY(int viewChannel READ viewChannel WRITE setViewChannel NOTIFY viewChanged)
+    // Surround: the channels the graph shows (the Showing picker), 0 for every speaker.
+    Q_PROPERTY(int showingMask READ showingMask WRITE setShowingMask NOTIFY viewChanged)
 
 public:
     enum Role {
@@ -61,11 +65,12 @@ public:
         WidthUnitRole,    // Unit: Q, Octaves or SlopeDb
         TypeRole,         // isotone::FilterType
         ChannelsRole,     // stereo: 0 L, 1 R, 2 both
+        ChannelMaskRole,  // the band's isotone::ChannelMask, 0 for every channel
     };
     Q_ENUM(Role)
 
     // What a click-to-edit field holds (typed_value.h).
-    enum Unit { Decibels, Hertz, Q, Octaves, SlopeDb, Plain };
+    enum Unit { Decibels, Hertz, Q, Octaves, SlopeDb, Plain, Metres, Milliseconds };
     Q_ENUM(Unit)
 
     explicit EqSession(QObject* parent = nullptr);
@@ -78,6 +83,7 @@ public:
     // What the graph draws.
     const isotone::EqState& state() const { return state_; }
     const isotone::ui::OutputLayout& layout() const { return target_.layout; }
+    const isotone::ui::OutputTarget& target() const { return target_; }
     // The band shown at `row`, or null.
     const isotone::Band* bandAt(int row) const;
     int selectedRow() const;
@@ -100,12 +106,18 @@ public:
     int outputChannels() const { return static_cast<int>(target_.layout.channels); }
     int viewChannel() const { return view_channel_; }
     void setViewChannel(int view);
+    int showingMask() const { return static_cast<int>(showing_mask_); }
+    void setShowingMask(int mask);
 
     // The spectrum at `freqs` in dBFS; false when no audio has arrived lately.
     bool spectrumLevels(const double* freqs, size_t n, double* out_db) const;
 
     // Edits the current output of `outputs` from now on, starting from what it plays.
     Q_INVOKABLE void useOutput(Outputs* outputs);
+    // The same for a target: another output loads what it plays; the same output
+    // in another layout keeps what is edited, its speaker values moved by
+    // speaker role (remap_channels).
+    void useTarget(const isotone::ui::OutputTarget& target);
     // Replaces what is edited with `state` (flat when null), as useOutput does
     // with what the output plays. Writes nothing to the output.
     void loadState(const isotone::EqState* state);
@@ -121,6 +133,8 @@ public:
     Q_INVOKABLE void setType(int row, int type);
     // Stereo: 0 left, 1 right, 2 both.
     Q_INVOKABLE void setChannels(int row, int which);
+    // Surround: the band's channels as a mask over the output's layout, 0 for all.
+    Q_INVOKABLE void setChannelMask(int row, int mask);
     // A copy with a fresh id, next to the band, selected.
     Q_INVOKABLE void duplicateBand(int row);
     Q_INVOKABLE void resetGain(int row);
@@ -137,6 +151,21 @@ public:
     // A typed value in `unit`'s base unit, or NaN when the text is not one.
     Q_INVOKABLE double parseValue(const QString& text, Unit unit) const;
 
+    // Surround (the Speakers controller, speakers.h).
+    // The output's own groups, for the target labels.
+    void setUserGroups(std::vector<isotone::ui::SpeakerGroup> groups);
+    // Changes the speaker setup or levels of the edited state: committed to the
+    // output, and the saved state's speaker part written (native outputs).
+    void editSpeakers(const std::function<void(isotone::EqState*)>& edit);
+    // Solo and test tones: written to the output on top of the edited state, never saved.
+    void setLiveOverrides(const isotone::ui::LiveOverrides& overrides);
+    const isotone::ui::LiveOverrides& liveOverrides() const { return overrides_; }
+    // What the output gets, and what a speaker change saves (no overrides).
+    isotone::EqState engineState() const;
+    isotone::EqState savedState() const;
+    // Where the saved state files are; persisted_state_dir(false) unless a test moves it.
+    void setSavedStateDir(const std::wstring& dir) { saved_state_dir_ = dir; }
+
 signals:
     void countChanged();
     void selectionChanged();
@@ -146,6 +175,8 @@ signals:
     void curveChanged();
     void spectrumChanged();
     void viewChanged();
+    // A speaker setup change could not be saved; a Win32 error code.
+    void speakerSaveFailed(int error);
 
 private:
     std::vector<size_t> displayOrder() const;
@@ -166,6 +197,10 @@ private:
     bool by_frequency_ = false;
     double balance_ = 0.0;
     int view_channel_ = 2;
+    isotone::ChannelMask showing_mask_ = 0;
+    std::vector<isotone::ui::SpeakerGroup> user_groups_;
+    isotone::ui::LiveOverrides overrides_;
+    std::wstring saved_state_dir_;
     QString preset_name_;
 
     std::unique_ptr<isotone::ui::DeviceLink> link_;

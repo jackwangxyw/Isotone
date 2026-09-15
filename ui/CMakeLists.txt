@@ -16,6 +16,13 @@ add_library(isotone_ui_backend STATIC
     backend/spectrum.h
     backend/typed_value.cpp
     backend/typed_value.h
+    # Surround
+    backend/pink_noise.cpp
+    backend/pink_noise.h
+    backend/speaker_setup.cpp
+    backend/speaker_setup.h
+    backend/test_tone.cpp
+    backend/test_tone.h
 )
 target_include_directories(isotone_ui_backend PUBLIC backend)
 # windows.h without the min and max macros, which break std::min and std::max.
@@ -37,6 +44,11 @@ qt_add_library(isotone_ui STATIC
     src/presets.h
     src/responsegraph.cpp
     src/responsegraph.h
+    # Surround
+    src/speakers.cpp
+    src/speakers.h
+    src/speakerstore.cpp
+    src/speakerstore.h
 )
 
 # Before qt_add_qml_module, which reads it.
@@ -94,14 +106,15 @@ qt_add_executable(isotone WIN32 src/main.cpp)
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
 if(ISOTONE_BUILD_TESTS)
-    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp)
+    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
+                   tests/test_speaker_setup.cpp)
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
     add_test(NAME ui_tests COMMAND ui_tests)
 
-    add_executable(ui_model_tests tests/test_model.cpp)
-    target_link_libraries(ui_model_tests PRIVATE isotone_ui)
+    add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp)
+    target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_model_tests PRIVATE /wd5285)   # doctest, as in core/tests
 

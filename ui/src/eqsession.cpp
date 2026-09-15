@@ -11,15 +11,18 @@
 #include <set>
 
 #include "apppaths.h"
+#include "isotone/apo_config.h"
 #include "isotone/param_block.h"
 #include "isotone/processor.h"
 #include "isotone/response.h"
 #include "output_state.h"
 #include "outputs.h"
+#include "persisted_state.h"
 #include "typed_value.h"
 
 static_assert(static_cast<int>(EqSession::Plain) == static_cast<int>(isotone::ui::TypedUnit::Plain) &&
-              static_cast<int>(EqSession::SlopeDb) == static_cast<int>(isotone::ui::TypedUnit::SlopeDb));
+              static_cast<int>(EqSession::SlopeDb) == static_cast<int>(isotone::ui::TypedUnit::SlopeDb) &&
+              static_cast<int>(EqSession::Milliseconds) == static_cast<int>(isotone::ui::TypedUnit::Milliseconds));
 
 namespace {
 
@@ -104,10 +107,15 @@ QVariant EqSession::data(const QModelIndex& index, int role) const {
         case QRole: return band_q(*b);
         case EnabledRole: return b->enabled;
         case TargetRole: {
+            if (target_.layout.channels > 2) {
+                return QString::fromStdString(isotone::ui::target_label(b->channels, target_.layout.channels,
+                                                                        target_.layout.speaker_mask, user_groups_));
+            }
             static const QString kNames[] = {QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("L+R")};
             return kNames[stereo_channels(*b)];
         }
         case ChannelsRole: return stereo_channels(*b);
+        case ChannelMaskRole: return static_cast<int>(b->channels);
         case TypeRole: return static_cast<int>(b->type);
         case ColorIndexRole: return static_cast<int>((b->id - 1) % kBandColours);
         case SelectedRole: return b->id == selected_id_;
@@ -135,7 +143,8 @@ QHash<int, QByteArray> EqSession::roleNames() const {
             {FrequencyRole, "frequency"}, {GainRole, "gain"},         {QRole, "q"},
             {EnabledRole, "bandEnabled"}, {TargetRole, "target"},     {ColorIndexRole, "colorIndex"},
             {SelectedRole, "selected"},   {WidthLabelRole, "widthLabel"}, {WidthUnitRole, "widthUnit"},
-            {HasGainRole, "hasGain"},     {TypeRole, "type"},         {ChannelsRole, "channels"}};
+            {HasGainRole, "hasGain"},     {TypeRole, "type"},         {ChannelsRole, "channels"},
+            {ChannelMaskRole, "channelMask"}};
 }
 
 std::vector<size_t> EqSession::displayOrder() const {
@@ -157,12 +166,31 @@ void EqSession::useOutput(Outputs* outputs) {
     const Outputs::Output* o = outputs ? outputs->current() : nullptr;
     isotone::ui::OutputTarget target;
     if (o) target = isotone::ui::OutputTarget{o->guid, o->backend, o->layout};
+    useTarget(target);
+}
+
+void EqSession::useTarget(const isotone::ui::OutputTarget& target) {
     const bool same = target.guid == target_.guid && target.backend == target_.backend;
+    const isotone::ui::OutputLayout before = target_.layout;
     target_ = target;
     link_->set_target(target_);
     link_->take_region_opened();   // what is loaded below is what the region holds
     analyzer_.reset();
     if (same) {   // a format change on the same output keeps what is being edited
+        // In another layout the speaker values move by speaker role, before they
+        // are shown or edited (ui-spec.md, "A state knows its layout").
+        if (target_.layout.channels != before.channels || target_.layout.speaker_mask != before.speaker_mask) {
+            if (state_.layout_channels == 0) {
+                state_.layout_channels = before.channels;
+                state_.layout_speaker_mask = before.speaker_mask;
+            }
+            isotone::remap_channels(&state_, isotone::ChannelLayout{target_.layout.channels, target_.layout.speaker_mask});
+            showing_mask_ = 0;
+            if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1));
+            updateAutoPreamp();
+            commit();
+            emit viewChanged();
+        }
         emit stateChanged();
         emit curveChanged();
         return;
@@ -177,6 +205,8 @@ void EqSession::loadState(const isotone::EqState* state) {
     beginResetModel();
     if (state) {
         isotone::EqState loaded = *state;
+        // Written for another layout: moved to the output's, as the engine plays it.
+        isotone::remap_channels(&loaded, isotone::ChannelLayout{target_.layout.channels, target_.layout.speaker_mask});
         balance_ = isotone::ui::balance_from_state(loaded, target_.layout.channels);
         isotone::ui::clear_balance(target_.layout.channels, &loaded);
         // Ids must be unique; a file's bands carry none.
@@ -208,12 +238,12 @@ void EqSession::loadState(const isotone::EqState* state) {
 
 void EqSession::push() {
     if (target_.backend == isotone::ui::Backend::none) return;
-    link_->apply(isotone::ui::state_for_output(state_, balance_, target_.layout));
+    link_->apply(engineState());
 }
 
 void EqSession::commit() {
     if (target_.backend == isotone::ui::Backend::none) return;
-    link_->commit(isotone::ui::state_for_output(state_, balance_, target_.layout));
+    link_->commit(engineState());
 }
 
 void EqSession::readSpectrum() {
@@ -481,4 +511,64 @@ void EqSession::setEqOn(bool on) {
     commit();
     emit stateChanged();
     emit curveChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Surround
+
+void EqSession::setShowingMask(int mask) {
+    const isotone::ChannelMask m = static_cast<isotone::ChannelMask>(mask);
+    if (m == showing_mask_) return;
+    showing_mask_ = m;
+    emit viewChanged();
+    emit curveChanged();
+}
+
+void EqSession::setChannelMask(int row, int mask) {
+    if (bandAt(row) == nullptr) return;
+    const isotone::ChannelMask all = isotone::ui::layout_channel_mask(target_.layout.channels);
+    const isotone::ChannelMask m = static_cast<isotone::ChannelMask>(mask) & all;
+    if (mask != 0 && m == 0) return;   // none of the output's speakers
+    // Masks address the output's layout.
+    state_.layout_channels = target_.layout.channels;
+    state_.layout_speaker_mask = target_.layout.speaker_mask;
+    state_.bands[order_[static_cast<size_t>(row)]].channels = m == all ? isotone::kAllChannels : m;
+    bandChanged(row, {TargetRole, ChannelsRole, ChannelMaskRole});
+    commit();
+}
+
+void EqSession::setUserGroups(std::vector<isotone::ui::SpeakerGroup> groups) {
+    user_groups_ = std::move(groups);
+    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {TargetRole});
+}
+
+void EqSession::editSpeakers(const std::function<void(isotone::EqState*)>& edit) {
+    state_.layout_channels = target_.layout.channels;
+    state_.layout_speaker_mask = target_.layout.speaker_mask;
+    edit(&state_);
+    updateAutoPreamp();
+    commit();
+    // A speaker setup change is saved (engine contract "Saved state"): the file
+    // only, with the saved bands kept; commit() has written the region.
+    if (target_.backend == isotone::ui::Backend::native) {
+        const std::wstring dir = saved_state_dir_.empty() ? isotone::win::persisted_state_dir(false) : saved_state_dir_;
+        const DWORD error = isotone::ui::save_speaker_setup(isotone::win::persisted_state_path(dir, target_.guid), savedState());
+        if (error != ERROR_SUCCESS) emit speakerSaveFailed(static_cast<int>(error));
+    }
+    emit stateChanged();
+    emit curveChanged();
+}
+
+void EqSession::setLiveOverrides(const isotone::ui::LiveOverrides& overrides) {
+    if (overrides.solo_muted == overrides_.solo_muted && overrides.test_tones == overrides_.test_tones) return;
+    overrides_ = overrides;
+    commit();
+}
+
+isotone::EqState EqSession::savedState() const { return isotone::ui::state_for_output(state_, balance_, target_.layout); }
+
+isotone::EqState EqSession::engineState() const {
+    isotone::EqState s = savedState();
+    isotone::ui::apply_live_overrides(overrides_, &s);
+    return s;
 }
