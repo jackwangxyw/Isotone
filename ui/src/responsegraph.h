@@ -17,6 +17,8 @@
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 
+#include <vector>
+
 class EqSession;
 
 class ResponseGraph : public QQuickPaintedItem {
@@ -24,7 +26,13 @@ class ResponseGraph : public QQuickPaintedItem {
     QML_ELEMENT
 
     Q_PROPERTY(EqSession* session READ session WRITE setSession NOTIFY sessionChanged)
-    Q_PROPERTY(double rangeDb MEMBER range_db_ NOTIFY styleChanged)
+    // Settings, General, Graph: the gain range (12, 15 or 24 dB) and the frequency
+    // range. Each change bumps `revision`, so handles and the readout follow.
+    Q_PROPERTY(double rangeDb READ rangeDb WRITE setRangeDb NOTIFY rangeChanged)
+    Q_PROPERTY(double minHz READ minHz WRITE setMinHz NOTIFY rangeChanged)
+    Q_PROPERTY(double maxHz READ maxHz WRITE setMaxHz NOTIFY rangeChanged)
+    // Settings, General, Spectrum: the peak-hold line.
+    Q_PROPERTY(bool peakHoldVisible MEMBER peak_hold_ NOTIFY styleChanged)
     Q_PROPERTY(bool spectrumVisible MEMBER spectrum_visible_ NOTIFY styleChanged)
     Q_PROPERTY(bool perBandColours MEMBER per_band_ NOTIFY styleChanged)
     Q_PROPERTY(QVariantList bandColours MEMBER band_colours_ NOTIFY styleChanged)
@@ -55,6 +63,24 @@ public:
     EqSession* session() const { return session_; }
     void setSession(EqSession* s);
 
+    double rangeDb() const { return range_db_; }
+    void setRangeDb(double db);
+    double minHz() const { return min_hz_; }
+    void setMinHz(double hz);
+    double maxHz() const { return max_hz_; }
+    void setMaxHz(double hz);
+
+    // The vertical grid for a frequency range: 1, 2, 3, 4, 5, 6 and 8 in each
+    // decade, major at 1, 2 and 5.
+    struct GridLine {
+        double hz;
+        bool major;
+    };
+    static std::vector<GridLine> gridLines(double min_hz, double max_hz);
+    // Where the frequency labels go: the major lines, or every line when the
+    // range holds fewer than three, or the range's ends when it holds fewer than two.
+    static std::vector<double> labelFrequencies(double min_hz, double max_hz);
+
     double plotLeft() const { return kLeft; }
     double plotTop() const { return kTop; }
     double plotWidth() const { return width() - kLeft - kRight; }
@@ -79,6 +105,7 @@ signals:
     void styleChanged();
     void geometryChanged();
     void revisionChanged();
+    void rangeChanged();
 
 protected:
     void geometryChange(const QRectF& now, const QRectF& before) override;
@@ -91,10 +118,14 @@ private:
     // The channel the composite is drawn for: the right in R view, else the left.
     uint32_t viewChannel() const;
     double compositeOn(uint32_t channel, double hz) const;
+    // The range as drawn: an inverted one (between two settings) spans an octave.
+    double drawnMaxHz() const { return max_hz_ > min_hz_ ? max_hz_ : min_hz_ * 2.0; }
 
     QPointer<EqSession> session_;
     int revision_ = 0;
     double range_db_ = 15.0;
+    double min_hz_ = 20.0, max_hz_ = 20000.0;
+    bool peak_hold_ = false;
     bool spectrum_visible_ = true;
     bool per_band_ = true;
     QVariantList band_colours_;

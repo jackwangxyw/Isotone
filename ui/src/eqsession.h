@@ -112,7 +112,14 @@ public:
     void setShowingMask(int mask);
 
     // The spectrum at `freqs` in dBFS; false when no audio has arrived lately.
-    bool spectrumLevels(const double* freqs, size_t n, double* out_db) const;
+    // Virtual for the Appearance preview's fixed spectrum (PreviewSession).
+    virtual bool spectrumLevels(const double* freqs, size_t n, double* out_db) const;
+
+    // Settings, General, Spectrum: the peak-hold line, as spectrumLevels; the FFT
+    // size (4096, 8192 or 16384, anything else is ignored), release and tilt.
+    virtual bool spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const;
+    Q_INVOKABLE void setSpectrumOptions(int fftSize, double releaseMs, double tiltDbPerOct);
+    const isotone::ui::SpectrumAnalyzer& spectrumAnalyzer() const { return analyzer_; }
 
     // Edits the current output of `outputs` from now on, starting from what it plays.
     Q_INVOKABLE void useOutput(Outputs* outputs);
@@ -128,8 +135,9 @@ public:
     Q_INVOKABLE void select(int row);
     Q_INVOKABLE void setGain(int row, double db);
     Q_INVOKABLE void setFrequency(int row, double hz);
-    // In the band's own width unit: Q, octaves or dB per octave.
-    Q_INVOKABLE void setWidth(int row, double width);
+    // In the band's own width unit: Q, octaves or dB per octave. Committed at
+    // once unless `commitNow` is false (a held key, committed on release).
+    Q_INVOKABLE void setWidth(int row, double width, bool commitNow = true);
     Q_INVOKABLE void setEnabled(int row, bool on);
     // An isotone::FilterType. Keeps the band's id, frequency, gain and width; a
     // slope becomes the Q of the same shape on a type that is not a shelf.

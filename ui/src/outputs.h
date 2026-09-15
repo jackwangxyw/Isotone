@@ -66,13 +66,22 @@ public:
     bool selectGuid(const std::wstring& endpoint);
     Q_INVOKABLE void refresh();
 
+    // Settings, General, "Switch preset when the default output changes": selects
+    // the output Windows has as the default console output, if it is a working
+    // one. False when it is not.
+    Q_INVOKABLE bool selectDefault();
+
 signals:
     void countChanged();
     void currentChanged();
     void currentActivityChanged();
+    // Windows' default console output is another endpoint than at the last refresh.
+    void defaultOutputChanged();
 
 private:
     void probe();
+    std::wstring default_guid_;   // among all render endpoints, working or not
+    bool refreshed_ = false;
 
     std::vector<Output> outputs_;
     std::wstring current_guid_;

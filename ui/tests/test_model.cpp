@@ -7,7 +7,7 @@
 #include "doctest.h"
 
 #include <QDir>
-#include <QGuiApplication>
+#include <QApplication>
 
 #include <cmath>
 
@@ -287,6 +287,6 @@ int main(int argc, char** argv) {
     // Settings and presets never go to the owner's %APPDATA%\Isotone.
     if (!qEnvironmentVariableIsSet("ISOTONE_DATA_DIR"))
         qputenv("ISOTONE_DATA_DIR", QDir::temp().filePath(QStringLiteral("isotone-model-tests")).toUtf8());
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);   // the tray menu's tests need widgets
     return doctest::Context(argc, argv).run();
 }
