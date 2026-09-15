@@ -9,8 +9,11 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QQmlContext>
 #include <QQmlEngine>
 #include <QtQuickTest>
+
+#include "eqsession.h"
 
 // Offscreen unless the caller picks a platform: on the desktop a window is laid
 // out only while Windows lets it draw, and with the display off (seen
@@ -26,9 +29,29 @@ static const bool kPlatformChosen = [] {
     return true;
 }();
 
+// Surround tests: the session edits a layout with no output behind it, so
+// nothing is written anywhere and no audio plays.
+class TestHooks : public QObject {
+    Q_OBJECT
+public:
+    explicit TestHooks(QQmlEngine* engine) : QObject(engine), engine_(engine) {}
+    Q_INVOKABLE void useLayout(int channels, int speakerMask) {
+        auto* session = engine_->singletonInstance<EqSession*>("Isotone", "EqSession");
+        session->useTarget(isotone::ui::OutputTarget{
+            L"", isotone::ui::Backend::none,
+            isotone::ui::OutputLayout{static_cast<uint32_t>(channels), static_cast<uint32_t>(speakerMask), 48000.0}});
+    }
+
+private:
+    QQmlEngine* engine_;
+};
+
 class Setup : public QObject {
     Q_OBJECT
 public slots:
+    void qmlEngineAvailable(QQmlEngine* engine) {
+        engine->rootContext()->setContextProperty(QStringLiteral("TestHooks"), new TestHooks(engine));
+    }
     void applicationAvailable() {
         for (const char* face : {"Regular", "Medium", "SemiBold"})
             QFontDatabase::addApplicationFont(QStringLiteral(":/qt/qml/Isotone/fonts/InstrumentSans-%1.ttf").arg(QLatin1String(face)));

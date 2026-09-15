@@ -14,6 +14,7 @@
 
 #include "eqsession.h"
 #include "isotone/response.h"
+#include "speaker_setup.h"
 
 namespace {
 
@@ -68,6 +69,9 @@ double ResponseGraph::frequencyAt(double x) const {
 double ResponseGraph::dbAt(double y) const { return (kTop + plotHeight() / 2.0 - y) * range_db_ / (plotHeight() / 2.0); }
 
 uint32_t ResponseGraph::viewChannel() const {
+    // Surround: the channel in view with the most bands (speaker_setup.h).
+    if (session_ && session_->layout().channels > 2)
+        return isotone::ui::primary_view_channel(session_->state(), session_->layout().channels, session_->showingMask());
     const bool stereo = session_ && session_->layout().channels == 2;
     return stereo && session_->viewChannel() == 1 ? 1 : 0;
 }
@@ -89,6 +93,8 @@ double ResponseGraph::compositeAt(double hz) const { return compositeOn(viewChan
 double ResponseGraph::handleDb(int row) const {
     const isotone::Band* b = session_ ? session_->bandAt(row) : nullptr;
     if (b == nullptr) return 0.0;
+    if (session_->layout().channels > 2)
+        return compositeOn(isotone::ui::band_view_channel(*b, session_->layout().channels, session_->showingMask(), viewChannel()), b->fc);
     const bool both = session_->layout().channels == 2 && session_->viewChannel() == 2;
     const bool right_only = (b->channels & 0x3) == 0x2;
     return compositeOn(both && right_only ? 1 : viewChannel(), b->fc);
@@ -97,6 +103,8 @@ double ResponseGraph::handleDb(int row) const {
 bool ResponseGraph::onView(int row) const {
     const isotone::Band* b = session_ ? session_->bandAt(row) : nullptr;
     if (b == nullptr) return false;
+    if (session_->layout().channels > 2)
+        return isotone::ui::band_in_view(*b, session_->layout().channels, session_->showingMask());
     if (session_->layout().channels != 2 || session_->viewChannel() == 2) return true;
     return isotone::band_affects_channel(*b, viewChannel());
 }
@@ -239,6 +247,44 @@ void ResponseGraph::paint(QPainter* p) {
             const double lx = kLeft + pw - 14;
             p->drawText(QPointF(lx, std::clamp(yOf(db[n - 1]) - 8, kTop + 10, kTop + ph)), QStringLiteral("L"));
             p->drawText(QPointF(lx, std::clamp(yOf(right[n - 1]) + 16, kTop + 10, kTop + ph)), QStringLiteral("R"));
+        }
+    }
+    // Surround: a band on another channel in view sits on that channel's line,
+    // drawn as the right is in L+R where it differs, marked with the speaker codes.
+    if (channels > 2 && !state.bypass) {
+        const uint32_t primary = viewChannel();
+        std::vector<uint32_t> others;
+        for (int row = 0; row < session_->rowCount(); ++row) {
+            const uint32_t c = isotone::ui::band_view_channel(*session_->bandAt(row), channels, session_->showingMask(), primary);
+            if (c != primary && std::find(others.begin(), others.end(), c) == others.end()) others.push_back(c);
+        }
+        const std::vector<isotone::ui::Speaker> speakers = isotone::ui::layout_speakers(channels, mask);
+        QFont bold(font_family_);
+        bold.setPixelSize(11);
+        bold.setWeight(QFont::DemiBold);
+        p->setFont(bold);
+        const double lx = kLeft + pw - 14 - QFontMetricsF(bold).horizontalAdvance(QStringLiteral("LFE"));
+        bool marked = false;
+        for (uint32_t c : others) {
+            std::vector<double> line(n);
+            isotone::magnitude_db(drawn, channels, mask, c, freqs.data(), n, kSampleRate, line.data());
+            bool differs = false;
+            for (size_t i = 0; i < n && !differs; ++i) differs = std::abs(line[i] - db[i]) > 0.01;
+            if (!differs) continue;
+            QPen dashed(accent_, 2.5);
+            dashed.setJoinStyle(Qt::RoundJoin);
+            dashed.setCapStyle(Qt::FlatCap);
+            dashed.setDashPattern({7.0 / 2.5, 5.0 / 2.5});
+            p->strokePath(polyline(line), dashed);
+            p->setPen(accent_);
+            p->drawText(QPointF(lx, std::clamp(yOf(line[n - 1]) + 16, kTop + 10, kTop + ph)),
+                        QString::fromStdString(speakers[c].code));
+            marked = true;
+        }
+        if (marked) {
+            p->setPen(accent_);
+            p->drawText(QPointF(lx, std::clamp(yOf(db[n - 1]) - 8, kTop + 10, kTop + ph)),
+                        QString::fromStdString(speakers[primary].code));
         }
     }
     QPen pen(accent_, 2.5);

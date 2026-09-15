@@ -85,6 +85,8 @@ std::optional<double> parse_typed_value(std::string_view text, TypedUnit unit) {
         case TypedUnit::Octaves: unit_ok = unit_ok || s == "oct"; break;
         case TypedUnit::SlopeDb: unit_ok = unit_ok || s == "db" || s == "db/oct"; break;
         case TypedUnit::Plain: break;
+        case TypedUnit::Metres: unit_ok = unit_ok || s == "m"; break;
+        case TypedUnit::Milliseconds: unit_ok = unit_ok || s == "ms"; break;
     }
     if (!unit_ok) return std::nullopt;
     const double result = *v * scale;

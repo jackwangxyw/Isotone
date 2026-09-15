@@ -19,6 +19,8 @@ enum class TypedUnit {
     Octaves,
     SlopeDb,    // "dB/oct"
     Plain,      // no unit: balance
+    Metres,     // "m": a speaker's distance
+    Milliseconds,   // "ms": delays
 };
 
 // The value in the field's base unit (dB, Hz, Q, octaves, dB per octave), or

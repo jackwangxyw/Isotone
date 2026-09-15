@@ -15,7 +15,7 @@ Item {
 
         Column {
             id: scroller
-            width: root.width - 64 - 92 - panel.width - 24
+            width: root.width - 64 - 92 - (speakersPanel.visible ? speakersPanel.width : panel.width) - 24
             spacing: 6
 
             Item {
@@ -160,6 +160,13 @@ Item {
         ChannelsPanel {
             id: panel
             height: parent.height
+            visible: !speakersPanel.visible
+        }
+        // Speakers on outputs with more than two channels.
+        SpeakersPanel {
+            id: speakersPanel
+            height: parent.height
+            visible: EqSession.outputChannels > 2
         }
     }
 }
