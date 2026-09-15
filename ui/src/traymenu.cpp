@@ -66,10 +66,11 @@ void TrayMenu::updateChecks() {
 }
 
 void TrayMenu::updateShortcutText() {
-    // A menu shows the text after a tab as the shortcut column.
+    // A menu shows the text after a tab as the shortcut column. Only for a global
+    // action: in-app keys act only in the window.
     const auto text = [this](const QString& label, const char* id) {
         const QString keys = shortcuts_->nativeText(QString::fromLatin1(id));
-        return keys.isEmpty() ? label : label + QLatin1Char('\t') + keys;
+        return keys.isEmpty() || !shortcuts_->isGlobal(QString::fromLatin1(id)) ? label : label + QLatin1Char('\t') + keys;
     };
     eq_->setText(text(QStringLiteral("EQ"), "eq"));
     mute_->setText(text(QStringLiteral("Mute"), "mute"));

@@ -123,6 +123,65 @@ Item {
             verify(sameColour(Theme.gridMajor, "#26292e"))
         }
 
+        // WCAG relative luminance and contrast ratio.
+        function luminance(c) {
+            c = Qt.color(c)
+            const lin = (v) => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+            return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+        }
+        function contrast(a, b) {
+            const la = luminance(a), lb = luminance(b)
+            return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+        }
+        function atLeast(a, b, ratio, what) {
+            verify(contrast(a, b) >= ratio, what + ": " + contrast(a, b).toFixed(2) + " (" + a + " on " + b + ")")
+        }
+
+        // The tokens Custom does not set follow its background, surface and text,
+        // light or dark, and text on the accent follows the accent.
+        function test_custom_tokens_readable_on_light_and_dark() {
+            AppSettings.theme = "custom"
+            for (const set of [
+                     {name: "light", background: "#f5efe6", surface: "#fffaf3", text: "#2b2520", grid: "#e3dacd", dark: false},
+                     {name: "dark", background: "#0c1722", surface: "#08111a", text: "#dce6f0", grid: "#1f2b38", dark: true}]) {
+                for (const key of ["background", "surface", "text", "grid"]) AppSettings.setValue("appearance/custom/" + key, set[key])
+                compare(Theme.dark, set.dark, set.name)
+                for (const token of ["background", "plot", "surface", "pop", "track", "segmentedSelected", "selectedColumn"])
+                    atLeast(Theme.text, Theme[token], 7, set.name + " text on " + token)
+                atLeast(Theme.muted, Theme.background, 4.5, set.name + " muted on background")
+                atLeast(Theme.muted, Theme.pop, 4.5, set.name + " muted on pop")
+                atLeast(Theme.border, Theme.pop, 1.2, set.name + " border on pop")
+                atLeast(Theme.track, Theme.background, 1.1, set.name + " track on background")
+                atLeast(Theme.segmentedSelected, Theme.track, 1.05, set.name + " segmented selected on track")
+                // Taken from the custom colours, not Light's or Dark's greys: between the background and the text.
+                for (const token of ["surface", "gridMinor", "muted", "track", "selectedColumn", "border"]) {
+                    const c = Qt.color(Theme[token]), bg = Qt.color(set.background), tx = Qt.color(set.text)
+                    for (const ch of ["r", "g", "b"])
+                        verify(c[ch] >= Math.min(bg[ch], tx[ch]) - 1 / 255 && c[ch] <= Math.max(bg[ch], tx[ch]) + 1 / 255,
+                               set.name + " " + token + " " + c + " is not between " + set.background + " and " + set.text)
+                }
+            }
+            // Start from Dark: the derived tokens are Dark's, near enough.
+            waitForRendering(page)
+            mouseClick(child("startFromDark"))
+            verify(sameColour(Theme.background, "#121519"))
+            verify(Theme.dark)
+            for (const [token, dark] of [["surface", "#1b1e23"], ["pop", "#191c20"], ["border", "#2a2e33"], ["muted", "#90969d"],
+                                         ["track", "#23272b"], ["segmentedSelected", "#383c41"], ["selectedColumn", "#191c20"], ["gridMinor", "#1a1d22"]]) {
+                const a = Qt.color(Theme[token]), b = Qt.color(dark)
+                verify(Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) < 16 / 255, token + " " + a + " against Dark's " + dark)
+            }
+
+            for (const accent of ["#ffe08a", "#1a3a7a"]) {
+                AppSettings.customAccent = accent
+                AppSettings.accent = -1
+                atLeast(Theme.textOnAccent, Theme.accent, 4.5, "text on the custom accent")
+                AppSettings.theme = "light"
+                atLeast(Theme.textOnAccent, Theme.accent, 4.5, "text on the custom accent, Light")
+                AppSettings.theme = "custom"
+            }
+        }
+
         function test_custom_accent_popover() {
             mouseClick(child("customAccent"))
             const pop = findChild(overlay, "colourPopover")

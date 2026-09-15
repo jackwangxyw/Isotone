@@ -22,6 +22,14 @@ QtObject {
         return d
     }
 
+    // Shows, raises and activates a window (from the tray too), before a dialog asks.
+    function showWindow(w) {
+        if (w.visibility === Window.Minimized) w.showNormal()
+        else w.show()
+        w.raise()
+        w.requestActivate()
+    }
+
     // A toast at the bottom of the window: text, and an optional action ("Undo").
     signal toastRequested(string text, string actionText, var action)
     function toast(text, actionText, action) { toastRequested(text, actionText || "", action || null) }

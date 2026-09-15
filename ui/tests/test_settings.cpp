@@ -320,8 +320,16 @@ TEST_CASE("the tray menu") {
     // EQ, Mute, -, Output, Preset, -, Open Isotone, Quit
     const QList<QAction*> items = menu->actions();
     REQUIRE(items.size() == 8);
+    // Keys only beside an action whose Global is on (off by default): elsewhere they do nothing.
+    CHECK(items[0]->text() == QStringLiteral("EQ"));
+    CHECK(items[1]->text() == QStringLiteral("Mute"));
+    shortcuts.setGlobal(QStringLiteral("eq"), true);
+    shortcuts.setGlobal(QStringLiteral("mute"), true);
     CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+E"));
     CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+M"));
+    shortcuts.setGlobal(QStringLiteral("mute"), false);
+    CHECK(items[1]->text() == QStringLiteral("Mute"));
+    shortcuts.setGlobal(QStringLiteral("mute"), true);
     CHECK(items[2]->isSeparator());
     CHECK(items[3]->text() == QStringLiteral("Output"));
     CHECK(items[4]->text() == QStringLiteral("Preset"));

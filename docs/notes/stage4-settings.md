@@ -133,7 +133,8 @@ quits; `--tray` starts hidden; a second launch shows the running window.
 
 ## Integration points for the lead
 
-- **UnsavedDialog (presets package)**: `Main.requestClose()` looks up
+- **UnsavedDialog (presets package)** (superseded: `WindowClose` calls
+  `PresetActions.confirmUnsaved`, see "Fixes after review"): `Main.requestClose()` looks up
   `Qt.createComponent("Isotone", "UnsavedDialog")` when `Presets.modified` and opens
   it with `UiState.openDialog(component, { closing: true, afterClose:
   window.finishClose })`. The dialog must declare `property bool closing` (title
@@ -334,3 +335,123 @@ warnings as errors (an unused variable); they were replaced by B1, B1b and B6 ab
 The Theme.qml custom colour read was suspected of not re-reading (a bare
 `AppSettings.themeRevision` statement); run against the unchanged Theme.qml the
 custom colour tests pass, so Theme.qml was left as it was.
+
+## Fixes after review
+
+A review confirmed these with a harness that copied Main's pieces. Main cannot be
+loaded in a test (it attaches the real current output), so its key, press and close
+logic moved into components Main and `tst_windowkeys.qml` both use: `WindowKeys`
+(Delete, `AppShortcuts`, `BandKeys`), `PressWatch`, `WindowClose`. The test lays
+them out as Main does with the real `BandMenu`, `PresetsMenu`, `PresetPrompts`, a
+`Popover` and `FirstRun` in a Loader; the window is a stand-in with show and hide
+counters, so nothing hides or quits.
+
+1. **Keys acted on the band behind dialogs, popovers and first run.** `DialogFrame`
+   and `Popover` give the focus to their card or panel, which does not stop window
+   Shortcuts or `BandKeys`' window filter. Fix: `WindowKeys.held` is true while
+   first run is active or the focus item is visible and inside the overlay; Delete,
+   the in-app shortcuts (`AppShortcuts.keysActive`) and `BandKeys.active` follow it.
+   `ShortcutRegistry.activate` (global hotkeys, tray) still performs. A closed
+   popover's hidden panel keeps the focus (seen in a logged run: Qt leaves active
+   focus on the invisible panel), so a hidden focus item holds nothing; without that,
+   Escape on a popover left the band keys dead until a press.
+   Tests: Delete, Shift+Up and Ctrl+Z change nothing under the unsaved dialog, the
+   presets popover, the band menu, the outputs popover and first run; keys act with
+   the focus in the window, come back after Escape on a dialog and on a popover and
+   after a press closes a popover; global activation still toggles EQ under a dialog.
+2. **A press inside a dialog moved the focus to content.** Fix (`PressWatch`): when
+   the focus item is inside the overlay, the focus goes to its nearest ancestor that
+   holds the press, below the dialog or popover item itself (which fills the
+   window); a press outside the card or panel, or with the focus elsewhere, goes to
+   content as before. Tests: a press on the Save as title keeps the focus in the
+   dialog, Delete does nothing and Escape closes it; a press on the presets panel off
+   its search field keeps Escape; a press elsewhere ends typing.
+3. **A second close or tray Quit stacked another unsaved dialog.** Fix
+   (`WindowClose`): one pending dialog (cleared on its `closed`); a repeat shows and
+   raises the window and asks nothing; a Quit while it is open makes Save or Don't
+   save quit instead of hiding; Cancel forgets the Quit. Tests: two closes, one
+   dialog, one hide; close, hide, Quit: the window is shown, one dialog, Don't save
+   quits with no second hide; Cancel then close asks again; nothing unsaved hides
+   or quits at once.
+4. **Ctrl+S did nothing on an untitled output.** Fix: `AppShortcuts` calls
+   `PresetActions.save()`. Test: Ctrl+S on an untitled output opens Save as.
+5. **A preset picked from the tray or a Next/Previous hotkey asked in the hidden
+   window.** Fix (`PresetPrompts`): `UiState.showWindow(host)` (show, or showNormal
+   when minimized; raise; requestActivate) before the dialog, and one unsaved dialog:
+   a later pick while it is open changes the preset loaded after it. `host` is the
+   item's window; the test gives the stand-in. Test: with the window hidden,
+   `Presets.load` shows it while no dialog exists yet, `Presets.next()` adds no
+   dialog, Don't save loads B.
+6. **Tray menu key text.** "Ctrl+E" and "Ctrl+M" showed beside EQ and Mute with
+   Global off (the default), where the keys do nothing. Fix: `TrayMenu` shows the
+   keys only when `isGlobal`. Test (doctest "the tray menu"): no keys by default,
+   keys after Global on, gone again after Global off.
+7. **Custom theme.** Only five tokens followed the custom colours and `dark` was
+   always true, so a light custom background kept dark pop, surface, border and
+   segmented colours (text on them unreadable) and the dark accents and status
+   colours; `textOnAccent` ignored a light custom accent. Fix (`Theme.qml`): Custom
+   is dark when its background's luminance is not above its text's, so the tokens
+   it does not set come from the matching built-in set; surface, gridMinor, muted,
+   track, selectedColumn and border are mixed from background to text at the share
+   Dark or Light uses (surface 4.3% or 5.6%, muted 60% or 66%, and so on); pop and
+   segmentedSelected are the custom surface on a light Custom (Light uses its plot
+   colour there) and mixed on a dark one. `textOnAccent` for a custom accent is
+   whichever of the two text colours has the higher contrast. Still five user-set
+   colours. Test (`tst_settingsappearance`): for a light (#f5efe6, #fffaf3, #2b2520)
+   and a dark (#0c1722, #08111a, #dce6f0) set, `dark` follows; text at least 7:1 on
+   background, plot, surface, pop, track, segmented and selected column; muted 4.5:1
+   on background and pop; border and track visible; the mixed tokens lie between
+   background and text; Start from Dark gives tokens within 16/255 (summed over
+   channels) of Dark's; text on #ffe08a and #1a3a7a at least 4.5:1 in Custom and
+   Light.
+
+**Checked, not a bug: `--key` and Shortcuts.** On a sandboxed run (`--data-dir`,
+`--compat-dir` scratch, `--output` CABLE Input) `--add-band 1000,3 --key Delete`
+deleted the band (the "Band 1 deleted" toast shows), and `--key Ctrl+E --key
+Ctrl+M` turned EQ off and Mute on: `sendEvent` to the QQuickWindow reaches QML
+`Shortcut`s under QApplication. main.cpp is unchanged. After the fixes, `--click
+320,38 --key Delete --key Up` (presets popover open) left the band and its gain as
+they were. CABLE Input showed "Native" in the sidebar during these runs.
+
+Mutation checks (script `mutate.py` in the session scratchpad; each built, its test
+file run, restored):
+
+| Mutation | Result |
+|---|---|
+| W1 `held` always false | caught (the five "not under" tests, press in a dialog) |
+| W2 first run not held | caught (first run) |
+| W3 a hidden focus item held | caught (keys come back when a popover closes) |
+| W4 AppShortcuts ignores `keysActive` | caught (Ctrl+Z under each of the five) |
+| W5 BandKeys ignores `held` | caught (Up under each of the five) |
+| W6 Delete ignores `held` | caught (Delete under each of the five) |
+| W7 Ctrl+S calls `Presets.save()` | caught (Ctrl+S on untitled) |
+| P1 a press always moves the focus to content | caught (press in a dialog, press in a popover) |
+| P2 a press may leave the focus on the popover item itself | caught (keys come back when a popover closes) |
+| C1 no pending check, close stacks dialogs | caught (second close, Quit while closing) |
+| C2 Quit while closing hides | caught (Quit while closing, nothing unsaved) |
+| C3 a repeat does not show the window | caught (Quit while closing) |
+| R1 a tray pick does not show the window | caught (tray pick) |
+| R2 the window shown after the dialog is made | caught (tray pick) |
+| R3 tray picks stack dialogs | caught (tray pick) |
+| T1 tray keys without Global | caught (the tray menu) |
+| H1 Custom always dark | caught |
+| H2 built-in values on Custom, no mixing | **not caught at first** (Light's greys read fine on a light custom set); the "between background and text" check was added, then caught |
+| H3 light Custom pop mixed instead of the surface | caught (muted on pop 4.39) |
+| H4 `textOnAccent` ignores a custom accent | caught (#fafcfe on #ffe08a, 1.25) |
+| H5 muted share 0.3 | caught (muted on background 1.84) |
+
+Not verified: closing and tray Quit on the running app (the components are tested
+with a stand-in window; Main with them loaded and took keys in the `--key` runs); a
+Custom theme looked at in a screenshot.
+
+Left as it is: the unsaved dialog for a preset pick and the one for closing are
+separate, so closing while a pick's dialog is open still opens the close dialog on
+top of it. A Global action whose keys another app holds ("In use") still shows its
+keys in the tray menu.
+
+Shared files changed: `ui/qml/Main.qml` (uses `WindowKeys`, `WindowClose`,
+`PressWatch`; `requestQuit` kept for main.cpp; `requestClose` and `finishClose`
+removed, nothing else called them), `ui/qml/UiState.qml` (`showWindow`),
+`ui/qml/Theme.qml`, `ui/qml/PresetPrompts.qml`, `ui/qml/AppShortcuts.qml`,
+`ui/src/traymenu.cpp`, `ui/CMakeLists.txt`, `ui/tests/test_settings.cpp`,
+`ui/tests/qml/tst_settingsappearance.qml`.

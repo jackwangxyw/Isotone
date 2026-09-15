@@ -46,44 +46,25 @@ Window {
         sourceComponent: FirstRun { onFinished: firstRun.active = false }
     }
 
-    // A shortcut, not a key handler: a field being typed in keeps Delete for its text.
-    Shortcut {
-        sequence: ShortcutRegistry.revision >= 0 ? ShortcutRegistry.sequence("delete") : ""   // Settings, Shortcuts
-        enabled: UiState.view === "eq" && !ShortcutRegistry.capturing
-        onActivated: EqSession.deleteBand(EqSession.selectedRow)
-    }
-
-    // Settings: shortcuts, the selected band's keys, following the default output.
-    AppShortcuts {}
-    BandKeys {
-        session: EqSession
-        active: UiState.view === "eq"
+    // Settings: Delete, shortcuts, the selected band's keys, following the default output.
+    WindowKeys {
+        overlay: overlay
+        firstRun: firstRun
     }
     DefaultOutputFollower {}
 
-    // Settings, General, closing the window: to the tray, or quit. With unsaved
-    // changes "Save changes to <name> before closing?" asks first; Cancel keeps
-    // the window open.
+    // Settings, General, closing the window (WindowClose).
+    WindowClose {
+        id: closer
+        host: window
+        onQuit: Qt.quit()
+    }
     onClosing: (close) => {
         close.accepted = false
-        window.requestClose()
+        closer.requestClose()
     }
-    function requestClose() {
-        PresetActions.confirmUnsaved(true, window.finishClose)
-    }
-    // The tray's Quit: the same question, over the window.
-    function requestQuit() {
-        if (Presets.modified) {
-            window.show()
-            window.raise()
-            window.requestActivate()
-        }
-        PresetActions.confirmUnsaved(true, () => Qt.quit())
-    }
-    function finishClose() {
-        if (GeneralSettings.keepInTray) window.hide()
-        else Qt.quit()
-    }
+    // The tray's Quit (main.cpp).
+    function requestQuit() { closer.requestQuit() }
 
     Row {
         id: content
@@ -220,16 +201,8 @@ Window {
         }
     }
 
-    // A press anywhere else ends typing in a field. Passes every press on.
-    MouseArea {
-        id: pressWatch
-        anchors.fill: parent
-        z: 1000
-        acceptedButtons: Qt.AllButtons
-        onPressed: (mouse) => {
-            const f = window.activeFocusItem
-            if (f && !f.contains(f.mapFromItem(pressWatch, mouse.x, mouse.y))) content.forceActiveFocus()
-            mouse.accepted = false
-        }
+    PressWatch {
+        content: content
+        overlay: overlay
     }
 }
