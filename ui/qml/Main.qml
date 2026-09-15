@@ -198,7 +198,7 @@ Window {
                 Button {
                     id: toastAction
                     visible: text !== ""
-                    kind: "ghost"
+                    kind: "link"
                     anchors.verticalCenter: parent.verticalCenter
                     onClicked: {
                         toast.visible = false

@@ -7,17 +7,17 @@ Rectangle {
     id: root
     property string text
     property string icon
-    property string kind: "normal"   // normal, primary, ghost, danger
+    property string kind: "normal"   // normal, primary, ghost, danger, link (ghost in the accent)
     property bool active: true   // false greys it and ignores clicks
     signal clicked()
 
-    readonly property color foreground: kind === "primary" ? Theme.textOnAccent : kind === "danger" ? Theme.danger : Theme.text
+    readonly property color foreground: kind === "primary" ? Theme.textOnAccent : kind === "danger" ? Theme.danger : kind === "link" ? Theme.accent : Theme.text
 
     implicitWidth: row.implicitWidth + 28
     implicitHeight: 32
     radius: 8
     color: kind === "primary" ? Theme.accent
-         : kind === "ghost" ? (area.containsMouse && active ? Theme.surface : "transparent")
+         : kind === "ghost" || kind === "link" ? (area.containsMouse && active ? Theme.surface : "transparent")
          : area.containsMouse && active ? Qt.lighter(Theme.surface, Theme.dark ? 1.25 : 0.96) : Theme.surface
     opacity: active ? 1 : 0.45
     activeFocusOnTab: true

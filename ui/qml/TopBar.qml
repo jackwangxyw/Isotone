@@ -48,7 +48,7 @@ Item {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     const p = nameRow.mapToItem(null, 0, nameRow.height + 8)
-                    root.presetsRequested(p.x - 12, p.y)
+                    root.presetsRequested(p.x, p.y)
                 }
             }
         }
