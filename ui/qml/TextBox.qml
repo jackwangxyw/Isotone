@@ -12,7 +12,7 @@ Column {
     signal accepted()
 
     spacing: 6
-    implicitWidth: 240
+    width: 240   // a Column's implicitWidth is read-only
 
     Text {
         visible: root.label !== ""

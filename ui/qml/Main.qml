@@ -74,6 +74,9 @@ Window {
 
         BandMenu { id: bandMenu; anchors.fill: parent }
         PresetsMenu { id: presetsMenu; anchors.fill: parent }
+        // Presets: the deleted band toast, the unsaved dialog on a load, and a dropped file.
+        PresetPrompts {}
+        DropOverlay { anchors.fill: parent; z: 950 }
 
         // The collapsed rail's outputs list (and the top bar's output name).
         Popover {
