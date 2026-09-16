@@ -128,6 +128,7 @@ Popover {
                         required property string name
                         required property string assigned
                         required property string forOutput
+                        required property bool loadable
                         required property bool current
                         readonly property bool renamingThis: root.renaming === name
                         readonly property bool confirming: root.confirmingDelete === name
@@ -142,12 +143,15 @@ Popover {
                         color: hover.hovered || renamingThis || confirming ? Theme.surface : "transparent"
 
                         HoverHandler { id: hover }
+                        // Takes the click even for a preset that is for another
+                        // output, so a dead click does not fall through and close
+                        // the popover.
                         MouseArea {
                             width: parent.width
                             height: 44
                             enabled: !row.renamingThis && !row.confirming && !row.scopingThis
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.loadPreset(row.name)
+                            cursorShape: row.loadable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: if (row.loadable) root.loadPreset(row.name)
                         }
 
                         // Hidden while renaming: that row already shows the save check.
@@ -163,6 +167,7 @@ Popover {
 
                         Column {
                             id: labels
+                            opacity: row.loadable ? 1 : 0.45
                             x: 38
                             width: (row.showIcons ? icons.x - 8 : row.confirming ? confirm.x - 8 : row.width - 10) - x
                             y: row.scopingThis ? (44 - implicitHeight) / 2 : (row.height - implicitHeight) / 2

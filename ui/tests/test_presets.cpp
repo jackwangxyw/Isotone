@@ -810,11 +810,11 @@ TEST_CASE("presets: a preset is for every output until it is narrowed to one") {
     CHECK(rig.presets->saveAs(QStringLiteral("Just A"), a) == QStringLiteral("Just A"));
     CHECK(rig.presets->presetOutput(QStringLiteral("Just A")) == a);
 
-    // Saved for another output, from this one: still listed here, and still this
-    // output's preset. Hiding it made it vanish as soon as it was saved (owner).
+    // Saved for another output, from this one: made and listed here, but not taken
+    // up here, since a preset for another output does not load here.
     rig.session->setEqPart(hd650());
     CHECK(rig.presets->saveAs(QStringLiteral("Just B"), b) == QStringLiteral("Just B"));
-    CHECK(rig.presets->currentName() == QStringLiteral("Just B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Just A"));
     CHECK(rig.presets->names() ==
           QStringList({QStringLiteral("Everywhere"), QStringLiteral("Just A"), QStringLiteral("Just B")}));
 
@@ -839,4 +839,105 @@ TEST_CASE("presets: a preset is for every output until it is narrowed to one") {
     rig.makePresets();
     CHECK(rig.presets->presetOutput(QStringLiteral("Just A")) == a);
     CHECK(rig.presets->presetOutput(QStringLiteral("Everywhere")).isEmpty());
+}
+
+TEST_CASE("presets: a preset narrowed to one output does not load on another") {
+    // The owner, 2026-09-16: a preset for the cable, clicked while the headphones
+    // were current, took the headphones over and then left them untitled on the
+    // way back. It does not load there at all now; its row says which output it is
+    // for, and it can be widened from there.
+    Rig rig("foreign");
+    const QString a = QString::fromStdWString(rig.a.guid);
+    const QString b = QString::fromStdWString(rig.b.guid);
+
+    rig.session->useTarget(rig.b);
+    rig.session->setEqPart(hd650());
+    REQUIRE(rig.presets->saveAs(QStringLiteral("Only B"), b) == QStringLiteral("Only B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Only B"));
+
+    // On A it is listed, greyed, and clicking it does nothing at all.
+    rig.session->useTarget(rig.a);
+    const int row = rig.presets->names().indexOf(QStringLiteral("Only B"));
+    REQUIRE(row >= 0);
+    CHECK_FALSE(rig.presets->data(rig.presets->index(row), Presets::LoadableRole).toBool());
+    CHECK(rig.presets->data(rig.presets->index(row), Presets::AssignedRole).toString() == QStringLiteral("Monitor"));
+    const int bands = rig.session->rowCount();
+    rig.presets->load(QStringLiteral("Only B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Untitled"));
+    CHECK(rig.session->rowCount() == bands);
+    CHECK(rig.presets->assignedName(a).isEmpty());
+
+    // On B it loads as any preset does, and the rows are told that it does: the
+    // list reads the role once and keeps it, so a switch that does not carry
+    // LoadableRole leaves every row where the last output left it (owner,
+    // 2026-09-16: "the device specific ones refuse to load at all, even when I'm
+    // on the specified output").
+    QSignalSpy changed(rig.presets.get(), &QAbstractItemModel::dataChanged);
+    rig.session->useTarget(rig.b);
+    REQUIRE(changed.size() > 0);
+    bool told = false;
+    for (const QList<QVariant>& call : changed)
+        told = told || call.at(2).value<QList<int>>().contains(Presets::LoadableRole);
+    CHECK(told);
+    CHECK(rig.presets->data(rig.presets->index(row), Presets::LoadableRole).toBool());
+    CHECK(rig.presets->currentName() == QStringLiteral("Only B"));
+
+    // Widened, it loads anywhere.
+    rig.presets->setPresetOutput(QStringLiteral("Only B"), QString());
+    rig.session->useTarget(rig.a);
+    CHECK(rig.presets->data(rig.presets->index(row), Presets::LoadableRole).toBool());
+    rig.presets->load(QStringLiteral("Only B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Only B"));
+}
+
+TEST_CASE("presets: saving for another output makes the preset and leaves this one alone") {
+    Rig rig("savefor");
+    const QString a = QString::fromStdWString(rig.a.guid);
+    const QString b = QString::fromStdWString(rig.b.guid);
+    rig.session->useTarget(rig.a);
+    rig.session->setEqPart(hd650());
+
+    CHECK(rig.presets->saveAs(QStringLiteral("For B"), b) == QStringLiteral("For B"));
+    CHECK(rig.presets->presetOutput(QStringLiteral("For B")) == b);
+    // A did not take it up: it is not for A.
+    CHECK(rig.presets->currentName() == QStringLiteral("Untitled"));
+    CHECK(rig.presets->assignedName(a).isEmpty());
+    CHECK(rig.session->rowCount() == 3);   // what A plays is untouched
+
+    // B loads it.
+    rig.session->useTarget(rig.b);
+    rig.presets->load(QStringLiteral("For B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("For B"));
+}
+
+TEST_CASE("presets: an output keeps a preset that is for it across a switch away and back") {
+    // The owner, 2026-09-16: a preset narrowed to the cable, loaded on the cable,
+    // was gone when he came back to it ("went to a new untitled one, the filters
+    // saved over tho").
+    Rig rig("kept");
+    const QString b = QString::fromStdWString(rig.b.guid);
+
+    rig.session->useTarget(rig.b);
+    rig.session->setEqPart(hd650());
+    REQUIRE(rig.presets->saveAs(QStringLiteral("Cable only"), b) == QStringLiteral("Cable only"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Cable only"));
+    CHECK(rig.presets->assignedName(b) == QStringLiteral("Cable only"));
+
+    rig.session->useTarget(rig.a);
+    rig.session->useTarget(rig.b);
+    CHECK(rig.presets->currentName() == QStringLiteral("Cable only"));
+    CHECK_FALSE(rig.presets->modified());
+
+    // And once more, after loading it again from the list.
+    rig.presets->load(QStringLiteral("Cable only"));
+    rig.session->useTarget(rig.a);
+    rig.session->useTarget(rig.b);
+    CHECK(rig.presets->currentName() == QStringLiteral("Cable only"));
+
+    // The GUID it was narrowed to may be spelled in another case than the one the
+    // session carries: the same output either way.
+    rig.presets->setPresetOutput(QStringLiteral("Cable only"), b.toUpper());
+    rig.session->useTarget(rig.a);
+    rig.session->useTarget(rig.b);
+    CHECK(rig.presets->currentName() == QStringLiteral("Cable only"));
 }

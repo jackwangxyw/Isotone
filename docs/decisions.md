@@ -2557,9 +2557,48 @@ output (a file written before this reads as every output):
 for a layout polish as the devices tests: the row grows to hold the choices, and a
 click sent before that lands where they were.
 
+## 2026-09-16: Loose ends after the owner's evening
+
+**A flake seen once, unreproduced.** One `ui_model_tests` run failed 2 of its
+1644 assertions, in the run straight after the app was force-killed and the tree
+rebuilt; its output was gone before it could be read. Twelve runs since have
+passed: five plain, three with the app running, and four more each straight after
+killing it. The most likely cause is the devicetool exe having just been written
+when a devices test spawned it, since those tests compare an in-process read with
+what `isotone-devicetool status` says. Left as it is, on the record, rather than
+guarded against something that has not been seen twice.
+
+**A preset narrowed to one output does not load on another.** Testing the
+default-output change, the owner found that an output comes back to the preset it
+last had, and since a preset narrowed to another output could still be loaded
+anywhere, an output could come back to one that is not for it. The first answer
+was to drop such an assignment when switching to an output, which the owner then
+hit from the other side: a cable-only preset clicked while the headphones were
+current took them over, and left them untitled with the filters still playing on
+the way back. The rule is now the simple one he chose: **a preset for one output
+loads on that output and nowhere else.**
+
+- Its row on another output is faded and does not load; the row still takes the
+  click, so a dead click does not fall through and close the popover.
+- The row's icons still work there, so it can be widened to every output from
+  where it is seen.
+- Saving for another output makes the preset and leaves this output as it was.
+- Switching to an output still drops an assignment to a preset that is for another
+  one, which is what repairs the state this left behind. GUIDs are compared
+  without case, since the one a preset carries need not be spelled as the session
+  spells it.
+
+Mutation-checked both ways: without the load guard the new test fails three
+assertions, and with the switch guard disabled the older one fails.
+
+**The stray saved state is gone**: the `{8f4d2a10-...d157}.bin` under
+`%ProgramData%/IsoAPO/devices`, left by a test under a GUID that is no endpoint
+on this machine. The one real file there, `{407cef09-...}.bin`, was
+not touched.
+
 ---
 
-# Where things stand (end of 2026-09-15)
+# Where things stand (2026-09-16)
 
 ## Done
 
@@ -2620,17 +2659,26 @@ points IntelliSense at `build/compile_commands.json`.
 
 1. **Linux daemon**, deferred with 1c.
 
-**Stage 4** remaining: the owner's use of the app on real outputs, and what only
-the owner can run: a real install, repair or uninstall from Devices (with the
-Windows approval prompt), attaching config.txt, launch at sign-in, following a real
-default output change, the tray on the desktop, the native file dialogs and a real
-drag from Explorer. Open decisions for the owner: global hotkeys off by default;
-live propagation of preset edits to other outputs (now on save); the entries of
-2026-09-15 list the rest.
+**Stage 4** remaining, all of it on the owner's machine and none of it testable
+here:
+
+1. **A real install, repair and uninstall from Devices**, with the Windows
+   approval prompt, on an output that is not the cable.
+2. **Attach config.txt** on an Equalizer APO output, and edit it live.
+3. **Launch at sign-in**: the Run value, and the window starting in the tray.
+4. **A real default output change** with "Switch preset when the default output
+   changes" on, including a preset narrowed to that output.
+5. **The tray on the desktop**: its menu, the window closing to it, quitting.
+6. **The native dialogs**: Import and Export through the file dialogs, and a real
+   drag from Explorer onto the window.
+
+Open decisions for the owner: global hotkeys off by default; live propagation of
+preset edits to other outputs (now on save); the entries of 2026-09-15 list the
+rest.
 
 **Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec, and
 stage 4's tree is tidy for it: no agent worktrees or branches left, `main` clean,
-the three UI suites green (44 / 102 / 264), and CI green. What stage 5 inherits
+the three UI suites green (42 / 106 / 266), and CI green. What stage 5 inherits
 that it will touch: `EqSession` (the edited state and undo), `ResponseGraph`,
 `DeviceLink` (where an edit goes, native or Equalizer APO), the spectrum and the
 test tone.

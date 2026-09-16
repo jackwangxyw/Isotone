@@ -99,6 +99,13 @@ const PresetStore::Preset* Presets::presetAt(int row) const {
     return &store_.presets()[static_cast<size_t>(row)];
 }
 
+// A preset is for every output, or for one: narrowed to another output it is
+// listed here but does not load (owner, 2026-09-16). A GUID may be spelled in
+// either case, depending on where it was read.
+bool Presets::loadableHere(const PresetStore::Preset& p) const {
+    return p.for_output.isEmpty() || p.for_output.compare(currentGuid(), Qt::CaseInsensitive) == 0;
+}
+
 QVariant Presets::data(const QModelIndex& index, int role) const {
     const PresetStore::Preset* at = presetAt(index.row());
     if (at == nullptr) return {};
@@ -112,12 +119,17 @@ QVariant Presets::data(const QModelIndex& index, int role) const {
         // What the preset is for: an output's name, or empty for every output.
         case AssignedRole: return p.for_output.isEmpty() ? QString() : outputName(p.for_output);
         case ForOutputRole: return p.for_output;
+        case LoadableRole: return loadableHere(p);
     }
     return {};
 }
 
 QHash<int, QByteArray> Presets::roleNames() const {
-    return {{NameRole, "name"}, {AssignedRole, "assigned"}, {CurrentRole, "current"}, {ForOutputRole, "forOutput"}};
+    return {{NameRole, "name"},
+            {AssignedRole, "assigned"},
+            {CurrentRole, "current"},
+            {ForOutputRole, "forOutput"},
+            {LoadableRole, "loadable"}};
 }
 
 QStringList Presets::names() const {
@@ -154,7 +166,7 @@ QString Presets::currentName() const { return current_name_; }
 QString Presets::outputName(const QString& guid) const {
     if (outputs_) {
         for (const OutputInfo& o : outputs_())
-            if (QString::fromStdWString(o.target.guid) == guid) return o.name;
+            if (QString::fromStdWString(o.target.guid).compare(guid, Qt::CaseInsensitive) == 0) return o.name;
     }
     return store_.outputName(guid);
 }
@@ -171,6 +183,16 @@ void Presets::outputChanged() {
     if (!session_) return;
     const QString guid = currentGuid();
     OutputMemory& m = memory();
+    // An output does not take up a preset that is for another one. It can be
+    // loaded there on purpose and stays while it is loaded, but coming back to
+    // this output does not bring it back (owner, 2026-09-16).
+    if (const PresetStore::Preset* had = currentPreset()) {
+        // A GUID may be spelled in either case, depending on where it was read.
+        if (!had->for_output.isEmpty() && had->for_output.compare(guid, Qt::CaseInsensitive) != 0) {
+            setAssignment(guid, QString());
+            m.detached = false;
+        }
+    }
     const PresetStore::Preset* p = currentPreset();
     if (p && !m.detached) {
         // What the output plays is its preset: take the preset's exact values,
@@ -186,7 +208,8 @@ void Presets::outputChanged() {
         m.has_baseline = true;
     }
     refresh();
-    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, CurrentRole});
+    if (rowCount() > 0)
+        emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, CurrentRole, LoadableRole});
 }
 
 void Presets::refresh() {
@@ -227,7 +250,8 @@ void Presets::apply(const PresetStore::Preset& preset) {
     session_->saveToOutput();
     refresh();
     emit currentChanged();
-    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, CurrentRole});
+    if (rowCount() > 0)
+        emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, CurrentRole, LoadableRole});
 }
 
 void Presets::writeTo(const isotone::ui::OutputTarget& target, const isotone::EqState& eq) {
@@ -269,7 +293,7 @@ void Presets::propagate(const QString& id) {
 
 void Presets::load(const QString& name) {
     const PresetStore::Preset* p = store_.byName(name);
-    if (!p || !session_) return;
+    if (!p || !session_ || !loadableHere(*p)) return;
     if (modified_) {
         emit unsavedChanges(name);
         return;
@@ -302,6 +326,13 @@ QString Presets::saveAs(const QString& name, const QString& forOutput) {
     if (!session_) return QString();
     const QString id = store_.add(name, session_->eqPart(), forOutput);
     if (id.isEmpty()) return QString();
+    // Saved for another output: it is made, and this one is left as it was, since
+    // a preset for another output does not load here.
+    if (!loadableHere(*store_.byId(id))) {
+        rebuild();
+        refresh();
+        return store_.byId(id)->name;
+    }
     memory().detached = false;
     setAssignment(currentGuid(), id);
     session_->saveToOutput();
@@ -354,7 +385,7 @@ void Presets::assign(const QString& guid, const QString& name) {
         for (const OutputInfo& o : outputs_())
             if (QString::fromStdWString(o.target.guid) == guid) writeTo(o.target, p->eq);
     }
-    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole});
+    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, LoadableRole});
 }
 
 QString Presets::rename(const QString& name, const QString& to) {

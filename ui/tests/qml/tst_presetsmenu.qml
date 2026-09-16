@@ -93,6 +93,31 @@ Item {
             compare(r.height, height)
         }
 
+        // A preset for another output is listed, faded, and does not load when it is
+        // clicked (owner, 2026-09-16). No real output here, so one is invented.
+        function test_a_preset_for_another_output_is_faded_and_does_not_load() {
+            Presets.setPresetOutput("Late night", "{00000000-0000-4000-8000-00000000beef}")
+            const r = row("Late night")
+            tryVerify(() => r.loadable === false)
+            compare(r.assigned, "")          // no such output to name here
+            const labels = r.children[2]     // the name and its line
+            verify(labels.opacity < 1)
+            const before = Presets.currentName
+            mouseClick(r, r.width / 2, 22)
+            compare(Presets.currentName, before)
+            verify(menu.open, "a dead click does not close the popover")
+
+            // Widened from its own row, it loads again. The rows are made again
+            // when the model resets, so this one is found and settled first.
+            Presets.setPresetOutput("Late night", "")
+            tryVerify(() => row("Late night") !== null && row("Late night").loadable === true)
+            const again = row("Late night")
+            waitForItemPolished(again)
+            waitForRendering(menu)
+            mouseClick(again, again.width / 2, 22)
+            compare(Presets.currentName, "Late night")
+        }
+
         function test_search_filters_the_list() {
             mouseClick(child(menu, "presetSearch"))
             type("NIGHT")

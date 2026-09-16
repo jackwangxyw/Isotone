@@ -53,8 +53,9 @@ class Presets : public QAbstractListModel {
 
 public:
     // AssignedRole: the name of the output the preset is for, empty for every
-    // output; ForOutputRole its GUID.
-    enum Role { NameRole = Qt::UserRole + 1, AssignedRole, CurrentRole, ForOutputRole };
+    // output; ForOutputRole its GUID; LoadableRole false on an output it is not
+    // for, where the row is greyed and does not load.
+    enum Role { NameRole = Qt::UserRole + 1, AssignedRole, CurrentRole, ForOutputRole, LoadableRole };
 
     struct OutputInfo {
         isotone::ui::OutputTarget target;
@@ -154,6 +155,8 @@ private:
     void refresh();
     void rebuild();
     const PresetStore::Preset* presetAt(int row) const;
+    // A preset narrowed to another output does not load on this one.
+    bool loadableHere(const PresetStore::Preset& p) const;
     void step(int by);
     // Loads a preset's EQ on the current output: EqSession, the output and its saved state.
     void apply(const PresetStore::Preset& p);
