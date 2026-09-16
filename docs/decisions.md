@@ -2301,6 +2301,50 @@ all pass. The Devices table keeps each cell on one line.
 
 ---
 
+## 2026-09-15: The owner's first use of the app, and the fixes
+
+The owner installed IsoAPO on a real output and used the app. Everything reported
+was fixed the same day, each with a test that failed first and a mutation check.
+
+**The spectrum looked bad** (the owner's main point, comparing it with
+EasyEffects). It was drawn with one point per pixel, each the loudest FFT bin in
+that pixel's span, so every harmonic of the music became a spike and the high end
+was a comb. Now the graph asks for one point per 5 px (64 to 320), each the mean
+power of the bins in its span (`SpectrumAnalyzer::Bands::Mean`; `Loudest` stays for
+anything that wants a tone's own level), smooths them with a short Gaussian across
+neighbours and draws a Catmull-Rom curve through them. Judged on a real track from
+the owner's music played into CABLE Input with a scratch Media Foundation player,
+in both themes. Peak hold was not involved: it is off by default.
+
+**Tilt was reported as doing nothing.** It works: the same track at 4.5 dB/oct
+pulls the bass to the floor and lifts the mids. With nothing playing there is no
+spectrum to tilt, which is the likely reading. Left as it is.
+
+**The rest, as the owner listed them.**
+- The sidebar was broken after collapsing and expanding again: the navigation kept
+  the rail's anchor, so the items stayed indented. Anchors gone, and the rail's
+  column has its own width.
+- Handles are 10 px, 12 selected (the boards had 12 and 14), and a double-click on
+  one resets that band's gain, as a double-click on its slider does.
+- The undo toast stays 3 s and fades in and out over 250 ms; it moved to
+  `Toast.qml` so it can be tested.
+- The horizontal wheel over the band strip takes `pixelDelta` where the event has
+  it, and every delta eases `contentX` towards its target (260 ms, out cubic), so a
+  free-spinning side wheel glides instead of stepping.
+- Devices Refresh shows a spinner while it reads (held at least 400 ms) and
+  "Refreshed" with a check for 1.5 s.
+- A right click anywhere in a band's column opens the band popover, as clicking the
+  type name does.
+- Add band is centred in its box; the owner's reading of the box (between the two
+  rules, so including the Row's spacing) was followed over the board's.
+- Renaming a preset hides the current-preset check, so only the save check is there.
+
+**A flaky test found on the way**: `tst_settingsoutputs.qml` and `tst_devices.qml`
+pass alone but two to four of their cases fail in the full suite, differently each
+run. It predates these fixes.
+
+---
+
 # Where things stand (end of 2026-09-15)
 
 ## Done
