@@ -2339,9 +2339,23 @@ spectrum to tilt, which is the likely reading. Left as it is.
   rules, so including the Row's spacing) was followed over the board's.
 - Renaming a preset hides the current-preset check, so only the save check is there.
 
-**A flaky test found on the way**: `tst_settingsoutputs.qml` and `tst_devices.qml`
-pass alone but two to four of their cases fail in the full suite, differently each
-run. It predates these fixes.
+**A flaky test found on the way, and its cause.** Two to four cases of
+`tst_settingsoutputs.qml` and `tst_devices.qml` failed in the full suite,
+differently each run. Not leaked state: a button a phase change has just shown is
+placed on the next polish, which offscreen regularly takes longer than the tests'
+30 ms wait, and `mouseClick` maps the item where it is at the call, so the click
+landed on the old layout (logged: an Apply button read at x 980 w 72, settling to
+x 926 w 74; 2 to 5 of 22 clicks per run were stale). The four devices test files
+now wait for the layout polish of the item and its parents before clicking, and
+Settings Outputs resets the compat config, the Off keys and the scripted outputs in
+its `init`. Removing only the polish wait brings the failures back. Qt Quick Test
+gives each file its own engine, so the QML singletons do not leak; settings.ini and
+the shared compat directory do, which is what the reset covers.
+
+**After all of it**: `ui_tests` 40, `ui_model_tests` 102, `ui_qml_tests` 263
+five times in a row with no failures, the MSVC build with warnings as errors and its
+7 ctest suites, the APO self test, the transport and reference-data checks, and the
+GCC build and tests.
 
 ---
 

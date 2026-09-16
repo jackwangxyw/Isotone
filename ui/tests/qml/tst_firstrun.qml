@@ -20,6 +20,10 @@ Item {
         function click(item) {
             verify(item !== null)
             wait(30)
+            // A button a phase change has just shown is placed on the next polish,
+            // which offscreen can take longer than the wait; mouseClick maps the
+            // item where it is now, so without this it clicks the old layout.
+            for (let i = item; i; i = i.parent) waitForItemPolished(i)
             mouseClick(item)
         }
 
