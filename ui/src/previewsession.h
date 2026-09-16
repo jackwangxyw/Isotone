@@ -19,5 +19,6 @@ public:
     explicit PreviewSession(QObject* parent = nullptr);
 
     bool spectrumLevels(const double* freqs, size_t n, double* out_db) const override;
-    bool spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const override;
+    // Fixed, so the preview looks the same every time it is drawn.
+    double spectrumTopDb() const override { return -10.0; }
 };

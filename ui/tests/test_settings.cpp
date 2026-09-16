@@ -404,13 +404,12 @@ TEST_CASE("the preview session is a fixed sample with a spectrum, and writes now
     CHECK(preview.selectedRow() == 3);
     CHECK(preview.outputChannels() == 2);
     const double freqs[] = {100.0, 1000.0, 10000.0};
-    double levels[3], peaks[3];
+    double levels[3];
     CHECK(preview.spectrumLevels(freqs, 3, levels));
-    CHECK(preview.spectrumPeakLevels(freqs, 3, peaks));
     for (int i = 0; i < 3; ++i) {
         CHECK(levels[i] < 0.0);
-        CHECK(levels[i] > -90.0);
-        CHECK(peaks[i] >= levels[i]);
+        // On the plot: over its bottom, which is the preview's own top less the range.
+        CHECK(levels[i] > preview.spectrumTopDb() - ResponseGraph::kSpectrumRangeDb);
     }
     CHECK(levels[2] < levels[0]);   // falling towards the treble, as music does
 }
@@ -442,12 +441,42 @@ TEST_CASE("a second launch finds the running instance and asks for its window") 
     CHECK(shown.count() == 1);
 }
 
-TEST_CASE("the spectrum options reach the session's analyzer") {
+TEST_CASE("the preamp is taken out of the shown spectrum, and the scale follows the music") {
+    // The owner, 2026-09-15: an EQ boost did nothing to the spectrum, and loud
+    // passages were cut off at the top. Auto preamp sets the preamp to the opposite
+    // of the boost, so what the output plays drops by as much as the boost lifts.
+    double db[3] = {-30.0, -20.0, -40.0};
+    EqSession::removePreamp(db, 3, -9.0);
+    CHECK(db[0] == doctest::Approx(-21.0));
+    CHECK(db[1] == doctest::Approx(-11.0));
+    CHECK(db[2] == doctest::Approx(-31.0));
+    EqSession::removePreamp(db, 3, 0.0);
+    CHECK(db[0] == doctest::Approx(-21.0));   // no preamp, no change
+
+    // The top of the scale: the loudest band plus a little headroom, up in a
+    // moment and down slowly, and never outside its limits.
+    const double quiet = EqSession::kSpectrumTopFloorDb;
+    CHECK(EqSession::followTopDb(quiet, -20.0, 0.2) > quiet + 10.0);        // a second of music is not needed
+    CHECK(EqSession::followTopDb(quiet, -20.0, 2.0) == doctest::Approx(-17.0).epsilon(0.01));
+    const double loud = -17.0;
+    CHECK(EqSession::followTopDb(loud, -60.0, 0.2) > loud - 5.0);           // it does not drop with a quiet moment
+    CHECK(std::abs(EqSession::followTopDb(loud, -60.0, 0.016) - loud) < 0.3);   // one frame of quiet: barely
+    // Clamped: a full-scale passage does not push the top over 0 dBFS, and silence
+    // does not take it under the floor.
+    CHECK(EqSession::followTopDb(-5.0, 20.0, 10.0) == doctest::Approx(EqSession::kSpectrumTopCeilingDb).epsilon(0.01));
+    CHECK(EqSession::followTopDb(-40.0, -120.0, 60.0) == doctest::Approx(quiet).epsilon(0.01));
+    // A step settles where the target is, not past it.
+    double top = quiet;
+    for (int i = 0; i < 600; ++i) top = EqSession::followTopDb(top, -24.0, 1.0 / 60.0);
+    CHECK(top == doctest::Approx(-21.0).epsilon(0.01));
+}
+
+TEST_CASE("the spectrum decay reaches the session's analyzer") {
     EqSession session;
-    session.setSpectrumOptions(16384, 120.0, 4.5);
-    CHECK(session.spectrumAnalyzer().fft_size() == 16384);
-    session.setSpectrumOptions(1000, 120.0, 4.5);   // not a resolution: kept
-    CHECK(session.spectrumAnalyzer().fft_size() == 16384);
-    session.setSpectrumOptions(4096, 120.0, 0.0);
-    CHECK(session.spectrumAnalyzer().fft_size() == 4096);
+    // Pinned at the highest resolution; only the decay is a setting (owner, 2026-09-15).
+    CHECK(session.spectrumAnalyzer().fft_size() == isotone::ui::SpectrumAnalyzer::kFftSize);
+    session.setSpectrumDecayMs(120.0);
+    CHECK(session.spectrumAnalyzer().release_ms() == 120.0);
+    session.setSpectrumDecayMs(0.0);   // not a decay: kept
+    CHECK(session.spectrumAnalyzer().release_ms() == 120.0);
 }

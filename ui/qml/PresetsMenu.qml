@@ -15,10 +15,14 @@ Popover {
     property string search: ""
     property string renaming: ""
     property string confirmingDelete: ""
+    // The preset whose output is being picked (the row's speaker icon).
+    property string scoping: ""
+    readonly property var outputs: Presets.outputChoices()
 
     onClosed: {
         renaming = ""
         confirmingDelete = ""
+        scoping = ""
         searchInput.text = ""
     }
 
@@ -30,6 +34,7 @@ Popover {
         renaming = ""
         Presets.rename(name, to)
     }
+    function scopingThisRow(name) { return root.scoping === name ? "" : name }
     function loadPreset(name) {
         root.close()
         Presets.load(name)   // asks first with unsaved changes (UnsavedPrompt)
@@ -122,21 +127,25 @@ Popover {
                         id: row
                         required property string name
                         required property string assigned
+                        required property string forOutput
                         required property bool current
                         readonly property bool renamingThis: root.renaming === name
                         readonly property bool confirming: root.confirmingDelete === name
+                        readonly property bool scopingThis: root.scoping === name
                         readonly property bool showIcons: hover.hovered && !renamingThis && !confirming
                         objectName: "presetRow_" + name
                         visible: root.matches(name)
                         width: rows.width
-                        height: Math.max(44, labels.implicitHeight + 16)
+                        height: row.scopingThis ? 44 + scopeColumn.implicitHeight + 8
+                                                : Math.max(44, labels.implicitHeight + 16)
                         radius: 8
                         color: hover.hovered || renamingThis || confirming ? Theme.surface : "transparent"
 
                         HoverHandler { id: hover }
                         MouseArea {
-                            anchors.fill: parent
-                            enabled: !row.renamingThis && !row.confirming
+                            width: parent.width
+                            height: 44
+                            enabled: !row.renamingThis && !row.confirming && !row.scopingThis
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.loadPreset(row.name)
                         }
@@ -156,7 +165,7 @@ Popover {
                             id: labels
                             x: 38
                             width: (row.showIcons ? icons.x - 8 : row.confirming ? confirm.x - 8 : row.width - 10) - x
-                            anchors.verticalCenter: parent.verticalCenter
+                            y: row.scopingThis ? (44 - implicitHeight) / 2 : (row.height - implicitHeight) / 2
                             visible: !row.renamingThis
                             spacing: 1
                             Text {
@@ -171,7 +180,7 @@ Popover {
                             Text {
                                 width: parent.width
                                 visible: row.assigned !== "" && !row.confirming
-                                text: row.assigned
+                                text: "Only " + row.assigned
                                 elide: Text.ElideRight
                                 font.family: Theme.font
                                 font.pixelSize: 12
@@ -183,7 +192,7 @@ Popover {
                             id: icons
                             anchors.right: parent.right
                             anchors.rightMargin: 10
-                            anchors.verticalCenter: parent.verticalCenter
+                            y: (44 - height) / 2
                             spacing: 4
                             visible: row.showIcons
                             RowIcon {
@@ -200,11 +209,69 @@ Popover {
                                 onClicked: Presets.duplicate(row.name)
                             }
                             RowIcon {
+                                objectName: "presetScope"
+                                icon: "devices"
+                                onClicked: {
+                                    root.renaming = ""
+                                    root.confirmingDelete = ""
+                                    root.scoping = root.scopingThisRow(row.name)
+                                }
+                            }
+                            RowIcon {
                                 objectName: "presetDelete"
                                 icon: "trash"
                                 onClicked: {
                                     root.renaming = ""
                                     root.confirmingDelete = row.name
+                                }
+                            }
+                        }
+
+                        // What the preset is for, picked in the row so nothing is
+                        // clipped by the list's own scrolling.
+                        Column {
+                            id: scopeColumn
+                            objectName: "presetScopeList"
+                            visible: row.scopingThis
+                            x: 30
+                            y: 44
+                            width: row.width - x - 10
+                            Repeater {
+                                model: row.scopingThis ? [{ guid: "", name: "All outputs" }].concat(root.outputs) : []
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: scopeColumn.width
+                                    height: 32
+                                    radius: 6
+                                    color: scopeArea.containsMouse ? Theme.plot : "transparent"
+                                    Icon {
+                                        x: 8
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        visible: modelData.guid === row.forOutput
+                                        name: "check"
+                                        size: 14
+                                        colour: Theme.accent
+                                    }
+                                    Text {
+                                        x: 30
+                                        width: parent.width - 40
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: modelData.name
+                                        elide: Text.ElideRight
+                                        font.family: Theme.font
+                                        font.pixelSize: 13
+                                        color: Theme.text
+                                    }
+                                    MouseArea {
+                                        id: scopeArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            Presets.setPresetOutput(row.name, modelData.guid)
+                                            root.scoping = ""
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -1,6 +1,7 @@
 add_executable(core_tests
     test_main.cpp
     test_apo_config.cpp
+    test_curve_import.cpp
     test_audio_ring.cpp
     test_speakers.cpp
     test_biquad.cpp

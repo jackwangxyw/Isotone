@@ -53,14 +53,15 @@ TEST_CASE("a sine on a bin reads its level in dBFS, and silence elsewhere") {
     const double rate = 48000.0;
     const double bin_hz = rate / SpectrumAnalyzer::kFftSize;
     const double f = 170 * bin_hz;   // 996 Hz, on bin 170
-    std::vector<float> stereo(2 * 12000);
-    for (size_t i = 0; i < 12000; ++i) {
+    constexpr size_t kFrames = SpectrumAnalyzer::kFftSize;
+    std::vector<float> stereo(2 * kFrames);
+    for (size_t i = 0; i < kFrames; ++i) {
         const float v = static_cast<float>(0.5 * std::sin(2.0 * kPi * f * static_cast<double>(i) / rate));
         stereo[2 * i] = v;
         stereo[2 * i + 1] = v;
     }
     CHECK(a.bin_db()[170] == SpectrumAnalyzer::kFloorDb);
-    a.push(stereo.data(), 12000, 2);
+    a.push(stereo.data(), kFrames, 2);
     a.update(rate, 2.0);   // long enough for the attack to settle
     CHECK(a.bin_db()[170] == doctest::Approx(20.0 * std::log10(0.5)).epsilon(0.001));
     CHECK(a.bin_db()[1000] < -80.0);
@@ -82,8 +83,8 @@ TEST_CASE("a sine on a bin reads its level in dBFS, and silence elsewhere") {
     }
     SUBCASE("channels are mixed: a sine on one of two channels reads 6 dB lower") {
         SpectrumAnalyzer one;
-        for (size_t i = 0; i < 12000; ++i) stereo[2 * i + 1] = 0.0f;
-        one.push(stereo.data(), 12000, 2);
+        for (size_t i = 0; i < kFrames; ++i) stereo[2 * i + 1] = 0.0f;
+        one.push(stereo.data(), kFrames, 2);
         one.update(rate, 2.0);
         CHECK(one.bin_db()[170] == doctest::Approx(20.0 * std::log10(0.25)).epsilon(0.001));
     }

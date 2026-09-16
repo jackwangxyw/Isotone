@@ -27,8 +27,11 @@ static_assert(static_cast<int>(EqSession::Plain) == static_cast<int>(isotone::ui
 namespace {
 
 constexpr int kBandColours = 12;
-// The spectrum disappears when no audio has come for this long (engine idle).
-constexpr qint64 kSpectrumTimeoutMs = 500;
+// No audio for this long: the engine is idle, or the player closed its stream.
+constexpr qint64 kSpectrumIdleMs = 150;
+// Below this the curve is off the bottom of the plot (ResponseGraph draws from
+// -12 dB down over 60): nothing left to draw.
+constexpr double kSpectrumHiddenDb = -75.0;
 
 QString type_name(isotone::FilterType t) {
     switch (t) {
@@ -278,8 +281,29 @@ void EqSession::readSpectrum() {
     }
     // An engine that started playing since the last edit gets the current state.
     if (link_->take_region_opened()) write();
-    const bool active = now - last_frame_ms_ < kSpectrumTimeoutMs;
-    if (active) analyzer_.update(rate, std::max<qint64>(1, now - last_update_ms_) / 1000.0);
+    const double elapsed_s = std::max<qint64>(1, now - last_update_ms_) / 1000.0;
+    if (now - last_frame_ms_ < kSpectrumIdleMs) {
+        analyzer_.update(rate, elapsed_s);
+    } else if (analyzer_.loudest_db() > kSpectrumHiddenDb) {
+        // Nothing is arriving: a player that stops closes its stream, so the
+        // silence after the music never reaches us. Feed it, and the curve falls
+        // at the release the settings ask for instead of hanging and then
+        // vanishing when the timeout trips (owner, 2026-09-15).
+        analyzer_.push_silence(static_cast<size_t>(analyzer_.sample_rate() * elapsed_s));
+        analyzer_.update(analyzer_.sample_rate(), elapsed_s);
+    }
+    const bool active = analyzer_.loudest_db() > kSpectrumHiddenDb;
+    if (active) {
+        // The scale's top follows the loudest band the graph draws (the same
+        // mean-power bands, on a coarse grid), with the preamp out of it.
+        constexpr size_t kPoints = 64;
+        double freqs[kPoints], levels[kPoints];
+        for (size_t i = 0; i < kPoints; ++i)
+            freqs[i] = 20.0 * std::exp(std::log(20000.0 / 20.0) * static_cast<double>(i) / (kPoints - 1));
+        analyzer_.levels_at(freqs, kPoints, levels, isotone::ui::SpectrumAnalyzer::Bands::Mean);
+        removePreamp(levels, kPoints, state_.preamp_db);
+        spectrum_top_db_ = followTopDb(spectrum_top_db_, *std::max_element(levels, levels + kPoints), elapsed_s);
+    }
     last_update_ms_ = now;
     if (active || active != spectrum_active_) {
         spectrum_active_ = active;
@@ -290,21 +314,28 @@ void EqSession::readSpectrum() {
 bool EqSession::spectrumLevels(const double* freqs, size_t n, double* out_db) const {
     if (!spectrum_active_) return false;
     analyzer_.levels_at(freqs, n, out_db, isotone::ui::SpectrumAnalyzer::Bands::Mean);
+    removePreamp(out_db, n, state_.preamp_db);
     return true;
 }
 
-// Settings, General, Spectrum.
-bool EqSession::spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const {
-    if (!spectrum_active_) return false;
-    analyzer_.peak_levels_at(freqs, n, out_db, isotone::ui::SpectrumAnalyzer::Bands::Mean);
-    return true;
+void EqSession::removePreamp(double* db, size_t n, double preamp_db) {
+    if (preamp_db == 0.0) return;
+    for (size_t i = 0; i < n; ++i) db[i] -= preamp_db;
 }
 
-void EqSession::setSpectrumOptions(int fftSize, double releaseMs, double tiltDbPerOct) {
-    if ((fftSize == 4096 || fftSize == 8192 || fftSize == 16384) && static_cast<size_t>(fftSize) != analyzer_.fft_size())
-        analyzer_.set_fft_size(static_cast<size_t>(fftSize));
-    if (std::isfinite(releaseMs) && releaseMs > 0) analyzer_.set_release_ms(releaseMs);
-    if (std::isfinite(tiltDbPerOct)) analyzer_.set_tilt(tiltDbPerOct);
+double EqSession::followTopDb(double current, double loudest, double elapsed_s) {
+    const double target =
+        std::clamp(loudest + kSpectrumTopHeadroomDb, kSpectrumTopFloorDb, kSpectrumTopCeilingDb);
+    // Up in a moment so a loud passage is never cut off at the top, down slowly so
+    // the scale does not breathe with the music.
+    const double tau = target > current ? 0.2 : 2.0;
+    return current + (target - current) * (1.0 - std::exp(-std::max(0.0, elapsed_s) / tau));
+}
+
+// Settings, General, Spectrum, Decay.
+void EqSession::setSpectrumDecayMs(double ms) {
+    if (!std::isfinite(ms) || ms <= 0) return;
+    analyzer_.set_release_ms(ms);
     emit spectrumChanged();
 }
 

@@ -37,7 +37,7 @@ Rectangle {
         bell: Theme.bell
         fillEdgeAlpha: Theme.fillEdgeAlpha
         fillMidAlpha: Theme.fillMidAlpha
-        peakHoldVisible: GeneralSettings.peakHold
+        spectrumSmoothing: GeneralSettings.smoothing
 
         Repeater {
             model: sample

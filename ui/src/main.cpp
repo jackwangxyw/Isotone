@@ -3,6 +3,7 @@
 //
 // isotone: the UI. For checks:
 //   --screenshot <file.png>   render the window once it has drawn, save it, exit
+//   --screenshot-after <s>    take that screenshot later, to catch what changes
 //   --output <endpoint>       edit this output instead of the default one
 //   --add-band <hz>,<db>      add a band as the Add band button does (repeatable)
 //   --quit-after <seconds>    exit on its own
@@ -71,6 +72,10 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption screenshot(QStringLiteral("screenshot"), QStringLiteral("Save the window to <file> and exit."),
                                         QStringLiteral("file"));
     parser.addOption(screenshot);
+    const QCommandLineOption screenshot_after(QStringLiteral("screenshot-after"),
+                                              QStringLiteral("Take the screenshot after <seconds>."),
+                                              QStringLiteral("seconds"));
+    parser.addOption(screenshot_after);
     const QCommandLineOption output(QStringLiteral("output"), QStringLiteral("Edit <endpoint>."), QStringLiteral("endpoint"));
     const QCommandLineOption add_band(QStringLiteral("add-band"), QStringLiteral("Add a band at <hz,db>."), QStringLiteral("hz,db"));
     const QCommandLineOption quit_after(QStringLiteral("quit-after"), QStringLiteral("Exit after <seconds>."), QStringLiteral("seconds"));
@@ -246,8 +251,11 @@ int main(int argc, char* argv[]) {
 
     if (parser.isSet(screenshot)) {
         const QString file = parser.value(screenshot);
-        // A few frames in, so fonts and layout have settled.
-        QTimer::singleShot(1500, &app, [window, file] {
+        // A few frames in, so fonts and layout have settled, or later when the run
+        // is watching something that changes (the spectrum after the music stops).
+        const int delay_ms =
+            parser.isSet(screenshot_after) ? static_cast<int>(parser.value(screenshot_after).toDouble() * 1000) : 1500;
+        QTimer::singleShot(delay_ms, &app, [window, file] {
             const QImage image = window->grabWindow();
             const bool saved = image.save(file);
             std::fprintf(saved ? stdout : stderr, "%s %s (%dx%d)\n", saved ? "saved" : "could not save", qPrintable(file),

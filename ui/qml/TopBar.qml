@@ -7,16 +7,17 @@ Item {
     id: root
     // In window coordinates, where the popover's top left goes.
     signal presetsRequested(real x, real y)
-    signal outputsRequested(real x, real y)
 
     height: 76
 
-    // The preset name (a dot when modified) opens the presets popover; under it,
-    // with the sidebar collapsed, the output name opens the outputs popover.
-    Column {
+    // The preset name (a dot when modified) opens the presets popover. The board
+    // had the output name under it with the sidebar collapsed; the owner had it
+    // taken out (2026-09-15), and the rail's speaker icon still opens the outputs.
+    Item {
         x: 32
         anchors.verticalCenter: parent.verticalCenter
-        spacing: 1
+        width: childrenRect.width
+        height: childrenRect.height
         Item {
             objectName: "presetName"
             width: nameRow.implicitWidth
@@ -49,31 +50,6 @@ Item {
                 onClicked: {
                     const p = nameRow.mapToItem(null, 0, nameRow.height + 8)
                     root.presetsRequested(p.x, p.y)
-                }
-            }
-        }
-        Item {
-            objectName: "topBarOutput"
-            visible: !AppSettings.sidebarOpen
-            width: outputRow.implicitWidth
-            height: outputRow.implicitHeight
-            Row {
-                id: outputRow
-                spacing: 4
-                Text {
-                    text: Outputs.currentName
-                    font.family: Theme.font
-                    font.pixelSize: 13
-                    color: Theme.muted
-                }
-                Icon { name: "chevron"; size: 14; anchors.verticalCenter: parent.verticalCenter }
-            }
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    const p = outputRow.mapToItem(null, 0, outputRow.height + 8)
-                    root.outputsRequested(p.x - 12, p.y)
                 }
             }
         }

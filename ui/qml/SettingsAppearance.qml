@@ -36,7 +36,6 @@ Item {
         SettingsSection { text: "Theme" }
         Segmented {
             objectName: "theme"
-            fontSize: 13
             options: ["System", "Dark", "Light", "Custom"]
             current: root.themes.indexOf(AppSettings.theme)
             onPicked: (index) => AppSettings.theme = root.themes[index]

@@ -55,11 +55,11 @@ Rectangle {
         bell: Theme.bell
         fillEdgeAlpha: Theme.fillEdgeAlpha
         fillMidAlpha: Theme.fillMidAlpha
-        // Settings, General: graph ranges and peak hold.
+        // Settings, General: the graph's ranges and the spectrum's smoothing.
         rangeDb: GeneralSettings.gainRange
         minHz: GeneralSettings.minHz
         maxHz: GeneralSettings.maxHz
-        peakHoldVisible: GeneralSettings.peakHold
+        spectrumSmoothing: GeneralSettings.smoothing
 
         MouseArea {
             anchors.fill: parent
@@ -175,9 +175,21 @@ Rectangle {
                     color: handle.colour
                     border.width: 2
                     border.color: Theme.plot
+                    // The number, centred on the digits' own ink: the text's box
+                    // carries the whole descent, and anchors round the position to a
+                    // whole pixel, which left the number low and half a pixel to the
+                    // left (owner, 2026-09-15). Drawn by Qt, not the native
+                    // rasterizer, so it can sit on a fraction of a pixel and carries
+                    // no colour fringes on the handle's colour.
+                    TextMetrics { id: ink; font: number.font; text: number.text }
+                    FontMetrics { id: metrics; font: number.font }
                     Text {
-                        anchors.centerIn: parent
-                        anchors.verticalCenterOffset: 0.5
+                        id: number
+                        objectName: "handleNumber"
+                        x: Math.round(parent.width / 2 - ink.tightBoundingRect.x - ink.tightBoundingRect.width / 2)
+                        y: Math.round(parent.height / 2 - metrics.ascent - ink.tightBoundingRect.y -
+                                      ink.tightBoundingRect.height / 2)
+                        renderType: Text.QtRendering
                         text: handle.position
                         font.family: Theme.font
                         font.pixelSize: handle.position < 10 ? 11 : 10

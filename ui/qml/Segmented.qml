@@ -1,11 +1,15 @@
 import QtQuick
 
-// A segmented control: options on a track, the current one raised.
+// A segmented control: options on a track, the current one raised. The label is
+// the same type as every other value in the app (13, DemiBold), and the raised
+// option is centred in the track whatever height the control is given (it used
+// to sit 3 px from the top and flush with the bottom).
 Rectangle {
     id: root
     property var options: []
     property int current: 0
-    property int fontSize: 12
+    property int fontSize: 13
+    property int fontWeight: Font.DemiBold
     signal picked(int index)
 
     implicitWidth: row.implicitWidth + 6
@@ -15,8 +19,7 @@ Rectangle {
 
     Row {
         id: row
-        x: 3
-        y: 3
+        anchors.centerIn: parent
         spacing: 2
         Repeater {
             model: root.options
@@ -33,6 +36,7 @@ Rectangle {
                     text: modelData
                     font.family: Theme.font
                     font.pixelSize: root.fontSize
+                    font.weight: root.fontWeight
                     color: index === root.current ? Theme.text : Theme.muted
                 }
                 MouseArea {

@@ -2369,6 +2369,194 @@ five times in a row with no failures, the MSVC build with warnings as errors and
 7 ctest suites, the APO self test, the transport and reference-data checks, and the
 GCC build and tests.
 
+## 2026-09-15: The spectrum's fade, its points, and a peak fall the owner can tune
+
+The owner's second pass over the spectrum, after living with the first fix.
+
+**It drops instead of fading out.** Stopping the music faded the curve briefly
+and then dropped it. Two causes, both in the same place: a player that stops
+closes its stream, so no frames arrive at all (not silent frames, none), and the
+analyzer kept reading its unchanged history while the display hid the curve
+outright once the 500 ms timeout tripped. The fade the owner saw was the tail of
+the music leaving the FFT window; the drop was the timeout. A read with no frames
+for 150 ms now feeds the analyzer the silence the source is no longer sending
+(`SpectrumAnalyzer::push_silence`) and keeps updating, so the curve falls at the
+release the settings ask for, and it is drawn until its loudest bin is under
+-100 dB (`loudest_db()`), by which point it is off the bottom of the plot.
+Checked on a real track into CABLE Input with `--screenshot-after`: full at the
+stop, a few dB down at +1 s, near the floor at +3 s, gone by +6 s.
+
+**The points are fixed at 320.** They were one per 5 px, clamped to 64-320, so
+the curve's detail changed with the window's width. The owner asked for the
+maximum at every width. It draws slightly busier in a wide window than the old
+214 points did, which is the owner's call and was said.
+
+**Peak fall is a setting** (Settings, General, Spectrum). It was a constant
+6 dB/s; the owner wanted to tune what the peak-hold line does, so it is a value
+in dB/s, greyed while the line is off. Release was already a row and is what
+governs the fade above.
+
+**A checking flag**: `--screenshot-after <seconds>`, so a screenshot run can
+catch what the window shows some seconds in, which is the only way to see a fade.
+
+Mutation checks: silence fed as a no-op (the level stands at -6.02 dB for ever,
+caught), and the peak fall back to the constant (caught). `ui_tests` 44,
+`ui_model_tests` 102, `ui_qml_tests` 264, no failures.
+
+## 2026-09-15: The spectrum's settings cut back, and the settings' own type
+
+The owner's third pass. What was added the same day for the spectrum was mostly
+the wrong thing, and this is what replaced it.
+
+**Gone**: the resolution setting (pinned at 16384, the highest it offered, so the
+bins are 2.9 Hz at 48 kHz), the peak-hold line and the peak fall added earlier
+today, and the tilt. `SpectrumAnalyzer` no longer keeps a peak vector or a tilt.
+
+**The two settings that are left are sliders**, in Settings, General, Spectrum:
+- **Decay**, 50 to 500 ms, default 150 (the owner's), the meter release: how long
+  a level takes to fall. It was a click-to-type box and the owner could not
+  change it.
+- **Smoothing**, 0 to 100%, a Gaussian across the drawn points whose sigma is the
+  amount times 8 points. 0 leaves the points alone (spiky), 35% is the default
+  (about a quarter octave), 100% is about an octave. It was a fixed 5-tap kernel.
+
+**The spectrum's scale**: it was 0 dBFS at the top of the plot down to -90 at the
+bottom, so music sat in the bottom third and a 12 dB cut moved it a third as far
+as it moved the EQ curve. It now spans 60 dB, and its top follows the loudest
+band being drawn (`EqSession::followTopDb`: 3 dB of headroom, up in 200 ms and
+down over 2 s, held between 0 and -45 dBFS), so a loud passage is never cut off at
+the top and the curve fills the plot whatever the music's level.
+
+**The preamp is taken out of the levels the graph shows**
+(`EqSession::removePreamp`). This is why the owner said an EQ filter did nothing
+to the spectrum: with Auto preamp a +12 dB bell sets the preamp to -12, so what
+the output plays has the band lifted 12 and everything, that band included,
+dropped 12. The band ends up where it started and the rest of the curve sinks,
+which reads as the EQ doing nothing. Cuts did show, because Auto leaves the
+preamp at 0 for them, which is why this took two passes to see. Checked on a real
+track into CABLE Input: a +12 dB bell at 4 kHz now lifts 3 to 6 kHz by its own
+shape while the rest of the curve stays where it was.
+
+**The numbers in the graph's handles** were low and half a pixel to the left. A
+digit sits on the baseline and reaches the cap height, so centring the text's box
+(which carries the whole descent) puts it low, and `anchors.centerIn` rounds the
+position to a whole pixel. The number is now placed on the whole pixel nearest
+centred on its own ink (`TextMetrics.tightBoundingRect`), and drawn by Qt rather
+than the native rasterizer.
+
+**The spectrum is clipped to the plot.** Where it ran along the bottom it spilled
+a few pixels past it: the points are clamped to the plot, but a Catmull-Rom
+segment between two points that both sit on an edge overshoots. The fill and the
+edge are drawn inside a clip of the plot rect. The test paints the graph into an
+image with a spectrum that dives to the floor and back, and counts coloured
+pixels outside the plot: 14 below it before the clip, none after.
+
+**One type for the settings' controls**: `Segmented` was 12 px regular, except on
+Appearance where it was 13, while every value chip is 13 DemiBold; and it was
+given a fixed height with its row pinned 3 px from the top, so the raised option
+sat low. It is 13 DemiBold everywhere now and centres its row.
+
+Mutation checks: the smoothing amount ignored (the smoothing test fails), and the
+handle number back on `anchors.centerIn` with the old half-pixel nudge (the
+centring test fails). `--screenshot-after <seconds>` is a new checking flag.
+`ui_tests` 42, `ui_model_tests` 103, `ui_qml_tests` 263, no failures.
+
+## 2026-09-15: Importing a curve, not filters
+
+The owner imported `TC8FD05-04 EQ.txt`, exported from Peace, and got an empty EQ.
+The file is one 1302-character line in Audacity's `FilterCurve` form: 50 frequency
+and value pairs, a magnitude curve rather than filters. `parse_apo_config` read it
+as a filter line, found it longer than upstream's 1024-character limit, and
+skipped it, so nothing imported. Equalizer APO plays these (and its own
+`GraphicEQ:` line, which is what AutoEQ writes) as a convolution filter. Isotone's
+engine is biquads, so a curve has to be fitted.
+
+**`core/curve_import.h`**: `parse_curve` reads either line, from a file of its own
+or inside a larger config; `fit_curve` returns the filters whose composite follows
+it. Each band is the one that takes most of the remaining error out, chosen from a
+sixth-octave grid of frequencies and seven widths, added one at a time until the
+curve is followed within 0.22 dB rms or twelve bands are used; their gains are then
+solved together (normal equations over a 256-point log grid) and refined three
+times against the real composite, since a peaking filter's shape widens a little
+with gain.
+
+The first attempt put a band on every third-octave centre and solved all 31 gains,
+which fitted well and gave the owner thirty filters for a curve he had made with
+thirteen sliders, six of them at 0 dB ("theres like 30 fucking filters, wtf man",
+with a screenshot of the Peace window). A file of a handful of filters has to come
+back as a handful. Choosing them one at a time gives ten for that file at 0.21 dB
+rms, and they line up with what he set: a high-pass near 100 Hz, a lift at 127,
+cuts at 254 and 1437, a high shelf at 5.9 kHz, and the top two.
+
+**The shapes first.** Peaking bands alone fitted the owner's curve to 0.72 dB rms
+but were 3.9 dB out at 22 Hz: the file asks for -40 dB at 10 Hz and -26 at 20, a
+rolloff no peaking band holds. The owner said why: "it uses a high shelf along
+with a high pass filter". So the fit now looks for those first. A high-pass is
+searched over fc 12 to 300 Hz and Q 0.5 to 1.4, a high shelf over fc 1 to 12 kHz
+with its gain solved in closed form, each taken only when it beats leaving the
+region to the bands by a clear margin; what they leave is the bands' target.
+
+Measured: a curve sampled from four peaking filters comes back as five bands
+within 0.17 dB rms (0.50 worst), and the shapes are not picked up where they are
+not wanted. A curve
+made of a high-pass at 45 Hz, a high shelf and a peak comes back as three filters
+at 0.13 dB rms, with the high-pass found within a quarter of its frequency. The
+owner's own curve fits to **0.21 dB rms over its whole range, 10 Hz to 18.9 kHz**,
+worst 0.77 dB.
+
+The import preview fits when the file has no filters of its own, and the dialog
+gains a "Curve fit" stat: the points the file held and the worst error, so the
+approximation is visible rather than implied. A file of filters is untouched.
+
+`core_tests` 212 on MSVC and GCC, `ui_tests` 42, `ui_model_tests` 105,
+`ui_qml_tests` 265. The QML test imports the owner's file through the dialog and
+checks the drawn curve at 25 Hz, 137 Hz, 253 Hz and 10.2 kHz.
+
+## 2026-09-15: The preset is not the device's
+
+Three of the owner's, after importing his curve.
+
+**The output under the preset name is gone.** With the sidebar collapsed the top
+bar showed the output's name and a chevron under the preset's, a second way into
+the outputs popover; the prototype's Collapsed board has it, and the owner does
+not want it ("Headphones (Anker USB Audio), that's what I'm talking about,
+remove"). The rail's speaker icon still opens the outputs, so nothing is stranded.
+`TopBar` no longer has an `outputsRequested` signal.
+
+**An imported file with no preamp gets Auto.** A file carries no Auto mode, so
+import read one: Auto only when the file's preamp was what Auto would set. A file
+with no Preamp line at all (every curve, and plenty of configs) has none chosen,
+which is what Auto is for, and it came in at 0 dB with the EQ clipping. Now no
+preamp in the file means Auto; a file that carries one keeps it, by hand, as
+before. New presets were already Auto by default (Settings, General).
+
+**A preset is for every output until it is narrowed.** It was tied to the output
+it was saved on: there was no "all", and no way to change it after. A preset now
+carries the output it is for, a `forOutput` GUID in its file, empty for every
+output (a file written before this reads as every output):
+
+- **Save as** asks: For, with All outputs first and then every output, starting on
+  All outputs. Its list opens under the box and the card grows for it, so the name
+  above is not covered.
+- **The presets popover** shows "Only <output>" under a preset that is narrowed,
+  and nothing under one for every output. Its row has a device icon that opens the
+  choices in the row itself, so the list's own scrolling cannot clip them.
+- **Import** offers the same choice, starting on All outputs: the file is read for
+  the current output's layout, created, and loaded there, and no other output is
+  written. Picking an output keeps what import did before.
+- **Every preset is listed on every output**, whichever one it is for. The first
+  cut hid the ones for other outputs, and saving a preset for the cable while on
+  the headphones made it vanish the moment it was saved ("wtf i created a new one
+  for the cable device and when i saved and went to a different preset, it just
+  disappeared"). What a preset is for is a label and what an output picks up, not
+  a filter.
+
+`AssignedRole` is now what the preset is for rather than where it is loaded.
+
+`ui_model_tests` 106, `ui_qml_tests` 266. The new QML test needed the same wait
+for a layout polish as the devices tests: the row grows to hold the choices, and a
+click sent before that lands where they were.
+
 ---
 
 # Where things stand (end of 2026-09-15)
@@ -2440,7 +2628,12 @@ drag from Explorer. Open decisions for the owner: global hotkeys off by default;
 live propagation of preset edits to other outputs (now on save); the entries of
 2026-09-15 list the rest.
 
-**Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec.
+**Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec, and
+stage 4's tree is tidy for it: no agent worktrees or branches left, `main` clean,
+the three UI suites green (44 / 102 / 264), and CI green. What stage 5 inherits
+that it will touch: `EqSession` (the edited state and undo), `ResponseGraph`,
+`DeviceLink` (where an edit goes, native or Equalizer APO), the spectrum and the
+test tone.
 **Stage 6** (packaging) is not started.
 
 ## State of the owner's machine

@@ -57,7 +57,8 @@ $env:PATH = "C:\Qt\6.11.2\msvc2022_64\bin;$env:PATH"
 ```
 core/                 portable C++20: biquad design, Processor (smoothing, crossfades,
                       speaker routing, bass management, delay), response curves,
-                      Equalizer APO config parser/formatter, ParamBlock, audio ring
+                      Equalizer APO config parser/formatter, curve import (GraphicEQ
+                      and FilterCurve fitted to bands), ParamBlock, audio ring
 core/tests/           doctest; reference/ is scipy-generated response data
 windows/transport/    named shared region (ParamBlock + ring), per-endpoint saved state
 windows/apo/          IsoAPO.dll, IsoAPO-selftest.dll (Local\ namespace), isotone-apo-selftest

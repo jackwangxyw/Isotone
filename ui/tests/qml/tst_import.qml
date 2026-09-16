@@ -22,6 +22,8 @@ Item {
 
         readonly property url parametric: Qt.resolvedUrl("data/Sennheiser HD 650 ParametricEQ.txt")
         readonly property url graphic: Qt.resolvedUrl("data/HD 650 GraphicEQ.txt")
+        readonly property url filterCurve: Qt.resolvedUrl("data/TC8FD05-04 FilterCurve.txt")
+        readonly property url convolution: Qt.resolvedUrl("data/Room Convolution.txt")
 
         function child(name) { return findChild(overlay, name) }
         function noDialog() { return child("dialogCard") === null }
@@ -68,13 +70,54 @@ Item {
             verify(!Presets.modified)
         }
 
-        function test_a_file_with_nothing_usable_cannot_be_imported() {
+        // A curve file holds a magnitude curve, not filters: bands are fitted to it
+        // (the owner imported a FilterCurve from Peace, 2026-09-15).
+        function test_a_graphic_eq_file_is_fitted() {
             const d = PresetActions.showImport(graphic)
+            verify(d !== null)
+            waitForRendering(d)
+            verify(Number(child("importFilters").value) > 0)
+            verify(child("importFit").visible)
+            compare(child("importFit").value, "5 points, ±" + d.preview.fitWorstDb.toFixed(1) + " dB")
+            verify(d.preview.fitWorstDb < 1.0)
+            compare(child("importSkipped").value, "0 lines")
+            verify(!child("importSkippedList").visible)
+            // The curve it drew: about -2 dB across the few points the file has.
+            fuzzyCompare(child("importCurve").compositeAt(21), -2.0, 0.6)
+            verify(child("importConfirm").active)
+            mouseClick(child("importConfirm"))
+            tryVerify(noDialog)
+            compare(Presets.count, 1)
+        }
+
+        function test_a_filter_curve_file_is_fitted() {
+            const d = PresetActions.showImport(filterCurve)
+            verify(d !== null)
+            waitForRendering(d)
+            compare(child("importFileName").text, "TC8FD05-04 FilterCurve.txt")
+            // A handful of filters, not one per third of an octave (owner, 2026-09-15).
+            const filters = Number(child("importFilters").value)
+            verify(filters > 0 && filters <= 12, "filters " + filters)
+            verify(child("importFit").visible)
+            verify(d.preview.curvePoints === 50)
+            // The shape of the owner's curve: a deep bass cut, a lift around 137 Hz,
+            // a dip at 250, and up again at 10 kHz.
+            const curve = child("importCurve")
+            verify(curve.compositeAt(25) < -20)   // the high pass the file was made with
+            fuzzyCompare(curve.compositeAt(137), 2.558, 0.6)
+            fuzzyCompare(curve.compositeAt(253.6), -2.299, 0.6)
+            fuzzyCompare(curve.compositeAt(10211), 4.323, 0.5)
+            verify(child("importConfirm").active)
+        }
+
+        function test_a_file_with_nothing_usable_cannot_be_imported() {
+            const d = PresetActions.showImport(convolution)
             verify(d !== null)
             compare(child("importFilters").value, "0")
             compare(child("importPreamp").value, "+0.0 dB")
             compare(child("importSkipped").value, "1 line")
             compare(child("importSkipped").colour, Theme.warning)
+            verify(!child("importFit").visible)
             const confirm = child("importConfirm")
             verify(!confirm.active)
             mouseClick(confirm)

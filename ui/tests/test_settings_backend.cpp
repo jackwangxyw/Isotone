@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 The Isotone authors
 //
-// Settings without Qt: the spectrum's options (resolution, release, peak hold,
-// tilt), launch at sign-in against a test key, and the diagnostics text.
+// Settings without Qt: the spectrum's resolutions and its decay, launch at
+// sign-in against a test key, and the diagnostics text.
 
 #include "doctest.h"
 
@@ -40,6 +40,8 @@ struct TestKey {
     }
 };
 
+constexpr size_t kN = SpectrumAnalyzer::kFftSize;
+
 }  // namespace
 
 TEST_CASE("each resolution reads a sine at its level, in its bin") {
@@ -75,73 +77,46 @@ TEST_CASE("fewer samples than the resolution read as the floor") {
 TEST_CASE("the release setting sets how fast the level falls") {
     SpectrumAnalyzer a;
     a.set_release_ms(100.0);
-    const std::vector<float> s = sine(170 * kRate / 8192, 0.5, 12000);
+    const std::vector<float> s = sine(170 * kRate / kN, 0.5, kN * 2);
     a.push(s.data(), s.size(), 1);
     a.update(kRate, 2.0);
-    std::vector<float> quiet(8192, 0.0f);
+    std::vector<float> quiet(kN, 0.0f);
     a.push(quiet.data(), quiet.size(), 1);
     a.update(kRate, 1.0 / 60.0);
     // In power, e^(-t / release): 10 log10(e) * 16.7 / 100 = 0.72 dB.
     CHECK(a.bin_db()[170] == doctest::Approx(-6.02 - 0.7238).epsilon(0.002));
 }
 
-TEST_CASE("peak hold keeps the loudest level and falls slowly") {
+TEST_CASE("a source that stops sending falls at its release, it does not stand still") {
+    // The owner, 2026-09-15: stopping the music faded the curve for a moment and
+    // then dropped it. A player that stops closes its stream, so no frames arrive
+    // at all: the analyzer kept reading the same history, and the display hid the
+    // curve outright once its timeout tripped.
     SpectrumAnalyzer a;
-    const std::vector<float> s = sine(170 * kRate / 8192, 0.5, 12000);
+    const std::vector<float> s = sine(170 * kRate / kN, 0.5, kN * 2);
     a.push(s.data(), s.size(), 1);
     a.update(kRate, 2.0);
-    CHECK(a.peak_db()[170] == doctest::Approx(-6.02).epsilon(0.001));
-    CHECK(a.peak_db()[1000] == doctest::Approx(a.bin_db()[1000]));
+    REQUIRE(a.loudest_db() == doctest::Approx(-6.02).epsilon(0.001));
 
-    std::vector<float> quiet(8192, 0.0f);
-    a.push(quiet.data(), quiet.size(), 1);
-    a.update(kRate, 0.5);
-    // The level falls 7.24 dB in 500 ms (300 ms release); the peak 3 dB.
-    CHECK(a.bin_db()[170] == doctest::Approx(-6.02 - 7.24).epsilon(0.005));
-    CHECK(a.peak_db()[170] == doctest::Approx(-6.02 - SpectrumAnalyzer::kPeakFallDbPerSecond * 0.5).epsilon(0.001));
-    const double f = 170 * kRate / 8192;
-    const double freqs[] = {f / 1.01, f, f * 1.01};
-    double out[3];
-    a.peak_levels_at(freqs, 3, out);
-    CHECK(out[1] == doctest::Approx(-9.02).epsilon(0.01));
+    SpectrumAnalyzer stuck = a;
+    for (int i = 0; i < 60; ++i) stuck.update(kRate, 1.0 / 60.0);
+    CHECK(stuck.loudest_db() == doctest::Approx(-6.02).epsilon(0.001));   // nothing pushed: it stands still
 
-    // Never under the level itself.
-    a.push(quiet.data(), quiet.size(), 1);
-    a.update(kRate, 60.0);
-    CHECK(a.peak_db()[170] == doctest::Approx(a.bin_db()[170]));
-
-    a.reset();
-    CHECK(a.peak_db()[170] == SpectrumAnalyzer::kFloorDb);
-}
-
-TEST_CASE("tilt adds its slope per octave from 1 kHz to the shown levels") {
-    SpectrumAnalyzer a;
-    // Bins 170 (996 Hz) and 341 (1998 Hz), and 85 (498 Hz).
-    std::vector<float> s(12000, 0.0f);
-    for (size_t bin : {size_t{85}, size_t{170}, size_t{341}}) {
-        const std::vector<float> one = sine(static_cast<double>(bin) * kRate / 8192, 0.25, s.size());
-        for (size_t i = 0; i < s.size(); ++i) s[i] += one[i];
+    const size_t frame = static_cast<size_t>(kRate / 60.0);
+    double previous = a.loudest_db();
+    for (int i = 0; i < 60; ++i) {   // a second of the silence the source is not sending
+        a.push_silence(frame);
+        a.update(kRate, 1.0 / 60.0);
+        CHECK(a.loudest_db() <= previous);   // falling, never a step back up
+        previous = a.loudest_db();
     }
-    a.push(s.data(), s.size(), 1);
-    a.update(kRate, 2.0);
-    const double level = 20.0 * std::log10(0.25);
-    for (double tilt : {0.0, 3.0, 4.5}) {
-        CAPTURE(tilt);
-        a.set_tilt(tilt);
-        for (size_t bin : {size_t{85}, size_t{170}, size_t{341}}) {
-            CAPTURE(bin);
-            const double f = static_cast<double>(bin) * kRate / 8192;
-            const double freqs[] = {f / 1.01, f, f * 1.01};
-            double out[3], peak[3];
-            a.levels_at(freqs, 3, out);
-            a.peak_levels_at(freqs, 3, peak);
-            const double expected = level + tilt * std::log2(f / 1000.0);
-            CHECK(out[1] == doctest::Approx(expected).epsilon(0.002));
-            CHECK(peak[1] == doctest::Approx(expected).epsilon(0.002));
-        }
-        // The bins themselves are not tilted.
-        CHECK(a.bin_db()[341] == doctest::Approx(level).epsilon(0.001));
+    CHECK(previous < -15.0);    // well down after a second (measured -19.6)
+    CHECK(previous > -100.0);   // and not dropped to the floor at once
+    for (int i = 0; i < 60 * 12; ++i) {
+        a.push_silence(frame);
+        a.update(kRate, 1.0 / 60.0);
     }
+    CHECK(a.loudest_db() < -100.0);   // and it gets there, so the display can stop drawing it
 }
 
 TEST_CASE("launch at sign-in writes, reads back and removes the Run value") {

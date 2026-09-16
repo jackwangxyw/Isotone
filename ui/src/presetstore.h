@@ -25,12 +25,16 @@ namespace presetfile {
 inline constexpr int kVersion = 1;
 
 // {"format": "isotone-preset", "version": 1, "name", "preampDb", "autoPreamp",
-//  "layout": {"channels", "speakerMask"}, "bands": [{"id", "type", "fc", "gainDb",
-//  "width", "widthMode", "shelfCorner", "channels", "enabled"}]}
-QByteArray write(const QString& name, const isotone::EqState& eq);
-// False, with `name` and `eq` untouched, for anything that is not a whole preset
-// of a version this build reads.
-bool read(const QByteArray& bytes, QString* name, isotone::EqState* eq);
+//  "forOutput", "layout": {"channels", "speakerMask"}, "bands": [{"id", "type",
+//  "fc", "gainDb", "width", "widthMode", "shelfCorner", "channels", "enabled"}]}
+//
+// "forOutput" is the output the preset is for, a braced GUID; absent or empty is
+// every output, which is what a preset is unless it is narrowed (owner,
+// 2026-09-15). A file written before it is read as being for every output.
+QByteArray write(const QString& name, const isotone::EqState& eq, const QString& for_output = QString());
+// False, with the outputs untouched, for anything that is not a whole preset of a
+// version this build reads. `for_output` may be null.
+bool read(const QByteArray& bytes, QString* name, isotone::EqState* eq, QString* for_output = nullptr);
 
 }  // namespace presetfile
 
@@ -45,9 +49,10 @@ bool same_eq(const isotone::EqState& a, const isotone::EqState& b);
 class PresetStore {
 public:
     struct Preset {
-        QString id;     // the file name without .json
+        QString id;          // the file name without .json
         QString name;
         isotone::EqState eq;
+        QString for_output;  // braced GUID; empty is every output
     };
 
     explicit PresetStore(const QString& data_dir);
@@ -64,8 +69,11 @@ public:
     // with " 2", " 3", ... in place of a number it ends with.
     QString uniqueName(const QString& base, const QString& except_id = QString()) const;
 
-    // A new preset under a unique name; its id, or empty when it could not be written.
-    QString add(const QString& name, const isotone::EqState& eq);
+    // A new preset under a unique name; its id, or empty when it could not be
+    // written. `for_output` empty is every output.
+    QString add(const QString& name, const isotone::EqState& eq, const QString& for_output = QString());
+    // The output a preset is for; empty is every output.
+    bool setForOutput(const QString& id, const QString& for_output);
     bool update(const QString& id, const isotone::EqState& eq);
     // The name it now has (unique), or empty when it could not be written.
     QString rename(const QString& id, const QString& name);

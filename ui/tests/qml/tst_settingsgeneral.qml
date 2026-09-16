@@ -47,7 +47,8 @@ Item {
         function init() {
             AppSettings.setValue("graph/gainRange", 15)
             GeneralSettings.setFrequencyRange(20, 20000)
-            AppSettings.setValue("spectrum/releaseMs", 300)
+            AppSettings.setValue("spectrum/decayMs", 150)
+            AppSettings.setValue("spectrum/smoothing", 0.35)
             if (Startup.launchAtSignIn) Startup.setLaunchAtSignIn(false, false)
             while (EqSession.count > 0) EqSession.deleteBand(0)
             EqSession.addBand(1000, 6)
@@ -57,7 +58,7 @@ Item {
         function test_toggles_persist() {
             const toggles = [["startInTray", "general/startInTray"], ["keepInTray", "general/keepInTray"],
                              ["switchOnDefaultOutput", "general/switchOnDefaultOutput"],
-                             ["autoPreampForNew", "general/autoPreampForNew"], ["peakHold", "spectrum/peakHold"]]
+                             ["autoPreampForNew", "general/autoPreampForNew"]]
             for (const [name, key] of toggles) {
                 const t = child(name)
                 verify(t !== null, name)
@@ -70,21 +71,12 @@ Item {
             }
             // The defaults are the board's.
             compare(GeneralSettings.keepInTray, true)
-            compare(GeneralSettings.peakHold, false)
             // settings.ini gives a saved flag back as text.
             AppSettings.setValue("general/keepInTray", "false")
             compare(GeneralSettings.keepInTray, false)
             verify(!child("keepInTray").checked)
             AppSettings.setValue("general/keepInTray", "true")
             compare(GeneralSettings.keepInTray, true)
-        }
-
-        function test_peak_hold_reaches_the_graph() {
-            const before = GeneralSettings.peakHold
-            mouseClick(child("peakHold"))
-            compare(graph().peakHoldVisible, !before)
-            mouseClick(child("peakHold"))
-            compare(graph().peakHoldVisible, before)
         }
 
         function test_launch_at_sign_in_writes_the_run_value() {
@@ -193,33 +185,35 @@ Item {
             verify(!pop.open)
         }
 
-        function test_resolution_release_and_tilt() {
-            segment(child("resolution"), 2)
-            compare(Number(AppSettings.value("spectrum/resolution")), 16384)
-            compare(GeneralSettings.resolution, 16384)
-            segment(child("resolution"), 1)
-            compare(GeneralSettings.resolution, 8192)
+        function test_decay_and_smoothing_sliders() {
+            // The owner asked for the decay and the smoothing on sliders, and for
+            // the resolution, the peak-hold line and the tilt to go (2026-09-15).
+            verify(child("resolution") === null)
+            verify(child("peakHold") === null)
+            verify(child("tilt") === null)
 
-            segment(child("tilt"), 2)
-            compare(GeneralSettings.tilt, 4.5)
-            segment(child("tilt"), 0)
-            compare(GeneralSettings.tilt, 0)
+            const decay = child("decay")
+            compare(findChild(decay, "sliderValue").text, "150 ms")   // the owner's default
+            const track = findChild(decay, "sliderTrack")
+            mouseClick(track, track.width, track.height / 2)
+            compare(GeneralSettings.decayMs, 500)   // 50 to 500 ms, no further
+            compare(Number(AppSettings.value("spectrum/decayMs")), 500)
+            compare(findChild(decay, "sliderValue").text, "500 ms")
+            mouseClick(track, 0, track.height / 2)
+            compare(GeneralSettings.decayMs, 50)
+            mouseClick(track, track.width / 2, track.height / 2)
+            verify(Math.abs(GeneralSettings.decayMs - 275) <= 20, GeneralSettings.decayMs)
 
-            const release = child("release")
-            compare(release.text, "300 ms")
-            mouseClick(release)
-            verify(release.editing)
-            type("120 ms")
-            keyClick(Qt.Key_Return)
-            verify(!release.editing)
-            compare(GeneralSettings.releaseMs, 120)
-            compare(release.text, "120 ms")
-            mouseClick(release)
-            type("fast")
-            keyClick(Qt.Key_Return)
-            verify(release.editing)
-            keyClick(Qt.Key_Escape)
-            compare(GeneralSettings.releaseMs, 120)
+            const smoothing = child("smoothing")
+            compare(findChild(smoothing, "sliderValue").text, "35%")
+            const strack = findChild(smoothing, "sliderTrack")
+            mouseClick(strack, strack.width, strack.height / 2)
+            compare(GeneralSettings.smoothing, 1)
+            compare(graph().spectrumSmoothing, 1)
+            mouseClick(strack, 0, strack.height / 2)
+            compare(GeneralSettings.smoothing, 0)
+            compare(graph().spectrumSmoothing, 0)
         }
+
     }
 }

@@ -52,7 +52,9 @@ class Presets : public QAbstractListModel {
     Q_PROPERTY(bool untitled READ untitled NOTIFY currentChanged)
 
 public:
-    enum Role { NameRole = Qt::UserRole + 1, AssignedRole, CurrentRole };
+    // AssignedRole: the name of the output the preset is for, empty for every
+    // output; ForOutputRole its GUID.
+    enum Role { NameRole = Qt::UserRole + 1, AssignedRole, CurrentRole, ForOutputRole };
 
     struct OutputInfo {
         isotone::ui::OutputTarget target;
@@ -91,9 +93,15 @@ public:
     // output, as load() does.
     Q_INVOKABLE void assign(const QString& guid, const QString& name);
 
-    // The current output's EQ as a new preset, assigned to it. The name it was
+    // The output a preset is for: a braced GUID, or empty for every output. Every
+    // preset is listed on every output either way; this is what it is meant for.
+    Q_INVOKABLE void setPresetOutput(const QString& name, const QString& guid);
+    // The output a preset is for, empty for every output.
+    Q_INVOKABLE QString presetOutput(const QString& name) const;
+    // The current output's EQ as a new preset, for `forOutput` (empty: every
+    // output), assigned to it. The name it was
     // given (unique), or empty.
-    Q_INVOKABLE QString saveAs(const QString& name);
+    Q_INVOKABLE QString saveAs(const QString& name, const QString& forOutput = QString());
     // The name it now has, or empty.
     Q_INVOKABLE QString rename(const QString& name, const QString& to);
     // A copy under a unique name; its name.
@@ -145,6 +153,7 @@ private:
     void outputChanged();
     void refresh();
     void rebuild();
+    const PresetStore::Preset* presetAt(int row) const;
     void step(int by);
     // Loads a preset's EQ on the current output: EqSession, the output and its saved state.
     void apply(const PresetStore::Preset& p);

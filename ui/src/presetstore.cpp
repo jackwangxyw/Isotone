@@ -63,7 +63,7 @@ bool near(double a, double b, double tolerance) {
 
 namespace presetfile {
 
-QByteArray write(const QString& name, const isotone::EqState& eq) {
+QByteArray write(const QString& name, const isotone::EqState& eq, const QString& for_output) {
     QJsonArray bands;
     for (const isotone::Band& b : eq.bands) {
         bands.append(QJsonObject{
@@ -78,7 +78,7 @@ QByteArray write(const QString& name, const isotone::EqState& eq) {
             {QStringLiteral("enabled"), b.enabled},
         });
     }
-    const QJsonObject root{
+    QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("isotone-preset")},
         {QStringLiteral("version"), kVersion},
         {QStringLiteral("name"), name},
@@ -89,10 +89,11 @@ QByteArray write(const QString& name, const isotone::EqState& eq) {
                      {QStringLiteral("speakerMask"), static_cast<double>(eq.layout_speaker_mask)}}},
         {QStringLiteral("bands"), bands},
     };
+    if (!for_output.isEmpty()) root.insert(QStringLiteral("forOutput"), for_output);
     return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
 
-bool read(const QByteArray& bytes, QString* name, isotone::EqState* eq) {
+bool read(const QByteArray& bytes, QString* name, isotone::EqState* eq, QString* for_output) {
     QJsonParseError error;
     const QJsonDocument doc = QJsonDocument::fromJson(bytes, &error);
     if (error.error != QJsonParseError::NoError || !doc.isObject()) return false;
@@ -142,6 +143,9 @@ bool read(const QByteArray& bytes, QString* name, isotone::EqState* eq) {
         b.channels = static_cast<isotone::ChannelMask>(band_channels);
         s.bands.push_back(b);
     }
+    const QJsonValue scope = root.value(QStringLiteral("forOutput"));
+    if (!scope.isUndefined() && !scope.isNull() && !scope.isString()) return false;
+    if (for_output != nullptr) *for_output = scope.toString();
     *name = n;
     *eq = std::move(s);
     return true;
@@ -192,7 +196,7 @@ void PresetStore::reload() {
         QFile f(dir.filePath(file));
         if (!f.open(QIODevice::ReadOnly)) continue;
         Preset p;
-        if (!presetfile::read(f.readAll(), &p.name, &p.eq)) continue;
+        if (!presetfile::read(f.readAll(), &p.name, &p.eq, &p.for_output)) continue;
         p.id = file.chopped(5);
         // Two files with one name (a copied file): the later one is numbered.
         p.name = uniqueName(p.name);
@@ -247,13 +251,15 @@ QString PresetStore::uniqueName(const QString& base_in, const QString& except_id
     }
 }
 
-QString PresetStore::add(const QString& name, const isotone::EqState& eq) {
+QString PresetStore::add(const QString& name, const isotone::EqState& eq, const QString& for_output) {
     Preset p;
     p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     p.name = uniqueName(name);
     p.eq = eq;
+    p.for_output = for_output;
     if (p.name.isEmpty() || !QDir().mkpath(presetsDir()) ||
-        !writeAtomically(QDir(presetsDir()).filePath(p.id + QStringLiteral(".json")), presetfile::write(p.name, p.eq))) {
+        !writeAtomically(QDir(presetsDir()).filePath(p.id + QStringLiteral(".json")),
+                         presetfile::write(p.name, p.eq, p.for_output))) {
         return QString();
     }
     presets_.push_back(std::move(p));
@@ -262,10 +268,24 @@ QString PresetStore::add(const QString& name, const isotone::EqState& eq) {
     return id;
 }
 
+bool PresetStore::setForOutput(const QString& id, const QString& for_output) {
+    for (Preset& p : presets_) {
+        if (p.id != id) continue;
+        if (p.for_output == for_output) return true;
+        if (!writeAtomically(QDir(presetsDir()).filePath(id + QStringLiteral(".json")),
+                             presetfile::write(p.name, p.eq, for_output)))
+            return false;
+        p.for_output = for_output;
+        return true;
+    }
+    return false;
+}
+
 bool PresetStore::update(const QString& id, const isotone::EqState& eq) {
     for (Preset& p : presets_) {
         if (p.id != id) continue;
-        if (!writeAtomically(QDir(presetsDir()).filePath(id + QStringLiteral(".json")), presetfile::write(p.name, eq)))
+        if (!writeAtomically(QDir(presetsDir()).filePath(id + QStringLiteral(".json")),
+                             presetfile::write(p.name, eq, p.for_output)))
             return false;
         p.eq = eq;
         return true;
@@ -279,7 +299,8 @@ QString PresetStore::rename(const QString& id, const QString& name) {
         if (p.id != id) continue;
         if (unique.isEmpty()) return QString();
         if (unique == p.name) return unique;
-        if (!writeAtomically(QDir(presetsDir()).filePath(id + QStringLiteral(".json")), presetfile::write(unique, p.eq)))
+        if (!writeAtomically(QDir(presetsDir()).filePath(id + QStringLiteral(".json")),
+                             presetfile::write(unique, p.eq, p.for_output)))
             return QString();
         p.name = unique;
         sort();

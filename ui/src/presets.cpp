@@ -90,38 +90,34 @@ int Presets::rowCount(const QModelIndex& parent) const {
     return parent.isValid() ? 0 : static_cast<int>(store_.presets().size());
 }
 
+// Every preset is listed on every output, whichever one it is for: hiding the
+// rest made a preset saved for another output vanish as soon as it was saved
+// (owner, 2026-09-15). What it is for is on its row, and it is what an output
+// picks up when it becomes the default one.
+const PresetStore::Preset* Presets::presetAt(int row) const {
+    if (row < 0 || row >= rowCount()) return nullptr;
+    return &store_.presets()[static_cast<size_t>(row)];
+}
+
 QVariant Presets::data(const QModelIndex& index, int role) const {
-    if (index.row() < 0 || index.row() >= rowCount()) return {};
-    const PresetStore::Preset& p = store_.presets()[static_cast<size_t>(index.row())];
+    const PresetStore::Preset* at = presetAt(index.row());
+    if (at == nullptr) return {};
+    const PresetStore::Preset& p = *at;
     switch (role) {
         case NameRole: return p.name;
         case CurrentRole: {
             const PresetStore::Preset* current = currentPreset();
             return current && current->id == p.id && !untitled();
         }
-        case AssignedRole: {
-            QStringList names;
-            const std::vector<QString> guids = store_.assignedTo(p.id);
-            const auto assigned = [&](const QString& guid) { return std::find(guids.begin(), guids.end(), guid) != guids.end(); };
-            QStringList seen;
-            for (const OutputInfo& o : outputs_ ? outputs_() : std::vector<OutputInfo>{}) {
-                const QString guid = QString::fromStdWString(o.target.guid);
-                if (!assigned(guid)) continue;
-                names << o.name;
-                seen << guid;
-            }
-            QStringList others;
-            for (const QString& guid : guids)
-                if (!seen.contains(guid) && !store_.outputName(guid).isEmpty()) others << store_.outputName(guid);
-            others.sort(Qt::CaseInsensitive);
-            return (names + others).join(QStringLiteral(", "));
-        }
+        // What the preset is for: an output's name, or empty for every output.
+        case AssignedRole: return p.for_output.isEmpty() ? QString() : outputName(p.for_output);
+        case ForOutputRole: return p.for_output;
     }
     return {};
 }
 
 QHash<int, QByteArray> Presets::roleNames() const {
-    return {{NameRole, "name"}, {AssignedRole, "assigned"}, {CurrentRole, "current"}};
+    return {{NameRole, "name"}, {AssignedRole, "assigned"}, {CurrentRole, "current"}, {ForOutputRole, "forOutput"}};
 }
 
 QStringList Presets::names() const {
@@ -302,9 +298,9 @@ void Presets::save() {
     refresh();
 }
 
-QString Presets::saveAs(const QString& name) {
+QString Presets::saveAs(const QString& name, const QString& forOutput) {
     if (!session_) return QString();
-    const QString id = store_.add(name, session_->eqPart());
+    const QString id = store_.add(name, session_->eqPart(), forOutput);
     if (id.isEmpty()) return QString();
     memory().detached = false;
     setAssignment(currentGuid(), id);
@@ -313,6 +309,20 @@ QString Presets::saveAs(const QString& name) {
     refresh();
     emit currentChanged();
     return store_.byId(id)->name;
+}
+
+void Presets::setPresetOutput(const QString& name, const QString& guid) {
+    const PresetStore::Preset* p = store_.byName(name);
+    if (!p || p->for_output == guid) return;
+    if (!store_.setForOutput(p->id, guid)) return;
+    rebuild();
+    refresh();
+    emit currentChanged();
+}
+
+QString Presets::presetOutput(const QString& name) const {
+    const PresetStore::Preset* p = store_.byName(name);
+    return p ? p->for_output : QString();
 }
 
 QString Presets::assignedName(const QString& guid) const {
@@ -431,11 +441,15 @@ QString Presets::importPreset(ImportPreview* preview, const QString& name) {
     if (!preview || !preview->usable() || !session_) return QString();
     const isotone::ui::OutputTarget target = preview->target();
     isotone::EqState eq = eq_part(preview->state(), preview->state().layout_channels, preview->state().layout_speaker_mask);
-    // A file carries no Auto mode: Auto when its preamp is what Auto would set.
-    eq.auto_preamp = std::abs(auto_value(eq, target.layout) - eq.preamp_db) <= kAutoPreampMatchDb;
+    // A file carries no Auto mode. No preamp in it at all (a curve, or a config
+    // without a Preamp line) means none was chosen, so Auto (owner, 2026-09-15);
+    // otherwise Auto when its preamp is what Auto would set.
+    eq.auto_preamp =
+        eq.preamp_db == 0.0 || std::abs(auto_value(eq, target.layout) - eq.preamp_db) <= kAutoPreampMatchDb;
     const QString id = store_.add(name, eq);
     if (id.isEmpty()) return QString();
-    const QString guid = QString::fromStdWString(target.guid);
+    // For every output: loaded here, and no other output written.
+    const QString guid = preview->forEveryOutput() ? currentGuid() : QString::fromStdWString(target.guid);
     rebuild();
     if (guid == currentGuid()) {
         apply(*store_.byId(id));

@@ -66,7 +66,6 @@ Item {
             label: "Gain range"
             Segmented {
                 objectName: "gainRange"
-                height: 28
                 options: ["±12 dB", "±15 dB", "±24 dB"]
                 current: GeneralSettings.gainRanges.indexOf(GeneralSettings.gainRange)
                 onPicked: (index) => AppSettings.setValue("graph/gainRange", GeneralSettings.gainRanges[index])
@@ -106,43 +105,27 @@ Item {
 
         SettingsSection { text: "Spectrum" }
         SettingsRow {
-            label: "Resolution"
-            Segmented {
-                objectName: "resolution"
-                height: 28
-                options: ["4096", "8192", "16384"]
-                current: GeneralSettings.resolutions.indexOf(GeneralSettings.resolution)
-                onPicked: (index) => AppSettings.setValue("spectrum/resolution", GeneralSettings.resolutions[index])
+            label: "Decay"
+            SettingSlider {
+                objectName: "decay"
+                from: 50
+                to: 500
+                step: 10
+                value: GeneralSettings.decayMs
+                format: (v) => Math.round(v) + " ms"
+                onMoved: (v) => GeneralSettings.setDecayMs(v)
             }
         }
         SettingsRow {
-            label: "Release"
-            SettingBox {
-                objectName: "release"
-                text: GeneralSettings.releaseMs + " ms"
-                accept: (t) => {
-                    const v = EqSession.parseValue(t.replace(/\s*ms\s*$/i, ""), EqSession.Plain)
-                    return isNaN(v) || v <= 0 ? undefined : v
-                }
-                onSubmitted: (v) => GeneralSettings.setReleaseMs(v)
-            }
-        }
-        SettingsRow {
-            label: "Peak hold"
-            Toggle {
-                objectName: "peakHold"
-                checked: GeneralSettings.peakHold
-                onToggled: (on) => AppSettings.setValue("spectrum/peakHold", on)
-            }
-        }
-        SettingsRow {
-            label: "Tilt"
-            Segmented {
-                objectName: "tilt"
-                height: 28
-                options: ["Off", "3 dB/oct", "4.5 dB/oct"]
-                current: GeneralSettings.tilts.indexOf(GeneralSettings.tilt)
-                onPicked: (index) => AppSettings.setValue("spectrum/tiltDbPerOct", GeneralSettings.tilts[index])
+            label: "Smoothing"
+            SettingSlider {
+                objectName: "smoothing"
+                from: 0
+                to: 1
+                step: 0.05
+                value: GeneralSettings.smoothing
+                format: (v) => Math.round(v * 100) + "%"
+                onMoved: (v) => GeneralSettings.setSmoothing(v)
             }
         }
 

@@ -47,7 +47,6 @@ void SpectrumAnalyzer::set_fft_size(size_t n) {
     for (size_t i = 0; i < n; ++i) window_[i] = 0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(i) / static_cast<double>(n));
     smoothed_.assign(n / 2 + 1, kFloorDb);
     power_.assign(n / 2 + 1, 0.0);
-    peak_.assign(n / 2 + 1, kFloorDb);
     write_ = 0;
     filled_ = 0;
 }
@@ -56,7 +55,6 @@ void SpectrumAnalyzer::reset() {
     std::fill(history_.begin(), history_.end(), 0.0f);
     std::fill(smoothed_.begin(), smoothed_.end(), kFloorDb);
     std::fill(power_.begin(), power_.end(), 0.0);
-    std::fill(peak_.begin(), peak_.end(), kFloorDb);
     write_ = 0;
     filled_ = 0;
 }
@@ -72,6 +70,19 @@ void SpectrumAnalyzer::push(const float* interleaved, size_t frames, uint32_t ch
     filled_ = std::min(fft_size_, filled_ + frames);
 }
 
+void SpectrumAnalyzer::push_silence(size_t frames) {
+    const size_t n = std::min(frames, fft_size_);
+    for (size_t f = 0; f < n; ++f) {
+        history_[write_] = 0.0f;
+        write_ = (write_ + 1) % fft_size_;
+    }
+    filled_ = std::min(fft_size_, filled_ + n);
+}
+
+double SpectrumAnalyzer::loudest_db() const {
+    return *std::max_element(smoothed_.begin(), smoothed_.end());
+}
+
 void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
     sample_rate_ = sample_rate;
     if (filled_ < fft_size_) return;
@@ -81,7 +92,6 @@ void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
     const double scale = 2.0 / (static_cast<double>(fft_size_) * 0.5);
     const double release = 1.0 - std::exp(-elapsed_s * 1000.0 / release_ms_);
     const double attack = 1.0 - std::exp(-elapsed_s * 1000.0 / attack_ms_);
-    const double fall = kPeakFallDbPerSecond * elapsed_s;
     // Smoothed in power, as a meter's ballistics are, then shown in dB.
     const double floor_power = std::pow(10.0, kFloorDb / 10.0);
     for (size_t b = 0; b < smoothed_.size(); ++b) {
@@ -90,16 +100,11 @@ void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
         double& p = power_[b];
         p += (power - p) * (power > p ? attack : release);
         smoothed_[b] = 10.0 * std::log10(std::max(p, floor_power));
-        peak_[b] = std::max(smoothed_[b], peak_[b] - fall);
     }
 }
 
 void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db, Bands bands) const {
     sample(smoothed_, freqs, n, out_db, bands);
-}
-
-void SpectrumAnalyzer::peak_levels_at(const double* freqs, size_t n, double* out_db, Bands bands) const {
-    sample(peak_, freqs, n, out_db, bands);
 }
 
 void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db, Bands bands) const {
@@ -127,7 +132,6 @@ void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* fre
             const double t = std::clamp(centre - static_cast<double>(b0), 0.0, 1.0);
             out_db[i] = bins[b0] + (bins[b0 + 1] - bins[b0]) * t;
         }
-        out_db[i] += tilt_ * std::log2(freqs[i] / 1000.0);
     }
 }
 

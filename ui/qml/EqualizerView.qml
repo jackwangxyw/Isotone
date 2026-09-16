@@ -7,7 +7,6 @@ Item {
     id: root
     signal bandMenuRequested(int row, real x, real above, real below)
     signal presetsRequested(real x, real y)
-    signal outputsRequested(real x, real y)
 
     Column {
         anchors.fill: parent
@@ -15,7 +14,6 @@ Item {
         TopBar {
             width: parent.width
             onPresetsRequested: (x, y) => root.presetsRequested(x, y)
-            onOutputsRequested: (x, y) => root.outputsRequested(x, y)
         }
         GraphCard {
             x: 32

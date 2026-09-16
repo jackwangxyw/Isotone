@@ -114,11 +114,25 @@ public:
     // The spectrum at `freqs` in dBFS; false when no audio has arrived lately.
     // Virtual for the Appearance preview's fixed spectrum (PreviewSession).
     virtual bool spectrumLevels(const double* freqs, size_t n, double* out_db) const;
+    // Where the graph's spectrum scale starts, dBFS at the top of the plot: it
+    // follows the loudest band so nothing is cut off and the curve fills the plot.
+    virtual double spectrumTopDb() const { return spectrum_top_db_; }
 
-    // Settings, General, Spectrum: the peak-hold line, as spectrumLevels; the FFT
-    // size (4096, 8192 or 16384, anything else is ignored), release and tilt.
-    virtual bool spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const;
-    Q_INVOKABLE void setSpectrumOptions(int fftSize, double releaseMs, double tiltDbPerOct);
+    // The preamp taken out of levels read from the output, in place: Auto sets it
+    // to the opposite of the EQ's boost, so without this a boost drops the whole
+    // curve by as much as it lifts its own band and reads as doing nothing
+    // (owner, 2026-09-15).
+    static void removePreamp(double* db, size_t n, double preamp_db);
+    // Where the scale's top goes next: `loudest` (the loudest level being drawn)
+    // plus a little headroom, reached quickly and left slowly, and never outside
+    // kSpectrumTopFloorDb to kSpectrumTopCeilingDb.
+    static double followTopDb(double current, double loudest, double elapsed_s);
+    static constexpr double kSpectrumTopHeadroomDb = 3.0;
+    static constexpr double kSpectrumTopFloorDb = -45.0;
+    static constexpr double kSpectrumTopCeilingDb = 0.0;
+
+    // Settings, General, Spectrum, Decay: how long a level takes to fall.
+    Q_INVOKABLE void setSpectrumDecayMs(double ms);
     const isotone::ui::SpectrumAnalyzer& spectrumAnalyzer() const { return analyzer_; }
 
     // Edits the current output of `outputs` from now on, starting from what it plays.
@@ -274,6 +288,7 @@ private:
     qint64 last_frame_ms_ = -1000000;
     qint64 last_update_ms_ = 0;
     bool spectrum_active_ = false;
+    double spectrum_top_db_ = kSpectrumTopFloorDb;
 
     std::vector<Step> undo_, redo_;
     Snapshot baseline_;               // as of the last step

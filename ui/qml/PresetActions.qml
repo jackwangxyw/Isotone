@@ -51,8 +51,8 @@ QtObject {
     function saveAs(done, cancelled) {
         const d = UiState.openDialog(saveAsDialog, {})
         if (!d) return null
-        d.accepted.connect((name) => {
-            if (Presets.saveAs(name) !== "") { if (done) done() }
+        d.accepted.connect((name, forOutput) => {
+            if (Presets.saveAs(name, forOutput) !== "") { if (done) done() }
             else if (cancelled) cancelled()
         })
         d.rejected.connect(() => { if (cancelled) cancelled() })

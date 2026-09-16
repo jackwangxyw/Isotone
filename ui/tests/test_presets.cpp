@@ -570,8 +570,8 @@ TEST_CASE("presets: a saved preset reaches every other output assigned it, and u
     CHECK(rig.presets->assignedName(QString::fromStdWString(rig.c.guid)) == QStringLiteral("HD 650"));
     REQUIRE(regionState(engineB).bands.size() == 3);
     CHECK(regionState(engineB).channel_gain_db[0] == doctest::Approx(-3.0103));
-    const QVariant assigned = rig.presets->data(rig.presets->index(0), Presets::AssignedRole);
-    CHECK(assigned.toString() == QStringLiteral("Headphones, Monitor, Living room"));
+    // A preset is for every output until it is narrowed (owner, 2026-09-15).
+    CHECK(rig.presets->data(rig.presets->index(0), Presets::AssignedRole).toString().isEmpty());
 
     // An unsaved edit stays on A.
     rig.session->setGain(0, -9);
@@ -663,7 +663,10 @@ TEST_CASE("presets: import reads for the output it is for, creates the preset an
     REQUIRE(preview);
     CHECK(preview->fileName() == QStringLiteral("Sennheiser HD 650 ParametricEQ.txt"));
     CHECK(preview->suggestedName() == QStringLiteral("Sennheiser HD 650 ParametricEQ"));
-    CHECK(preview->outputGuid() == QString::fromStdWString(rig.a.guid));
+    // For every output unless one is picked (owner, 2026-09-15): it is still read
+    // for the current output's layout.
+    CHECK(preview->forEveryOutput());
+    CHECK(preview->outputGuid().isEmpty());
     CHECK(preview->filterCount() == 3);
     CHECK(preview->preampDb() == doctest::Approx(-6.1));
     CHECK(preview->usable());
@@ -695,15 +698,52 @@ TEST_CASE("presets: import reads for the output it is for, creates the preset an
     CHECK(rig.session->rowCount() == 3);
     CHECK_FALSE(rig.presets->modified());
 
-    // Nothing usable.
-    writeFile(file, "GraphicEQ: 20 -2.1; 21 -2.0; 22 -1.9\n");
+    // For every output: created, loaded here, and no other output written.
+    preview->setOutputGuid(QString());
+    CHECK(preview->forEveryOutput());
+    CHECK(rig.presets->importPreset(preview.get(), QStringLiteral("For everything")) ==
+          QStringLiteral("For everything"));
+    CHECK(rig.presets->currentName() == QStringLiteral("For everything"));
+    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.c.guid)) == QStringLiteral("HD 650 · oratory1990"));
+
+    // A file with no preamp of its own has none chosen, so Auto (owner, 2026-09-15).
+    writeFile(file, "Filter 1: ON PK Fc 1000 Hz Gain 8 dB Q 1\n");
+    std::unique_ptr<ImportPreview> noPreamp(rig.presets->openImport(QUrl::fromLocalFile(file)));
+    REQUIRE(noPreamp);
+    CHECK(noPreamp->preampDb() == 0.0);
+    CHECK(rig.presets->importPreset(noPreamp.get(), QStringLiteral("No preamp")) == QStringLiteral("No preamp"));
+    CHECK(rig.session->autoPreamp());
+    CHECK(rig.session->preampDb() < -7.0);   // Auto made room for the 8 dB bell
+
+    // A file that carries one keeps it, by hand.
+    writeFile(file, "Preamp: -1 dB\nFilter 1: ON PK Fc 1000 Hz Gain 8 dB Q 1\n");
+    std::unique_ptr<ImportPreview> withPreamp(rig.presets->openImport(QUrl::fromLocalFile(file)));
+    REQUIRE(withPreamp);
+    CHECK(rig.presets->importPreset(withPreamp.get(), QStringLiteral("Its own preamp")) ==
+          QStringLiteral("Its own preamp"));
+    CHECK_FALSE(rig.session->autoPreamp());
+    CHECK(rig.session->preampDb() == doctest::Approx(-1.0));
+
+    // A curve, not filters: bands are fitted to it (the owner's export, 2026-09-15).
+    writeFile(file, "GraphicEQ: 20 -6; 200 6; 2000 -3; 20000 2\n");
+    std::unique_ptr<ImportPreview> curve(rig.presets->openImport(QUrl::fromLocalFile(file)));
+    REQUIRE(curve);
+    CHECK(curve->usable());
+    CHECK(curve->filterCount() > 0);
+    CHECK(curve->curvePoints() == 4);
+    CHECK(curve->fitWorstDb() < 2.0);
+    CHECK(curve->skipped().isEmpty());   // nothing was skipped: it was read
+
+    // Nothing usable: a line the importer understands and cannot play.
+    writeFile(file, "Convolution: room.wav\n");
     std::unique_ptr<ImportPreview> empty(rig.presets->openImport(QUrl::fromLocalFile(file)));
     REQUIRE(empty);
     CHECK_FALSE(empty->usable());
     CHECK(empty->filterCount() == 0);
+    CHECK(empty->curvePoints() == 0);
     CHECK(empty->skipped().size() == 1);
     CHECK(rig.presets->importPreset(empty.get(), QStringLiteral("Nothing")).isEmpty());
-    CHECK(rig.presets->rowCount() == 2);
+    CHECK(rig.presets->rowCount() == 5);   // nothing was added for the unusable file
 
     CHECK(rig.presets->openImport(QUrl::fromLocalFile(file + QStringLiteral(".missing"))) == nullptr);
 
@@ -752,4 +792,51 @@ TEST_CASE("presets: export writes the output's EQ for a layout") {
 
     rig.session->useTarget(rig.a);
     CHECK(rig.presets->exportLayouts().isEmpty());
+}
+
+TEST_CASE("presets: a preset is for every output until it is narrowed to one") {
+    // The owner asked to be asked on Save as, and to be able to change it after
+    // (2026-09-15). Before this a preset was tied to the output it was saved on.
+    Rig rig("scope");
+    rig.session->useTarget(rig.a);
+    const QString a = QString::fromStdWString(rig.a.guid);
+    const QString b = QString::fromStdWString(rig.b.guid);
+
+    rig.session->setEqPart(hd650());
+    CHECK(rig.presets->saveAs(QStringLiteral("Everywhere")) == QStringLiteral("Everywhere"));
+    CHECK(rig.presets->presetOutput(QStringLiteral("Everywhere")).isEmpty());
+
+    rig.session->setEqPart(hd650());
+    CHECK(rig.presets->saveAs(QStringLiteral("Just A"), a) == QStringLiteral("Just A"));
+    CHECK(rig.presets->presetOutput(QStringLiteral("Just A")) == a);
+
+    // Saved for another output, from this one: still listed here, and still this
+    // output's preset. Hiding it made it vanish as soon as it was saved (owner).
+    rig.session->setEqPart(hd650());
+    CHECK(rig.presets->saveAs(QStringLiteral("Just B"), b) == QStringLiteral("Just B"));
+    CHECK(rig.presets->currentName() == QStringLiteral("Just B"));
+    CHECK(rig.presets->names() ==
+          QStringList({QStringLiteral("Everywhere"), QStringLiteral("Just A"), QStringLiteral("Just B")}));
+
+    // Every output lists every preset; the row says what each is for.
+    rig.session->useTarget(rig.b);
+    CHECK(rig.presets->names() ==
+          QStringList({QStringLiteral("Everywhere"), QStringLiteral("Just A"), QStringLiteral("Just B")}));
+    CHECK(rig.presets->data(rig.presets->index(0), Presets::AssignedRole).toString().isEmpty());
+    CHECK(rig.presets->data(rig.presets->index(1), Presets::AssignedRole).toString() == QStringLiteral("Headphones"));
+    CHECK(rig.presets->data(rig.presets->index(2), Presets::ForOutputRole).toString() == b);
+
+    // Narrowed and widened again, from either output.
+    rig.presets->setPresetOutput(QStringLiteral("Everywhere"), b);
+    CHECK(rig.presets->presetOutput(QStringLiteral("Everywhere")) == b);
+    CHECK(rig.presets->data(rig.presets->index(0), Presets::AssignedRole).toString() == QStringLiteral("Monitor"));
+    rig.session->useTarget(rig.a);
+    CHECK(rig.presets->names().size() == 3);
+    rig.presets->setPresetOutput(QStringLiteral("Everywhere"), QString());
+    CHECK(rig.presets->presetOutput(QStringLiteral("Everywhere")).isEmpty());
+
+    // It survives a restart: the file carries it.
+    rig.makePresets();
+    CHECK(rig.presets->presetOutput(QStringLiteral("Just A")) == a);
+    CHECK(rig.presets->presetOutput(QStringLiteral("Everywhere")).isEmpty());
 }

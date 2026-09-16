@@ -14,6 +14,9 @@ Item {
         anchors.fill: parent
     }
 
+    FontMetrics { id: metrics }
+    TextMetrics { id: ink }
+
     TestCase {
         name: "GraphHandle"
         when: windowShown
@@ -29,6 +32,36 @@ Item {
             EqSession.addBand(1000, 6)
             tryVerify(() => handle(0) !== null && handle(0).width > 0)
             waitForRendering(card)
+        }
+
+        // The owner, 2026-09-15: the numbers in the circles are not centred. The
+        // digits' ink, not the text's box (which carries the descent and rounds to
+        // a whole pixel), has to sit on the circle's middle.
+        function test_the_number_is_centred_in_its_circle() {
+            for (const hz of [4000, 120, 8000, 300, 600, 900, 2000, 5000, 15000]) EqSession.addBand(hz, 0)
+            compare(EqSession.count, 10)
+            tryVerify(() => handle(9) !== null && handle(9).width > 0)
+            waitForRendering(card)
+            for (let row = 0; row < 10; ++row) {
+                const number = findChild(handle(row), "handleNumber")
+                verify(number !== null, "row " + row)
+                const circle = number.parent
+                ink.font = number.font
+                ink.text = number.text
+                metrics.font = number.font
+                const box = ink.tightBoundingRect
+                verify(box.width > 0 && box.height > 0, "row " + row + " has ink")
+                // The ink box is measured from the text's origin, its top from the
+                // baseline. The number sits on the whole pixel nearest the middle, so
+                // the glyphs stay crisp: half a pixel is the most it can be out.
+                const exactX = circle.width / 2 - box.x - box.width / 2
+                const exactY = circle.height / 2 - metrics.ascent - box.y - box.height / 2
+                compare(number.x, Math.round(exactX), "row " + row + " horizontally")
+                compare(number.y, Math.round(exactY), "row " + row + " vertically")
+                verify(Math.abs(number.x + box.x + box.width / 2 - circle.width / 2) <= 0.5, "row " + row + " x")
+                verify(Math.abs(number.y + metrics.ascent + box.y + box.height / 2 - circle.height / 2) <= 0.5,
+                       "row " + row + " y")
+            }
         }
 
         function test_a_handle_is_smaller_than_the_first_boards() {

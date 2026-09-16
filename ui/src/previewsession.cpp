@@ -41,8 +41,3 @@ bool PreviewSession::spectrumLevels(const double* freqs, size_t n, double* out_d
     for (size_t i = 0; i < n; ++i) out_db[i] = sample_level(freqs[i]);
     return true;
 }
-
-bool PreviewSession::spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const {
-    for (size_t i = 0; i < n; ++i) out_db[i] = sample_level(freqs[i]) + 4.0;
-    return true;
-}

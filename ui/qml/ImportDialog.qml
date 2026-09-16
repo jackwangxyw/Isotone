@@ -2,13 +2,15 @@ import QtQuick
 import Isotone
 
 // Import (ImportDialog board): the curve of the file as it reads for the chosen
-// output, Preamp, Filters, Skipped lines, the lines skipped, Name and Assign to.
+// output, Preamp, Filters, Skipped lines, the lines skipped, Name and For.
 // Import creates the preset and loads it on that output; it is greyed when no
 // filter imports. PresetActions.showImport opens it with `preview`.
 DialogFrame {
     id: root
     property ImportPreview preview
-    readonly property var choices: Presets.outputChoices()
+    // Every output unless one is picked: a preset is not a device's (owner,
+    // 2026-09-15).
+    readonly property var choices: [{ guid: "", name: "All outputs" }].concat(Presets.outputChoices())
     readonly property string outputName: {
         for (const c of choices)
             if (preview && c.guid === preview.outputGuid) return c.name
@@ -44,9 +46,10 @@ DialogFrame {
             Presets.importPreset(preview, nameField.text.trim())
             root.close()
         }
-        // Loaded on the current output, it replaces unsaved changes: ask first.
+        // Loaded on the current output (which is what "All outputs" does), it
+        // replaces unsaved changes: ask first.
         const current = choices.find((c) => c.current)
-        if (!current || preview.outputGuid === current.guid) {
+        if (!current || preview.outputGuid === "" || preview.outputGuid === current.guid) {
             root.visible = false
             PresetActions.confirmUnsaved(false, run, () => { root.visible = true })
         } else {
@@ -117,6 +120,13 @@ DialogFrame {
             objectName: "importFilters"
             label: "Filters"
             value: root.preview ? String(root.preview.filterCount) : ""
+        }
+        Stat {
+            objectName: "importFit"
+            visible: root.preview !== null && root.preview.curvePoints > 0
+            label: "Curve fit"
+            value: root.preview ? root.preview.curvePoints + " points, ±"
+                                  + root.preview.fitWorstDb.toFixed(1) + " dB" : ""
         }
         Stat {
             objectName: "importSkipped"
@@ -193,7 +203,7 @@ DialogFrame {
             width: (parent.width - 14) / 2
             spacing: 6
             Text {
-                text: "Assign to"
+                text: "For"
                 font.family: Theme.font
                 font.pixelSize: 12
                 color: Theme.muted

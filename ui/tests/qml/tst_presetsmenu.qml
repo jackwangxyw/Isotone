@@ -60,6 +60,39 @@ Item {
             compare(row("Late night").assigned, "")
         }
 
+        // The owner asked for the output a preset is for to be changeable after it
+        // is made (2026-09-15), from the device icon on its row.
+        function test_the_output_a_preset_is_for_is_picked_on_its_row() {
+            const r = row("Late night")
+            compare(r.forOutput, "")            // every output
+            compare(r.assigned, "")
+            verify(!child(r, "presetScopeList").visible)
+            const height = r.height
+            hover(r)
+            const icon = child(r, "presetScope")
+            verify(icon !== null)
+            mouseClick(icon)
+            const list = child(r, "presetScopeList")
+            verify(list.visible)
+            // The row grows to hold the choices: click them where they end up.
+            waitForItemPolished(r)
+            waitForRendering(menu)
+            verify(r.height > height)           // the row opens, nothing is clipped
+            // The Column holds its delegates and the Repeater itself.
+            const choices = []
+            for (let i = 0; i < list.children.length; ++i)
+                if (list.children[i].modelData !== undefined) choices.push(list.children[i])
+            // "All outputs" first, then the machine's own outputs when it has any.
+            verify(choices.length >= 1)
+            compare(choices[0].modelData.name, "All outputs")
+            compare(choices[0].modelData.guid, "")
+            mouseClick(choices[0])
+            verify(!child(r, "presetScopeList").visible)
+            compare(r.forOutput, "")
+            compare(Presets.presetOutput("Late night"), "")
+            compare(r.height, height)
+        }
+
         function test_search_filters_the_list() {
             mouseClick(child(menu, "presetSearch"))
             type("NIGHT")

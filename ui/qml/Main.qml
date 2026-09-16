@@ -94,7 +94,6 @@ Window {
                 visible: UiState.view === "eq"
                 onBandMenuRequested: (row, x, above, below) => bandMenu.openAt(row, x, above, below)
                 onPresetsRequested: (x, y) => presetsMenu.openAt(x, y)
-                onOutputsRequested: (x, y) => outputsPopover.openAt(x, y)
             }
             Loader {
                 anchors.fill: parent

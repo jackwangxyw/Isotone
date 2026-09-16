@@ -8,6 +8,9 @@
 
 #include "doctest.h"
 
+#include <QColor>
+#include <QImage>
+#include <QPainter>
 #include <QPainterPath>
 #include <QPointF>
 
@@ -36,36 +39,50 @@ std::vector<double> log_points(double lo, double hi, size_t n) {
     return f;
 }
 
+// A spectrum that runs along the bottom of the plot and steps back up, to catch
+// what the curve does between points that are already clamped.
+class CliffSession : public EqSession {
+public:
+    bool spectrumLevels(const double*, size_t n, double* out_db) const override {
+        for (size_t i = 0; i < n; ++i) {
+            const double t = static_cast<double>(i) / static_cast<double>(n - 1);
+            out_db[i] = t > 0.35 && t < 0.65 ? -90.0 : -8.0;
+        }
+        return true;
+    }
+    double spectrumTopDb() const override { return -3.0; }
+};
+
 }  // namespace
 
-TEST_CASE("the spectrum is drawn from far fewer points than pixels") {
-    CHECK(ResponseGraph::spectrumPoints(1300) == 260);
-    CHECK(ResponseGraph::spectrumPoints(400) == 80);
-    // Held between 64 and 320, so a narrow window keeps a readable curve and a
-    // wide one does not go back to a point per pixel.
-    CHECK(ResponseGraph::spectrumPoints(100) == 64);
-    CHECK(ResponseGraph::spectrumPoints(4000) == 320);
+TEST_CASE("the spectrum is drawn from a fixed number of points, fewer than a wide plot's pixels") {
+    // It was one per 5 px, so the curve changed shape with the window; the owner
+    // asked for the most it ever drew, at every width (2026-09-15).
+    CHECK(ResponseGraph::kSpectrumPoints == 320);
 }
 
 TEST_CASE("display smoothing rounds a spike and leaves a straight line alone") {
+    // Settings, General, Spectrum, Smoothing: 0.125 is the short kernel it had
+    // before the slider (sigma 1 point).
     std::vector<double> spike(9, -60.0);
     spike[4] = -20.0;
     std::vector<double> smoothed = spike;
-    ResponseGraph::smoothForDisplay(smoothed);
+    ResponseGraph::smoothForDisplay(smoothed, 0.125);
     CHECK(smoothed[4] > -45.0);            // the peak is kept, lower
     CHECK(smoothed[4] < -25.0);
     CHECK(smoothed[3] > spike[3] + 5.0);   // its neighbours rise
     CHECK(smoothed[0] == doctest::Approx(-60.0));
 
-    std::vector<double> ramp(9);
+    // A straight line is its own average, away from the ends the kernel reaches.
+    std::vector<double> ramp(21);
     for (size_t i = 0; i < ramp.size(); ++i) ramp[i] = -80.0 + 5.0 * static_cast<double>(i);
     std::vector<double> kept = ramp;
-    ResponseGraph::smoothForDisplay(kept);
-    for (size_t i = 2; i + 2 < ramp.size(); ++i) CHECK(kept[i] == doctest::Approx(ramp[i]).epsilon(1e-9));
+    ResponseGraph::smoothForDisplay(kept, 0.125);   // sigma 1, so it reaches 3 points
+    for (size_t i = 3; i + 3 < ramp.size(); ++i) CHECK(kept[i] == doctest::Approx(ramp[i]).epsilon(1e-9));
 
     // The ends are averaged over what there is, never left at a floor.
     std::vector<double> flat(5, -30.0);
-    ResponseGraph::smoothForDisplay(flat);
+    ResponseGraph::smoothForDisplay(flat, 0.125);
     for (double v : flat) CHECK(v == doctest::Approx(-30.0));
 }
 
@@ -139,4 +156,70 @@ TEST_CASE("a band of bins reads as its loudest bin or as its mean power") {
     MESSAGE("wobble mean " << wobble(n_mean) << " loudest " << wobble(n_loudest));
     // Steadier point to point, which is what the drawn curve shows.
     CHECK(wobble(n_mean) < wobble(n_loudest) * 0.9);
+}
+
+TEST_CASE("the smoothing setting decides how spiky the curve is") {
+    // The owner asked for a slider between spiky and smooth (2026-09-15).
+    std::vector<double> spikes(120, -60.0);
+    for (size_t i = 10; i < spikes.size(); i += 7) spikes[i] = -30.0;
+    const auto wobble = [](const std::vector<double>& v) {
+        double sum = 0.0;
+        for (size_t i = 1; i < v.size(); ++i) sum += std::abs(v[i] - v[i - 1]);
+        return sum / static_cast<double>(v.size() - 1);
+    };
+
+    std::vector<double> none = spikes, some = spikes, most = spikes;
+    ResponseGraph::smoothForDisplay(none, 0.0);
+    ResponseGraph::smoothForDisplay(some, 0.35);   // the default
+    ResponseGraph::smoothForDisplay(most, 1.0);
+    CHECK(none == spikes);   // 0 leaves the points exactly as they are
+    CHECK(wobble(some) < wobble(none) * 0.5);
+    CHECK(wobble(most) < wobble(some) * 0.5);
+
+    // Smoothing moves levels around, it does not lose them: the mean holds.
+    const auto mean = [](const std::vector<double>& v) {
+        double sum = 0.0;
+        for (double x : v) sum += x;
+        return sum / static_cast<double>(v.size());
+    };
+    CHECK(mean(some) == doctest::Approx(mean(spikes)).epsilon(0.02));
+    CHECK(mean(most) == doctest::Approx(mean(spikes)).epsilon(0.05));
+}
+
+TEST_CASE("the spectrum is drawn inside the plot, even where the curve runs along an edge") {
+    // The owner, 2026-09-15: where the spectrum dips under the bottom, the curve
+    // spills a few pixels past it. The points are clamped to the plot, but a
+    // Catmull-Rom segment between two clamped points overshoots.
+    CliffSession session;
+    ResponseGraph graph;
+    graph.setSession(&session);
+    graph.setSize(QSizeF(1060, 404));
+    // Only the spectrum is drawn in red; everything else is left out of the picture.
+    graph.setProperty("spectrumEdge", QColor(255, 0, 0));
+    graph.setProperty("spectrumFill", QColor(255, 0, 0));
+    for (const char* name : {"gridMajor", "gridMinor", "zeroLine", "labelColour", "accent", "bell"})
+        graph.setProperty(name, QColor(0, 0, 0, 0));
+
+    QImage image(1060, 404, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    graph.paint(&painter);
+    painter.end();
+
+    const double top = graph.plotTop(), bottom = graph.plotTop() + graph.plotHeight();
+    int over = 0, under = 0, inside = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const QColor c = image.pixelColor(x, y);
+            if (c.alpha() == 0 || c.red() == 0) continue;
+            if (y < top - 1) ++over;
+            else if (y > bottom + 1) ++under;
+            else ++inside;
+        }
+    }
+    CAPTURE(over);
+    CAPTURE(under);
+    REQUIRE(inside > 0);   // it was drawn at all
+    CHECK(under == 0);
+    CHECK(over == 0);
 }

@@ -33,8 +33,9 @@ class ResponseGraph : public QQuickPaintedItem {
     Q_PROPERTY(double rangeDb READ rangeDb WRITE setRangeDb NOTIFY rangeChanged)
     Q_PROPERTY(double minHz READ minHz WRITE setMinHz NOTIFY rangeChanged)
     Q_PROPERTY(double maxHz READ maxHz WRITE setMaxHz NOTIFY rangeChanged)
-    // Settings, General, Spectrum: the peak-hold line.
-    Q_PROPERTY(bool peakHoldVisible MEMBER peak_hold_ NOTIFY styleChanged)
+    // Settings, General, Spectrum: how much the drawn curve is smoothed, 0 (the
+    // points as they are) to 1 (the widest window).
+    Q_PROPERTY(double spectrumSmoothing MEMBER spectrum_smoothing_ NOTIFY styleChanged)
     Q_PROPERTY(bool spectrumVisible MEMBER spectrum_visible_ NOTIFY styleChanged)
     Q_PROPERTY(bool perBandColours MEMBER per_band_ NOTIFY styleChanged)
     Q_PROPERTY(QVariantList bandColours MEMBER band_colours_ NOTIFY styleChanged)
@@ -102,11 +103,14 @@ public:
     // False for a band not on the channel in view.
     Q_INVOKABLE bool onView(int row) const;
 
-    // How the spectrum is drawn (tested in ui_tests): the number of points for a
-    // plot that wide, a short Gaussian across neighbouring points in dB, and a
+    // How the spectrum is drawn (tested in ui_tests): this many points whatever
+    // the plot's width, on a scale that runs from the session's spectrumTopDb at
+    // the top of the plot down over kSpectrumRangeDb, a Gaussian across
+    // neighbouring points in dB whose width `amount` (0 to 1) sets, and a
     // Catmull-Rom curve through them.
-    static size_t spectrumPoints(double plot_width);
-    static void smoothForDisplay(std::vector<double>& db);
+    static constexpr size_t kSpectrumPoints = 320;
+    static constexpr double kSpectrumRangeDb = 60.0;
+    static void smoothForDisplay(std::vector<double>& db, double amount);
     static QPainterPath curveThrough(const std::vector<QPointF>& points);
 
 signals:
@@ -134,8 +138,8 @@ private:
     int revision_ = 0;
     double range_db_ = 15.0;
     double min_hz_ = 20.0, max_hz_ = 20000.0;
-    bool peak_hold_ = false;
     bool spectrum_visible_ = true;
+    double spectrum_smoothing_ = 0.35;
     bool per_band_ = true;
     QVariantList band_colours_;
     QColor accent_{0x6a, 0xa7, 0xf4};
