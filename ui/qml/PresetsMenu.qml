@@ -141,10 +141,12 @@ Popover {
                             onClicked: root.loadPreset(row.name)
                         }
 
+                        // Hidden while renaming: that row already shows the save check.
                         Icon {
+                            objectName: "presetCurrentCheck"
                             x: 12
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: row.current
+                            visible: row.current && !row.renamingThis
                             name: "check"
                             size: 16
                             colour: Theme.accent

@@ -98,6 +98,18 @@ Item {
             verify(menu.open)
         }
 
+        function test_rename_hides_the_current_check() {
+            const r = row("HD 650 · tuned")
+            verify(child(r, "presetCurrentCheck").visible, "the current preset is checked")
+            hover(r)
+            mouseClick(child(r, "presetRename"))
+            tryVerify(() => child(r, "presetRenameInput") !== null)
+            verify(!child(r, "presetCurrentCheck").visible, "only the save check shows while renaming")
+            verify(child(r, "presetRenameDone").visible)
+            keyClick(Qt.Key_Escape)
+            tryVerify(() => child(r, "presetCurrentCheck").visible)
+        }
+
         function test_rename_escape_keeps_the_name() {
             hover(row("Late night"))
             mouseClick(child(row("Late night"), "presetRename"))

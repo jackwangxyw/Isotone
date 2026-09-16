@@ -61,18 +61,45 @@ Item {
                             }
                         }
                     }
-                    function scrollBy(dx) {
-                        contentX = Math.max(0, Math.min(contentWidth - width, contentX + dx))
+                    // Where a wheel is taking the columns; contentX eases there.
+                    property real scrollTarget: 0
+                    NumberAnimation {
+                        id: glide
+                        target: flick
+                        property: "contentX"
+                        duration: 260
+                        easing.type: Easing.OutCubic
                     }
+                    function clampX(x) { return Math.max(0, Math.min(contentWidth - width, x)) }
+                    // A press on the columns or the thumb takes over from a glide.
+                    function scrollTo(x) {
+                        glide.stop()
+                        scrollTarget = clampX(x)
+                        contentX = scrollTarget
+                    }
+                    // A wheel adds to the target and restarts the ease from where
+                    // the columns are, so many small deltas glide instead of step.
+                    function scrollBy(dx) {
+                        scrollTarget = clampX((glide.running ? scrollTarget : contentX) + dx)
+                        glide.stop()
+                        glide.from = contentX
+                        glide.to = scrollTarget
+                        glide.start()
+                    }
+                    onDragStarted: glide.stop()
                 }
                 // Both wheels scroll sideways. On top of the columns, taking no
                 // buttons, so presses and drags still reach them.
                 MouseArea {
                     anchors.fill: flick
                     acceptedButtons: Qt.NoButton
+                    // A high-resolution wheel (the MX Master's side wheel) sends
+                    // many small deltas: pixels where the event has them, else one
+                    // notch (120) moves a column and its spacing.
                     onWheel: (wheel) => {
-                        const d = wheel.angleDelta.x !== 0 ? wheel.angleDelta.x : wheel.angleDelta.y
-                        flick.scrollBy(-d)
+                        const pixels = wheel.pixelDelta.x !== 0 ? wheel.pixelDelta.x : wheel.pixelDelta.y
+                        const angle = wheel.angleDelta.x !== 0 ? wheel.angleDelta.x : wheel.angleDelta.y
+                        flick.scrollBy(-(pixels !== 0 ? pixels : angle / 120 * 118))
                     }
                 }
                 // The fade marks the side with more bands out of view.
@@ -114,14 +141,13 @@ Item {
                     property real grab: 0
                     onPressed: (mouse) => {
                         const onThumb = mouse.x >= thumb.x && mouse.x <= thumb.x + thumb.width
-                        if (!onThumb) flick.contentX = Math.max(0, Math.min(flick.contentWidth - flick.width,
-                                                                            (mouse.x - thumb.width / 2) * flick.contentWidth / track.width))
+                        if (onThumb) flick.scrollTo(flick.contentX)   // ends a glide, keeping the columns where they are
+                        else flick.scrollTo((mouse.x - thumb.width / 2) * flick.contentWidth / track.width)
                         grab = mouse.x - thumb.x
                     }
                     onPositionChanged: (mouse) => {
                         if (!pressed) return
-                        flick.contentX = Math.max(0, Math.min(flick.contentWidth - flick.width,
-                                                              (mouse.x - grab) * flick.contentWidth / track.width))
+                        flick.scrollTo((mouse.x - grab) * flick.contentWidth / track.width)
                     }
                 }
             }
@@ -129,6 +155,8 @@ Item {
 
         // Add band.
         Item {
+            id: addBand
+            objectName: "addBand"
             width: 92
             height: parent.height
             opacity: EqSession.canAddBand ? 1 : 0.35
@@ -139,9 +167,12 @@ Item {
                 onClicked: EqSession.addBand(1000, 0)
             }
             Rectangle { width: 1; height: parent.height; color: Theme.gridMinor }
+            // Centred between this line and the panel's: the Row's spacing after
+            // the item is part of the same gap.
             Column {
+                objectName: "addBandContent"
                 anchors.centerIn: parent
-                anchors.verticalCenterOffset: 16
+                anchors.horizontalCenterOffset: addBand.parent.spacing / 2
                 spacing: 10
                 Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter

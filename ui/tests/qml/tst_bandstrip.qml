@@ -4,6 +4,7 @@ import Isotone
 
 // The band strip scrolls sideways: horizontal wheel, vertical wheel, dragging
 // the columns and dragging the thumb. A drag on a gain slider still sets gain.
+// Add band sits in the middle of its box, at the boards' size and the minimum.
 Item {
     id: root
     width: 1192
@@ -13,6 +14,16 @@ Item {
         id: strip
         anchors.fill: parent
     }
+    // The minimum window, 1120 x 760 with the sidebar collapsed (72 px). Laid
+    // out beside the first strip, out of the window and invisible.
+    BandStrip {
+        id: small
+        y: root.height
+        opacity: 0
+        enabled: false
+        width: 1120 - 72
+        height: 360
+    }
 
     TestCase {
         name: "BandStrip"
@@ -20,6 +31,8 @@ Item {
 
         function flick() { return findChild(strip, "bandFlick") }
         function maxX(f) { return f.contentWidth - f.width }
+        // One notch (120) moves a column and its spacing.
+        function notch(n) { return n / 120 * 118 }
 
         // No output in a test: the session edits in memory only.
         function initTestCase() {
@@ -28,7 +41,7 @@ Item {
         }
 
         function init() {
-            flick().contentX = 0
+            flick().scrollTo(0)
         }
 
         function test_bands_overflow() {
@@ -57,6 +70,21 @@ Item {
             tryCompare(f, "contentX", maxX(f))
         }
 
+        function test_a_pixel_wheel_scrolls_by_its_pixels() {
+            const f = flick()
+            TestHooks.pixelWheel(f, 200, 150, -60, 0)
+            tryVerify(() => Math.abs(f.contentX - 60) < 1, 1000, "a pixelDelta wheel moves that many pixels, contentX " + f.contentX)
+        }
+
+        // The MX Master's side wheel sends many small deltas: they add up and
+        // the columns glide, instead of each one stepping on its own.
+        function test_many_small_deltas_end_at_their_sum() {
+            const f = flick()
+            for (let i = 0; i < 10; ++i) mouseWheel(f, 200, 150, -40, 0)
+            verify(f.contentX < notch(400) - 2, "the columns are still on their way, contentX " + f.contentX)
+            tryVerify(() => Math.abs(f.contentX - notch(400)) < 1, 2000, "they end at the sum, contentX " + f.contentX)
+        }
+
         function test_dragging_the_columns_scrolls() {
             const f = flick()
             // Start on a column's frequency text, away from its slider.
@@ -77,6 +105,23 @@ Item {
             mouseRelease(strip, start.x + 150, start.y)
             tryVerify(() => f.contentX > 100, 1000, "dragging the thumb right moves the columns left, contentX " + f.contentX)
         }
+
+        // Its box runs from its own line to the panel's, the Row's spacing
+        // included; the plus and the label sit in the middle of it.
+        function centred(s) {
+            const box = findChild(s, "addBand")
+            const content = findChild(s, "addBandContent")
+            verify(box !== null && content !== null)
+            waitForRendering(s)
+            const corner = box.mapToItem(s, 0, 0)
+            const centre = content.mapToItem(s, content.width / 2, content.height / 2)
+            const wanted = { x: corner.x + (box.width + box.parent.spacing) / 2, y: corner.y + box.height / 2 }
+            verify(Math.abs(centre.x - wanted.x) <= 1, "across: " + centre.x + " of " + wanted.x)
+            verify(Math.abs(centre.y - wanted.y) <= 1, "down: " + centre.y + " of " + wanted.y)
+        }
+
+        function test_add_band_is_centred_in_its_box() { centred(strip) }
+        function test_add_band_is_centred_at_the_minimum_window() { centred(small) }
 
         function test_dragging_a_slider_sets_gain_not_scroll() {
             const f = flick()

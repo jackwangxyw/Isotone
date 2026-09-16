@@ -29,7 +29,23 @@ Rectangle {
     // A disabled band's column is faded, as the prototype's .col.off.
     opacity: bandEnabled ? 1 : 0.5
 
-    MouseArea { anchors.fill: parent; onPressed: EqSession.select(root.index) }
+    // The popover is centred on the column, above the type name.
+    function openMenu() {
+        const top = typeLabel.mapToItem(null, 0, -4)
+        const centre = root.mapToItem(null, root.width / 2, 0)
+        root.menuRequested(centre.x, top.y, top.y + typeLabel.height + 8)
+    }
+
+    // A right press anywhere in the column opens the popover, as the graph's
+    // handles do; a left press selects the band and leaves drags alone.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onPressed: (mouse) => {
+            EqSession.select(root.index)
+            if (mouse.button === Qt.RightButton) root.openMenu()
+        }
+    }
 
     Column {
         id: column
@@ -68,12 +84,7 @@ Rectangle {
                     anchors.margins: -4
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    // The popover is centred on the column, above the type name.
-                    onClicked: {
-                        const top = typeLabel.mapToItem(null, 0, -4)
-                        const centre = root.mapToItem(null, root.width / 2, 0)
-                        root.menuRequested(centre.x, top.y, top.y + typeLabel.height + 8)
-                    }
+                    onClicked: root.openMenu()
                 }
             }
         }

@@ -66,14 +66,42 @@ Item {
         font.letterSpacing: -0.39
         color: Theme.text
     }
+    // Devices reads on a worker thread: the button spins until the read is in
+    // and at least `held` has passed, then shows Refreshed for a moment.
     Button {
+        id: refresh
         objectName: "refreshButton"
+        // "" idle, "working" reading, "done" just read.
+        property string phase: ""
+        property bool read: false
+        property bool held: false
         anchors.right: parent.right
         anchors.rightMargin: 36
         anchors.verticalCenter: title.verticalCenter
-        text: "Refresh"
-        icon: "refresh"
-        onClicked: { Devices.refresh(); Outputs.refresh() }
+        text: phase === "done" ? "Refreshed" : "Refresh"
+        icon: phase === "done" ? "check" : "refresh"
+        busy: phase === "working"
+        onClicked: {
+            if (phase === "working") return
+            phase = "working"
+            read = false
+            held = false
+            holdTimer.restart()
+            Devices.refresh()
+            Outputs.refresh()
+        }
+        function settle() {
+            if (phase !== "working" || !read || !held) return
+            phase = "done"
+            doneTimer.restart()
+        }
+        Timer { id: holdTimer; interval: 400; onTriggered: { refresh.held = true; refresh.settle() } }
+        Timer { id: doneTimer; interval: 1500; onTriggered: refresh.phase = "" }
+        Connections {
+            target: Devices
+            enabled: refresh.phase === "working"
+            function onRevisionChanged() { refresh.read = true; refresh.settle() }
+        }
     }
 
     Item {

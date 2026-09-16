@@ -9,6 +9,7 @@ Rectangle {
     property string icon
     property string kind: "normal"   // normal, primary, ghost, danger, link (ghost in the accent)
     property bool active: true   // false greys it and ignores clicks
+    property bool busy: false    // a Spinner in place of the icon
     signal clicked()
 
     readonly property color foreground: kind === "primary" ? Theme.textOnAccent : kind === "danger" ? Theme.danger : kind === "link" ? Theme.accent : Theme.text
@@ -28,12 +29,23 @@ Rectangle {
         id: row
         anchors.centerIn: parent
         spacing: 8
-        Icon {
-            visible: root.icon !== ""
-            name: root.icon
-            size: 15
-            colour: root.foreground
+        Item {
+            visible: root.icon !== "" || root.busy
+            width: 15
+            height: 15
             anchors.verticalCenter: parent.verticalCenter
+            Icon {
+                visible: !root.busy
+                anchors.centerIn: parent
+                name: root.icon
+                size: 15
+                colour: root.foreground
+            }
+            Spinner {
+                objectName: "buttonSpinner"
+                visible: root.busy
+                anchors.centerIn: parent
+            }
         }
         Text {
             text: root.text
