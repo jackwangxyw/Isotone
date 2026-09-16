@@ -31,6 +31,12 @@ Item {
             mouseClick(findChild(strip, "typeName"))
             verify(menu.open)
         }
+        function column() { return findChild(strip, "typeName").parent.parent.parent }   // Row, Column, BandColumn
+        function panelCentre() { return panel().x + panel().width / 2 }
+        function columnCentre() {
+            const c = column()
+            return c.mapToItem(root, c.width / 2, 0).x
+        }
         function clickChild(name) {
             const item = findChild(panel(), name)
             verify(item !== null, name)
@@ -49,11 +55,36 @@ Item {
         function test_opens_above_the_column_centred_on_it() {
             openFromColumn()
             const p = panel()
-            const column = findChild(strip, "typeName").parent.parent.parent   // Row, Column, BandColumn
-            const centre = column.mapToItem(root, column.width / 2, 0).x
-            const panelCentre = p.x + p.width / 2
-            verify(Math.abs(panelCentre - Math.max(8 + p.width / 2, centre)) < 1, "centred on the column, or held inside the window")
+            verify(Math.abs(panelCentre() - Math.max(8 + p.width / 2, columnCentre())) < 1, "centred on the column, or held inside the window")
             verify(p.y + p.height <= findChild(strip, "typeName").mapToItem(root, 0, 0).y, "above the type name")
+        }
+
+        // Right-click anywhere in the column, not only on the type name.
+        function test_a_right_click_in_the_column_opens_it_where_the_type_name_does() {
+            const c = column()
+            mouseClick(c, c.width / 2, c.height - 10, Qt.RightButton)
+            verify(menu.open, "a right click low in the column opens the popover")
+            const p = panel()
+            verify(Math.abs(panelCentre() - Math.max(8 + p.width / 2, columnCentre())) < 1, "centred on the column")
+            verify(p.y + p.height <= findChild(strip, "typeName").mapToItem(root, 0, 0).y, "above the type name")
+            compare(EqSession.selectedRow, 0)
+        }
+
+        function test_a_right_click_on_the_gain_slider_opens_it() {
+            const c = column()
+            const slider = findChild(strip, "gainSlider")
+            const p = slider.mapToItem(c, slider.width / 2, slider.height / 2)
+            const gain = role(0, EqSession.GainRole)
+            mouseClick(c, p.x, p.y, Qt.RightButton)
+            verify(menu.open, "a right click on the slider opens the popover")
+            compare(role(0, EqSession.GainRole), gain, "and leaves the gain alone")
+        }
+
+        function test_a_left_click_in_the_column_selects_without_opening_it() {
+            const c = column()
+            mouseClick(c, c.width / 2, c.height - 10)
+            verify(!menu.open)
+            compare(EqSession.selectedRow, 0)
         }
 
         function test_opens_below_where_there_is_no_room_above() {

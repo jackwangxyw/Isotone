@@ -12,6 +12,9 @@
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QWheelEvent>
 #include <QtQuickTest>
 
 #include "eqsession.h"
@@ -59,6 +62,15 @@ public:
         session->useTarget(isotone::ui::OutputTarget{
             L"", isotone::ui::Backend::none,
             isotone::ui::OutputLayout{static_cast<uint32_t>(channels), static_cast<uint32_t>(speakerMask), 48000.0}});
+    }
+    // Band strip: a wheel with pixelDelta (a high-resolution wheel), which
+    // QtTest's mouseWheel cannot send.
+    Q_INVOKABLE void pixelWheel(QQuickItem* item, qreal x, qreal y, int pixelX, int pixelY) {
+        if (!item || !item->window()) return;
+        const QPointF scene = item->mapToScene(QPointF(x, y));
+        QWheelEvent event(scene, item->window()->mapToGlobal(scene), QPoint(pixelX, pixelY), QPoint(0, 0), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(item->window(), &event);
     }
     // Devices: replaces the sandbox config.txt (ISOTONE_COMPAT_DIR, never the installed one).
     Q_INVOKABLE bool setCompatConfig(const QString& text) {

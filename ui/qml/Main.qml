@@ -156,56 +156,8 @@ Window {
             }
         }
 
-        // A toast: text and an optional action, for a few seconds.
-        Rectangle {
-            id: toast
-            objectName: "toast"
-            property var action: null
-            visible: false
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.horizontalCenterOffset: sidebar.width / 2
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 26
-            width: toastRow.implicitWidth + 24
-            height: 44
-            radius: 10
-            color: Theme.pop
-            border.color: Theme.border
-            Row {
-                id: toastRow
-                x: 16
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 16
-                Text {
-                    id: toastText
-                    anchors.verticalCenter: parent.verticalCenter
-                    font.family: Theme.font
-                    font.pixelSize: 13
-                    color: Theme.text
-                }
-                Button {
-                    id: toastAction
-                    visible: text !== ""
-                    kind: "link"
-                    anchors.verticalCenter: parent.verticalCenter
-                    onClicked: {
-                        toast.visible = false
-                        if (toast.action) toast.action()
-                    }
-                }
-            }
-            Timer { id: toastTimer; interval: 5000; onTriggered: toast.visible = false }
-        }
-        Connections {
-            target: UiState
-            function onToastRequested(text, actionText, action) {
-                toastText.text = text
-                toastAction.text = actionText
-                toast.action = action
-                toast.visible = true
-                toastTimer.restart()
-            }
-        }
+        // A toast: text and an optional action, for a few seconds (Toast.qml).
+        Toast { centreOffset: sidebar.width / 2 }
     }
 
     PressWatch {

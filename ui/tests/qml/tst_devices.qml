@@ -325,6 +325,33 @@ Item {
             verify(dialog("attachDialog") === null)
         }
 
+        // Refresh says it is working and then that it is done: a read here is
+        // instant, so the spinner is held long enough to see.
+        function test_refresh_spins_then_shows_refreshed() {
+            const button = findChild(view, "refreshButton")
+            const spinner = findChild(button, "buttonSpinner")
+            verify(button !== null && spinner !== null)
+            tryVerify(() => !button.busy && button.text === "Refresh", 3000)
+            click(button)
+            verify(button.busy, "spinning while it reads")
+            verify(spinner.visible)
+            compare(button.icon, "refresh")
+            tryCompare(button, "text", "Refreshed", 2000)
+            verify(!button.busy)
+            verify(!spinner.visible)
+            compare(button.icon, "check")
+            tryCompare(button, "text", "Refresh", 3000)
+            verify(!button.busy)
+        }
+
+        function test_refresh_holds_the_spinner_for_a_moment() {
+            const button = findChild(view, "refreshButton")
+            click(button)
+            wait(200)
+            verify(button.busy, "an instant read still shows it working")
+            tryCompare(button, "text", "Refreshed", 2000)
+        }
+
         function test_retry_under_test_failed_runs_the_test() {
             script({ started: true, commands: { test: [{ exit: 1, json: { reason: "Initialize failed" } }, { exit: 0 }] } })
             select(8)

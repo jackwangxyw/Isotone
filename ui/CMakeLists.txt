@@ -128,6 +128,7 @@ qt_add_qml_module(isotone_ui
         qml/DialogFrame.qml
         qml/Popover.qml
         qml/Spinner.qml
+        qml/Toast.qml
         qml/StatusDot.qml
         qml/OutputList.qml
         qml/EqualizerView.qml
