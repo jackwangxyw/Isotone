@@ -2608,9 +2608,9 @@ not touched.
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
-| 2. Core | complete | 205 cases green on MSVC 19.51 and GCC 16.1.0 after the review's leftovers (2026-09-14) |
+| 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
-| 4. UI | built in Qt 6 Quick (`ui/`): every screen of the prototype except EQ by ear, reviewed and fixed 2026-09-15; not yet used for real installs or on a real listening output | `ui_tests`, `ui_model_tests`, `ui_qml_tests`; `docs/notes/stage4-*.md`; entries of 2026-09-14 and 2026-09-15 |
+| 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 109, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -2659,26 +2659,24 @@ points IntelliSense at `build/compile_commands.json`.
 
 1. **Linux daemon**, deferred with 1c.
 
-**Stage 4** remaining, all of it on the owner's machine and none of it testable
-here:
+**Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
+real install, repair and uninstall from Devices with the Windows prompt;
+attaching config.txt; the tray and its menu; import, export and a drag from
+Explorer; and the default output change, which turned up the preset scope work of
+that day. Launch at sign-in is verified as far as it can be without signing out:
+the Run value is right, the command it holds starts the app into the tray, and
+the toggles write and remove it correctly (checked against a sandboxed key, the
+real one untouched). Windows actually running that key at sign-in is the one
+thing left, for whenever he next restarts.
 
-1. **A real install, repair and uninstall from Devices**, with the Windows
-   approval prompt, on an output that is not the cable.
-2. **Attach config.txt** on an Equalizer APO output, and edit it live.
-3. **Launch at sign-in**: the Run value, and the window starting in the tray.
-4. **A real default output change** with "Switch preset when the default output
-   changes" on, including a preset narrowed to that output.
-5. **The tray on the desktop**: its menu, the window closing to it, quitting.
-6. **The native dialogs**: Import and Export through the file dialogs, and a real
-   drag from Explorer onto the window.
-
-Open decisions for the owner: global hotkeys off by default; live propagation of
-preset edits to other outputs (now on save); the entries of 2026-09-15 list the
-rest.
+Open decisions for the owner: global hotkeys off by default (the boards show them
+on); live propagation of preset edits to other outputs (now on save); and whether
+a preset's row should tell two outputs apart when their names are nearly the same
+("CABLE Input" and "CABLE In" cost him an evening's confusion).
 
 **Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec, and
 stage 4's tree is tidy for it: no agent worktrees or branches left, `main` clean,
-the three UI suites green (42 / 106 / 266), and CI green. What stage 5 inherits
+the three UI suites green (42 / 109 / 267), and CI green. What stage 5 inherits
 that it will touch: `EqSession` (the edited state and undo), `ResponseGraph`,
 `DeviceLink` (where an edit goes, native or Equalizer APO), the spectrum and the
 test tone.

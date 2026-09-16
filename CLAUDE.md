@@ -2,12 +2,14 @@
 
 A system-wide parametric EQ. A C++ DSP core runs inside IsoAPO (a Windows audio
 processing object forked from Equalizer APO) or drives a stock Equalizer APO
-through its config files (the compat backend). The Qt 6 Quick UI (stage 4) is in
-`ui/`; EQ by ear (stage 5) and packaging (stage 6) are next.
+through its config files (the compat backend). Stages 0 to 4 are done: the Qt 6
+Quick UI is in `ui/`, every screen of the prototype except EQ by ear, and the
+owner has used it on his own outputs. **EQ by ear (stage 5) is next**, then
+packaging (stage 6).
 
 Read first:
-- `docs/ui-spec.md`: the stage 4 build brief, including "Engine contracts the UI
-  must keep".
+- `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
+  stage 5, including "Engine contracts the UI must keep".
 - `docs/decisions.md`: every decision and measurement; "Where things stand" at
   the end.
 - `docs/isotone-plan.md`: the original plan; the spec and decisions override it.
