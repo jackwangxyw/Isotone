@@ -10,6 +10,7 @@
 #include "loopback_capture.h"
 #include "persisted_state.h"
 
+#include <chrono>
 #include <cwctype>
 #include <fstream>
 #include <sstream>
@@ -17,6 +18,12 @@
 namespace isotone::ui {
 
 namespace {
+
+// How long the worker waits before trying a failed Equalizer APO write again,
+// and DeviceLink's retry_for_ms says how long it keeps trying: a file held for
+// longer, or a directory that cannot be written at all, is reported instead of
+// retried for ever.
+constexpr int kCompatRetryMs = 150;
 
 // An idle engine has no region; trying again on every edit of a drag would cost
 // an open per frame for nothing.
@@ -37,8 +44,10 @@ std::string narrow(const std::wstring& w) {
 
 }  // namespace
 
-DeviceLink::DeviceLink(std::wstring region_namespace, std::wstring compat_config_dir)
-    : namespace_(std::move(region_namespace)), compat_dir_(std::move(compat_config_dir)) {}
+DeviceLink::DeviceLink(std::wstring region_namespace, std::wstring compat_config_dir, int retry_for_ms)
+    : namespace_(std::move(region_namespace)),
+      compat_dir_(std::move(compat_config_dir)),
+      compat_retry_for_ms_(retry_for_ms) {}
 
 DeviceLink::~DeviceLink() {
     stop_compat();
@@ -168,14 +177,33 @@ void DeviceLink::compat_thread() {
     if (dir.empty()) dir = isotone::compat::locate_equalizer_apo().config_path;
     isotone::compat::CompatWriter writer(dir);
     DWORD loaded = writer.load();
+    // A write that fails because something else holds Isotone.txt (Equalizer APO
+    // reading it, an antivirus, another editor) is tried again until it lands or
+    // a newer edit replaces it: without this the edit was lost until the next
+    // commit (2026-09-15).
+    std::optional<CompatRequest> retrying;
+    ULONGLONG give_up_at = 0;
     for (;;) {
         std::optional<CompatRequest> request;
         {
             std::unique_lock<std::mutex> lock(compat_mutex_);
-            compat_wake_.wait(lock, [this] { return compat_stop_ || compat_pending_.has_value(); });
-            if (!compat_pending_ && compat_stop_) break;
-            request.swap(compat_pending_);
+            if (retrying) {
+                compat_wake_.wait_for(lock, std::chrono::milliseconds(kCompatRetryMs),
+                                      [this] { return compat_stop_ || compat_pending_.has_value(); });
+            } else {
+                compat_wake_.wait(lock, [this] { return compat_stop_ || compat_pending_.has_value(); });
+            }
+            if (compat_pending_) {
+                request.swap(compat_pending_);
+                retrying.reset();
+                give_up_at = 0;
+            } else if (compat_stop_) {
+                break;
+            } else {
+                request = retrying;   // nothing newer: the same edit again
+            }
         }
+        if (!request) continue;
         isotone::compat::DeviceConfig device;
         device.endpoint_guid = narrow(request->target.guid);
         device.layout = ChannelLayout{request->target.layout.channels, request->target.layout.speaker_mask};
@@ -183,8 +211,16 @@ void DeviceLink::compat_thread() {
         device.state = request->state;
         DWORD error = loaded;
         if (error == ERROR_SUCCESS) error = request->persist ? writer.persist(device) : writer.apply(device);
+        // Only a write that was going to change the file is worth repeating.
+        if (error == ERROR_SUCCESS || !request->persist) {
+            retrying.reset();
+        } else {
+            if (give_up_at == 0) give_up_at = GetTickCount64() + static_cast<ULONGLONG>(compat_retry_for_ms_);
+            retrying = GetTickCount64() < give_up_at ? request : std::optional<CompatRequest>{};
+        }
         std::lock_guard<std::mutex> lock(compat_mutex_);
         compat_error_ = error;
+        ++compat_writes_;
     }
     const DWORD flushed = writer.flush();
     std::lock_guard<std::mutex> lock(compat_mutex_);
@@ -205,6 +241,11 @@ void DeviceLink::stop_compat() {
 DWORD DeviceLink::last_compat_error() const {
     std::lock_guard<std::mutex> lock(compat_mutex_);
     return compat_error_;
+}
+
+uint64_t DeviceLink::compat_writes() const {
+    std::lock_guard<std::mutex> lock(compat_mutex_);
+    return compat_writes_;
 }
 
 void DeviceLink::start_capture() {

@@ -2352,7 +2352,19 @@ its `init`. Removing only the polish wait brings the failures back. Qt Quick Tes
 gives each file its own engine, so the QML singletons do not leak; settings.ini and
 the shared compat directory do, which is what the reset covers.
 
-**After all of it**: `ui_tests` 40, `ui_model_tests` 102, `ui_qml_tests` 263
+**An Equalizer APO write is retried.** The CI runner failed compat's two-writer
+stress test once with a sharing violation (it passed on a rerun of the same
+commit, and 10 runs plus 4 at once passed here), which is the same limit the
+surround package had noted: a write that loses the race for Isotone.txt was
+reported and the edit dropped until the next commit, so a drag's release could
+silently do nothing while Equalizer APO, an antivirus or another editor held the
+file. The UI's compat worker now repeats a failed persist every 150 ms for up to
+10 seconds, a newer edit replaces the one being retried (so a stale state is never
+written, and every write reloads every Equalizer APO device), and a write that
+stays blocked gives up and keeps its error. `DeviceLink::compat_writes()` counts
+the writes, which is what the tests observe.
+
+**After all of it**: `ui_tests` 43, `ui_model_tests` 102, `ui_qml_tests` 263
 five times in a row with no failures, the MSVC build with warnings as errors and its
 7 ctest suites, the APO self test, the transport and reference-data checks, and the
 GCC build and tests.

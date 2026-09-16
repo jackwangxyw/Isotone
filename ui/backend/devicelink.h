@@ -54,7 +54,10 @@ public:
     // `region_namespace` precedes "IsoAPO.{guid}": Global\ for IsoAPO, a Local\
     // prefix in tests. `compat_config_dir` empty: Equalizer APO's own config
     // directory, from its install; tests pass a sandbox.
-    explicit DeviceLink(std::wstring region_namespace = L"Global\\", std::wstring compat_config_dir = L"");
+    // `retry_for_ms`: how long a failed Equalizer APO write keeps being retried
+    // (tests shorten it).
+    explicit DeviceLink(std::wstring region_namespace = L"Global\\", std::wstring compat_config_dir = L"",
+                        int retry_for_ms = 10000);
     DeviceLink(const DeviceLink&) = delete;
     DeviceLink& operator=(const DeviceLink&) = delete;
     // Flushes a pending Equalizer APO write.
@@ -91,6 +94,9 @@ public:
     bool take_region_opened() { return std::exchange(region_opened_, false); }
     // The last Equalizer APO write's result (asynchronous).
     DWORD last_compat_error() const;
+    // How many Equalizer APO writes the worker has made, retries included: a
+    // retry that a newer edit replaces costs no write of its own.
+    uint64_t compat_writes() const;
 
 private:
     DWORD write_region(const EqState& engine_state);
@@ -101,6 +107,7 @@ private:
 
     std::wstring namespace_;
     std::wstring compat_dir_;
+    int compat_retry_for_ms_ = 10000;
     OutputTarget target_;
 
     isotone::win::SharedMapping mapping_;
@@ -120,6 +127,7 @@ private:
     std::optional<CompatRequest> compat_pending_;
     bool compat_stop_ = false;
     DWORD compat_error_ = ERROR_SUCCESS;
+    uint64_t compat_writes_ = 0;
 
     std::unique_ptr<isotone::compat::LoopbackCapture> capture_;
     AudioRingCursor capture_cursor_;

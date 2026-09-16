@@ -199,7 +199,8 @@ target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
 if(ISOTONE_BUILD_TESTS)
     add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
-                   tests/test_speaker_setup.cpp tests/test_config_attach.cpp tests/test_settings_backend.cpp)
+                   tests/test_speaker_setup.cpp tests/test_config_attach.cpp tests/test_settings_backend.cpp
+                   tests/test_compat_retry.cpp)
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
