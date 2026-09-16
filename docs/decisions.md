@@ -2596,6 +2596,31 @@ assertions, and with the switch guard disabled the older one fails.
 on this machine. The one real file there, `{407cef09-...}.bin`, was
 not touched.
 
+## 2026-09-16: The fade ends at the bottom of the plot
+
+The fade after the music stops still ended in a flash. Two causes worked
+together. The curve was hidden once the loudest single FFT bin fell under a fixed
+-75 dBFS, which is neither the curve the graph draws (mean-power bands, lower
+than the loudest bin) nor anywhere in particular on the plot, whose bottom is the
+scale's top minus 60 dB. And the top kept following the falling level, so the
+plot's bottom sank along with the curve and the curve hung part way down until
+the cutoff took it. The owner put it exactly: time it from the top and let it fall
+all the way down.
+
+`EqSession::nextSpectrumScale` is one tick of the scale. While audio arrives the
+top follows the loudest band being drawn, as before. Once it stops the top holds
+still, so the curve falls through a plot that is not moving, and it is drawn until
+the loudest drawn band is under the plot's bottom. The range lives on `EqSession`
+(`kSpectrumRangeDb`), and `ResponseGraph` asserts at compile time that it draws the
+same one. The silence fed to a stopped stream now runs for as long as the curve is
+drawn, rather than to the old fixed level.
+
+Checked on a real track into CABLE Input at the default decay (150 ms): full at the
+stop, then down through the middle at 0.9 s, the last peaks at the bottom edge at
+1.9 s, and gone by 2.6 s, off the bottom. Mutation-checked: letting the top follow
+while idle fails 72 assertions, and the old fixed cutoff fails 2. `ui_tests` 42,
+`ui_model_tests` 110, `ui_qml_tests` 267.
+
 ---
 
 # Where things stand (2026-09-16)
@@ -2610,7 +2635,7 @@ not touched.
 | 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
-| 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 109, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
+| 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -2676,7 +2701,7 @@ a preset's row should tell two outputs apart when their names are nearly the sam
 
 **Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec, and
 stage 4's tree is tidy for it: no agent worktrees or branches left, `main` clean,
-the three UI suites green (42 / 109 / 267), and CI green. What stage 5 inherits
+the three UI suites green (42 / 110 / 267), and CI green. What stage 5 inherits
 that it will touch: `EqSession` (the edited state and undo), `ResponseGraph`,
 `DeviceLink` (where an edit goes, native or Equalizer APO), the spectrum and the
 test tone.

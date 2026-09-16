@@ -471,6 +471,48 @@ TEST_CASE("the preamp is taken out of the shown spectrum, and the scale follows 
     CHECK(top == doctest::Approx(-21.0).epsilon(0.01));
 }
 
+TEST_CASE("when the music stops the scale holds still and the curve falls off its bottom") {
+    // The owner, 2026-09-16: the fade after the music stops ended in a flash. The
+    // curve was hidden at a fixed -75 dBFS on the loudest FFT bin, which could be
+    // anywhere on the plot, and the scale's top kept following the falling level,
+    // so the plot's bottom sank with the curve and it never reached it.
+    const double range = EqSession::kSpectrumRangeDb;
+    CHECK(range == ResponseGraph::kSpectrumRangeDb);   // the graph draws the same scale
+
+    // While music plays the top follows the loudest band, as before.
+    EqSession::SpectrumScale scale{-45.0, false};
+    for (int i = 0; i < 300; ++i) scale = EqSession::nextSpectrumScale(scale.top_db, true, -12.0, 1.0 / 60.0);
+    CHECK(scale.top_db == doctest::Approx(-9.0).epsilon(0.01));
+    CHECK(scale.drawn);
+
+    // The music stops and the level falls, 1 dB a frame. The top does not move,
+    // and the curve is drawn every frame until it is under the plot's bottom.
+    const double top = scale.top_db;
+    double level = -12.0;
+    int frames_drawn = 0;
+    while (true) {
+        level -= 1.0;
+        scale = EqSession::nextSpectrumScale(scale.top_db, false, level, 1.0 / 60.0);
+        CHECK(scale.top_db == top);
+        if (!scale.drawn) break;
+        ++frames_drawn;
+        REQUIRE(frames_drawn < 1000);
+    }
+    // It went away at the bottom, not before: the last level drawn was on the plot
+    // and the first one hidden is under it.
+    CHECK(level < top - range);
+    CHECK(level + 1.0 >= top - range);
+    CHECK(frames_drawn == static_cast<int>(std::floor((-12.0 - (top - range)))));
+
+    // Music again: the top follows once more.
+    scale = EqSession::nextSpectrumScale(scale.top_db, true, -30.0, 2.0);
+    CHECK(scale.top_db < top - 10.0);
+    CHECK(scale.drawn);
+
+    // Nothing has played at all: nothing drawn, whatever the analyzer's floor says.
+    CHECK_FALSE(EqSession::nextSpectrumScale(EqSession::kSpectrumTopFloorDb, false, -120.0, 1.0 / 60.0).drawn);
+}
+
 TEST_CASE("the spectrum decay reaches the session's analyzer") {
     EqSession session;
     // Pinned at the highest resolution; only the decay is a setting (owner, 2026-09-15).

@@ -16,6 +16,10 @@
 #include "isotone/response.h"
 #include "speaker_setup.h"
 
+// The session decides when the curve has fallen off the plot's bottom; the graph
+// draws that same bottom.
+static_assert(ResponseGraph::kSpectrumRangeDb == EqSession::kSpectrumRangeDb);
+
 namespace {
 
 constexpr double kSampleRate = 48000.0;

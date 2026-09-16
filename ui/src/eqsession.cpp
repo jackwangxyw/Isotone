@@ -29,9 +29,6 @@ namespace {
 constexpr int kBandColours = 12;
 // No audio for this long: the engine is idle, or the player closed its stream.
 constexpr qint64 kSpectrumIdleMs = 150;
-// Below this the curve is off the bottom of the plot (ResponseGraph draws from
-// -12 dB down over 60): nothing left to draw.
-constexpr double kSpectrumHiddenDb = -75.0;
 
 QString type_name(isotone::FilterType t) {
     switch (t) {
@@ -282,9 +279,10 @@ void EqSession::readSpectrum() {
     // An engine that started playing since the last edit gets the current state.
     if (link_->take_region_opened()) write();
     const double elapsed_s = std::max<qint64>(1, now - last_update_ms_) / 1000.0;
-    if (now - last_frame_ms_ < kSpectrumIdleMs) {
+    const bool arriving = now - last_frame_ms_ < kSpectrumIdleMs;
+    if (arriving) {
         analyzer_.update(rate, elapsed_s);
-    } else if (analyzer_.loudest_db() > kSpectrumHiddenDb) {
+    } else if (spectrum_active_) {
         // Nothing is arriving: a player that stops closes its stream, so the
         // silence after the music never reaches us. Feed it, and the curve falls
         // at the release the settings ask for instead of hanging and then
@@ -292,18 +290,19 @@ void EqSession::readSpectrum() {
         analyzer_.push_silence(static_cast<size_t>(analyzer_.sample_rate() * elapsed_s));
         analyzer_.update(analyzer_.sample_rate(), elapsed_s);
     }
-    const bool active = analyzer_.loudest_db() > kSpectrumHiddenDb;
-    if (active) {
-        // The scale's top follows the loudest band the graph draws (the same
-        // mean-power bands, on a coarse grid), with the preamp out of it.
-        constexpr size_t kPoints = 64;
-        double freqs[kPoints], levels[kPoints];
-        for (size_t i = 0; i < kPoints; ++i)
-            freqs[i] = 20.0 * std::exp(std::log(20000.0 / 20.0) * static_cast<double>(i) / (kPoints - 1));
-        analyzer_.levels_at(freqs, kPoints, levels, isotone::ui::SpectrumAnalyzer::Bands::Mean);
-        removePreamp(levels, kPoints, state_.preamp_db);
-        spectrum_top_db_ = followTopDb(spectrum_top_db_, *std::max_element(levels, levels + kPoints), elapsed_s);
-    }
+    // The loudest band the graph draws (the same mean-power bands, on a coarse
+    // grid), with the preamp out of it: what the scale follows, and what has to be
+    // under the plot's bottom before the curve stops being drawn.
+    constexpr size_t kPoints = 64;
+    double freqs[kPoints], levels[kPoints];
+    for (size_t i = 0; i < kPoints; ++i)
+        freqs[i] = 20.0 * std::exp(std::log(20000.0 / 20.0) * static_cast<double>(i) / (kPoints - 1));
+    analyzer_.levels_at(freqs, kPoints, levels, isotone::ui::SpectrumAnalyzer::Bands::Mean);
+    removePreamp(levels, kPoints, state_.preamp_db);
+    const SpectrumScale scale =
+        nextSpectrumScale(spectrum_top_db_, arriving, *std::max_element(levels, levels + kPoints), elapsed_s);
+    spectrum_top_db_ = scale.top_db;
+    const bool active = scale.drawn;
     last_update_ms_ = now;
     if (active || active != spectrum_active_) {
         spectrum_active_ = active;
@@ -321,6 +320,12 @@ bool EqSession::spectrumLevels(const double* freqs, size_t n, double* out_db) co
 void EqSession::removePreamp(double* db, size_t n, double preamp_db) {
     if (preamp_db == 0.0) return;
     for (size_t i = 0; i < n; ++i) db[i] -= preamp_db;
+}
+
+EqSession::SpectrumScale EqSession::nextSpectrumScale(double top_db, bool arriving, double loudest_db,
+                                                      double elapsed_s) {
+    const double top = arriving ? followTopDb(top_db, loudest_db, elapsed_s) : top_db;
+    return SpectrumScale{top, loudest_db > top - kSpectrumRangeDb};
 }
 
 double EqSession::followTopDb(double current, double loudest, double elapsed_s) {

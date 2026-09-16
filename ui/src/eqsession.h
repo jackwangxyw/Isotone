@@ -130,6 +130,19 @@ public:
     static constexpr double kSpectrumTopHeadroomDb = 3.0;
     static constexpr double kSpectrumTopFloorDb = -45.0;
     static constexpr double kSpectrumTopCeilingDb = 0.0;
+    // How far the scale runs under its top: the plot's bottom is top minus this.
+    static constexpr double kSpectrumRangeDb = 60.0;
+
+    // One tick of the spectrum's scale. While audio arrives the top follows the
+    // loudest band being drawn. Once it stops the top holds still, so the curve
+    // falls through a plot that is not moving, and it is drawn until the loudest
+    // band is under the plot's bottom: it goes at the bottom, never part way down
+    // (owner, 2026-09-16).
+    struct SpectrumScale {
+        double top_db;
+        bool drawn;
+    };
+    static SpectrumScale nextSpectrumScale(double top_db, bool arriving, double loudest_db, double elapsed_s);
 
     // Settings, General, Spectrum, Decay: how long a level takes to fall.
     Q_INVOKABLE void setSpectrumDecayMs(double ms);

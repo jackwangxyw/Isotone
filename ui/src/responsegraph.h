@@ -109,7 +109,7 @@ public:
     // neighbouring points in dB whose width `amount` (0 to 1) sets, and a
     // Catmull-Rom curve through them.
     static constexpr size_t kSpectrumPoints = 320;
-    static constexpr double kSpectrumRangeDb = 60.0;
+    static constexpr double kSpectrumRangeDb = 60.0;   // EqSession::kSpectrumRangeDb, the same scale
     static void smoothForDisplay(std::vector<double>& db, double amount);
     static QPainterPath curveThrough(const std::vector<QPointF>& points);
 
