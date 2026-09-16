@@ -8,6 +8,8 @@ Rectangle {
     // Where the readout is; negative for none.
     property real hoverFrequency: -1
     signal menuRequested(int row, real x, real above, real below)
+    // The handle of a row, for tests: they all share an objectName.
+    function handleItem(row) { return handles.itemAt(row) }
 
     radius: 18
     color: Theme.plot
@@ -124,6 +126,7 @@ Rectangle {
         }
 
         Repeater {
+            id: handles
             model: EqSession
             delegate: Item {
                 id: handle
@@ -137,7 +140,8 @@ Rectangle {
                 required property bool selected
                 required property bool bandEnabled
                 readonly property color colour: Theme.bandColour(colorIndex)
-                readonly property real radius: selected ? 14 : 12
+                // Slightly smaller than the boards (owner, 2026-09-15).
+                readonly property real radius: selected ? 12 : 10
                 // Re-evaluated when the curve or the size changes, as the readout's.
                 readonly property real cx: graph.revision >= 0 && graph.plotWidth > 0 ? graph.xOf(frequency) : 0
                 readonly property real cy: graph.revision >= 0 && graph.plotHeight > 0 ? graph.yOf(graph.handleDb(index)) : 0
@@ -156,9 +160,9 @@ Rectangle {
                 Rectangle {
                     visible: handle.selected
                     anchors.centerIn: parent
-                    width: 40
-                    height: 40
-                    radius: 20
+                    width: 36
+                    height: 36
+                    radius: 18
                     color: "transparent"
                     border.width: 2
                     border.color: Qt.rgba(handle.colour.r, handle.colour.g, handle.colour.b, 0.45)
@@ -176,7 +180,7 @@ Rectangle {
                         anchors.verticalCenterOffset: 0.5
                         text: handle.position
                         font.family: Theme.font
-                        font.pixelSize: handle.position < 10 ? 12 : 11
+                        font.pixelSize: handle.position < 10 ? 11 : 10
                         font.weight: Font.DemiBold
                         color: Theme.textOnAccent
                     }
@@ -210,6 +214,12 @@ Rectangle {
                         EqSession.setGain(handle.index, startGain + graph.dbAt(p.y) - startDb)
                     }
                     onReleased: EqSession.finishEdit()
+                    // As a double-click on the band's gain slider does.
+                    onDoubleClicked: (mouse) => {
+                        if (mouse.button !== Qt.LeftButton) return
+                        EqSession.resetGain(handle.index)
+                        EqSession.finishEdit()
+                    }
                     onWheel: (wheel) => {
                         if (!handle.selected) root.commitWheel()   // before the selection moves: undo selects that band
                         EqSession.select(handle.index)

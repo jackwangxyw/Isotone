@@ -28,8 +28,9 @@ Rectangle {
         objectName: "nav_" + view
         width: AppSettings.sidebarOpen ? parent.width : 44
         height: AppSettings.sidebarOpen ? 38 : 44
+        // No anchor: an anchor set for the rail and then removed leaves the item
+        // where the rail put it (the sidebar was broken after expanding again).
         radius: AppSettings.sidebarOpen ? 8 : 10
-        anchors.horizontalCenter: AppSettings.sidebarOpen ? undefined : parent.horizontalCenter
         color: on ? Theme.surface : navArea.containsMouse ? Qt.alpha(Theme.surface, 0.5) : "transparent"
         Row {
             x: AppSettings.sidebarOpen ? 12 : (parent.width - 20) / 2
@@ -84,6 +85,7 @@ Rectangle {
     }
 
     Column {
+        objectName: "sidebarNav"
         x: root.open ? 16 : 14
         y: root.open ? 80 : 128
         width: parent.width - (root.open ? 32 : 28)
@@ -95,6 +97,7 @@ Rectangle {
 
     // Open: the outputs list and Settings.
     Column {
+        objectName: "sidebarFoot"
         visible: root.open
         x: 16
         width: parent.width - 32
@@ -120,7 +123,9 @@ Rectangle {
 
     // Collapsed: the Outputs button with the current output's dot, and Settings.
     Column {
+        objectName: "sidebarRail"
         visible: !root.open
+        width: 44   // the rail's items; a Column sized by its children moves as they change
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 16
@@ -149,7 +154,7 @@ Rectangle {
                 }
             }
         }
-        Rectangle { width: 40; height: 1; color: Theme.gridMajor }
+        Rectangle { width: 40; height: 1; anchors.horizontalCenter: parent.horizontalCenter; color: Theme.gridMajor }
         NavItem { view: "settings"; icon: "settings"; label: "Settings" }
     }
 }

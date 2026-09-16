@@ -12,6 +12,8 @@
 #pragma once
 
 #include <QColor>
+#include <QPainterPath>
+#include <QPointF>
 #include <QPointer>
 #include <QQuickPaintedItem>
 #include <QVariantList>
@@ -99,6 +101,13 @@ public:
     Q_INVOKABLE double handleDb(int row) const;
     // False for a band not on the channel in view.
     Q_INVOKABLE bool onView(int row) const;
+
+    // How the spectrum is drawn (tested in ui_tests): the number of points for a
+    // plot that wide, a short Gaussian across neighbouring points in dB, and a
+    // Catmull-Rom curve through them.
+    static size_t spectrumPoints(double plot_width);
+    static void smoothForDisplay(std::vector<double>& db);
+    static QPainterPath curveThrough(const std::vector<QPointF>& points);
 
 signals:
     void sessionChanged();

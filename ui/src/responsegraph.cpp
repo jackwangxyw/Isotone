@@ -163,6 +163,47 @@ bool ResponseGraph::onView(int row) const {
     return isotone::band_affects_channel(*b, viewChannel());
 }
 
+// One spectrum point per few pixels: enough to draw what the ear hears as the
+// shape, few enough that the FFT's comb of harmonics does not become a picket
+// fence.
+size_t ResponseGraph::spectrumPoints(double plot_width) {
+    return static_cast<size_t>(std::clamp(plot_width / 5.0, 64.0, 320.0));
+}
+
+// A short Gaussian across neighbouring points, in dB.
+void ResponseGraph::smoothForDisplay(std::vector<double>& db) {
+    static constexpr double kWeights[] = {0.06, 0.24, 0.40, 0.24, 0.06};
+    const std::vector<double> in = db;
+    const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(in.size());
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+        double sum = 0.0, weight = 0.0;
+        for (std::ptrdiff_t k = -2; k <= 2; ++k) {
+            const std::ptrdiff_t j = i + k;
+            if (j < 0 || j >= n) continue;
+            const double w = kWeights[k + 2];
+            sum += in[static_cast<size_t>(j)] * w;
+            weight += w;
+        }
+        db[static_cast<size_t>(i)] = sum / weight;
+    }
+}
+
+// A Catmull-Rom curve through the points, as cubic Bezier segments.
+QPainterPath ResponseGraph::curveThrough(const std::vector<QPointF>& points) {
+    QPainterPath path;
+    if (points.empty()) return path;
+    path.moveTo(points.front());
+    const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(points.size());
+    for (std::ptrdiff_t i = 0; i + 1 < n; ++i) {
+        const QPointF& p1 = points[static_cast<size_t>(i)];
+        const QPointF& p2 = points[static_cast<size_t>(i + 1)];
+        const QPointF& p0 = points[static_cast<size_t>(std::max<std::ptrdiff_t>(i - 1, 0))];
+        const QPointF& p3 = points[static_cast<size_t>(std::min<std::ptrdiff_t>(i + 2, n - 1))];
+        path.cubicTo(p1 + (p2 - p0) / 6.0, p2 - (p3 - p1) / 6.0, p2);
+    }
+    return path;
+}
+
 void ResponseGraph::paint(QPainter* p) {
     const double h = height();
     const double pw = plotWidth(), ph = plotHeight();
@@ -215,15 +256,23 @@ void ResponseGraph::paint(QPainter* p) {
     const bool muted = session_ && session_->state().mute;
 
     // Spectrum on its own scale: 0 dBFS at the top of the plot, -90 at the bottom.
-    // None while no audio arrives (the engine is idle).
-    std::vector<double> spectrum(n);
-    if (spectrum_visible_ && !muted && session_ && session_->spectrumLevels(freqs.data(), n, spectrum.data())) {
-        QPainterPath edge;
-        for (size_t i = 0; i < n; ++i) {
-            const double v = std::min(0.0, spectrum[i]);
-            const QPointF pt(x_at(i), std::min(kTop + ph, kTop + ph * (-v / 90.0)));
-            i == 0 ? edge.moveTo(pt) : edge.lineTo(pt);
-        }
+    // None while no audio arrives (the engine is idle). One point per few pixels,
+    // smoothed across neighbours and drawn as a curve: a point per pixel drew every
+    // harmonic of the FFT as a spike (owner, 2026-09-15).
+    const size_t sn = spectrumPoints(pw);
+    std::vector<double> sfreqs(sn), spectrum(sn);
+    for (size_t i = 0; i < sn; ++i)
+        sfreqs[i] = min_hz_ * std::exp(decades * static_cast<double>(i) / static_cast<double>(sn - 1));
+    const auto spectrum_x = [&](size_t i) { return kLeft + pw * static_cast<double>(i) / static_cast<double>(sn - 1); };
+    const auto spectrum_path = [&](std::vector<double>& db) {
+        smoothForDisplay(db);
+        std::vector<QPointF> points(db.size());
+        for (size_t i = 0; i < db.size(); ++i)
+            points[i] = QPointF(spectrum_x(i), std::min(kTop + ph, kTop + ph * (-std::min(0.0, db[i]) / 90.0)));
+        return curveThrough(points);
+    };
+    if (spectrum_visible_ && !muted && session_ && session_->spectrumLevels(sfreqs.data(), sn, spectrum.data())) {
+        const QPainterPath edge = spectrum_path(spectrum);
         QPainterPath area = edge;
         area.lineTo(kLeft + pw, kTop + ph);
         area.lineTo(kLeft, kTop + ph);
@@ -231,16 +280,10 @@ void ResponseGraph::paint(QPainter* p) {
         p->fillPath(area, spectrum_fill_);
         p->strokePath(edge, QPen(spectrum_edge_, 1.0));
         // Peak hold: the spectrum's edge colour at twice its opacity, no fill.
-        if (peak_hold_ && session_->spectrumPeakLevels(freqs.data(), n, spectrum.data())) {
-            QPainterPath peak;
-            for (size_t i = 0; i < n; ++i) {
-                const double v = std::min(0.0, spectrum[i]);
-                const QPointF pt(x_at(i), std::min(kTop + ph, kTop + ph * (-v / 90.0)));
-                i == 0 ? peak.moveTo(pt) : peak.lineTo(pt);
-            }
+        if (peak_hold_ && session_->spectrumPeakLevels(sfreqs.data(), sn, spectrum.data())) {
             QColor c = spectrum_edge_;
             c.setAlphaF(std::min(1.0f, c.alphaF() * 2.0f));
-            p->strokePath(peak, QPen(c, 1.0));
+            p->strokePath(spectrum_path(spectrum), QPen(c, 1.0));
         }
     }
     if (!session_) return;

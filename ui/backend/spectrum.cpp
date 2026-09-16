@@ -94,11 +94,15 @@ void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
     }
 }
 
-void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db) const { sample(smoothed_, freqs, n, out_db); }
+void SpectrumAnalyzer::levels_at(const double* freqs, size_t n, double* out_db, Bands bands) const {
+    sample(smoothed_, freqs, n, out_db, bands);
+}
 
-void SpectrumAnalyzer::peak_levels_at(const double* freqs, size_t n, double* out_db) const { sample(peak_, freqs, n, out_db); }
+void SpectrumAnalyzer::peak_levels_at(const double* freqs, size_t n, double* out_db, Bands bands) const {
+    sample(peak_, freqs, n, out_db, bands);
+}
 
-void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db) const {
+void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db, Bands bands) const {
     const double bin_hz = sample_rate_ / static_cast<double>(fft_size_);
     const size_t last = bins.size() - 1;
     for (size_t i = 0; i < n; ++i) {
@@ -109,9 +113,15 @@ void SpectrumAnalyzer::sample(const std::vector<double>& bins, const double* fre
         const size_t first = static_cast<size_t>(std::ceil(lo));
         const size_t end = static_cast<size_t>(std::floor(hi));
         if (end >= first + 1 && end <= last) {
-            double peak = kFloorDb;
-            for (size_t b = first; b <= end; ++b) peak = std::max(peak, bins[b]);
-            out_db[i] = peak;
+            if (bands == Bands::Loudest) {
+                double peak = kFloorDb;
+                for (size_t b = first; b <= end; ++b) peak = std::max(peak, bins[b]);
+                out_db[i] = peak;
+            } else {
+                double power = 0.0;
+                for (size_t b = first; b <= end; ++b) power += std::pow(10.0, bins[b] / 10.0);
+                out_db[i] = 10.0 * std::log10(std::max(power / static_cast<double>(end - first + 1), std::pow(10.0, kFloorDb / 10.0)));
+            }
         } else {
             const size_t b0 = std::min(last - 1, static_cast<size_t>(std::floor(centre)));
             const double t = std::clamp(centre - static_cast<double>(b0), 0.0, 1.0);

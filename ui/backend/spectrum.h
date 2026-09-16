@@ -41,12 +41,15 @@ public:
     // stay at the floor.
     void update(double sample_rate, double elapsed_s);
 
-    // Levels at log-spaced display frequencies: the loudest bin within each
-    // point's span where bins are dense, interpolated between bins where they
-    // are sparse (the bass end).
-    void levels_at(const double* freqs, size_t n, double* out_db) const;
+    // How a display point takes the bins in its span: the loudest one (a tone
+    // reads its own level) or their mean power (a smooth curve, what the graph
+    // draws). Where bins are sparser than the points, both interpolate.
+    enum class Bands { Loudest, Mean };
+
+    // Levels at log-spaced display frequencies.
+    void levels_at(const double* freqs, size_t n, double* out_db, Bands bands = Bands::Loudest) const;
     // The same for the peak-hold line.
-    void peak_levels_at(const double* freqs, size_t n, double* out_db) const;
+    void peak_levels_at(const double* freqs, size_t n, double* out_db, Bands bands = Bands::Loudest) const;
 
     // Silence and the floor, as after construction.
     void reset();
@@ -56,7 +59,7 @@ public:
     double sample_rate() const { return sample_rate_; }
 
 private:
-    void sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db) const;
+    void sample(const std::vector<double>& bins, const double* freqs, size_t n, double* out_db, Bands bands) const;
 
     size_t fft_size_ = kFftSize;
     std::vector<float> history_;   // circular, fft_size_ samples

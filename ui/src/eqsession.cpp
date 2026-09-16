@@ -289,14 +289,14 @@ void EqSession::readSpectrum() {
 
 bool EqSession::spectrumLevels(const double* freqs, size_t n, double* out_db) const {
     if (!spectrum_active_) return false;
-    analyzer_.levels_at(freqs, n, out_db);
+    analyzer_.levels_at(freqs, n, out_db, isotone::ui::SpectrumAnalyzer::Bands::Mean);
     return true;
 }
 
 // Settings, General, Spectrum.
 bool EqSession::spectrumPeakLevels(const double* freqs, size_t n, double* out_db) const {
     if (!spectrum_active_) return false;
-    analyzer_.peak_levels_at(freqs, n, out_db);
+    analyzer_.peak_levels_at(freqs, n, out_db, isotone::ui::SpectrumAnalyzer::Bands::Mean);
     return true;
 }
 
