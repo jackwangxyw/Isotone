@@ -18,10 +18,14 @@ Item {
         name: "Devices"
         when: windowShown
 
-        // After layout: a button just shown is placed on the next polish.
+        // After layout: a button just shown is placed on the next polish, which
+        // runs with the render loop, not on the change. mouseClick maps the
+        // item's position when it is called, so without waiting for the polish
+        // it clicks where the button was before the row was positioned again.
         function click(item) {
             verify(item !== null)
             wait(30)
+            for (let i = item; i; i = i.parent) waitForItemPolished(i)
             mouseClick(item)
         }
 

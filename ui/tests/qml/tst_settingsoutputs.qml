@@ -15,10 +15,14 @@ Item {
         name: "SettingsOutputs"
         when: windowShown
 
-        // After layout: a button just shown is placed on the next polish.
+        // After layout: a button just shown is placed on the next polish, which
+        // runs with the render loop, not on the change. mouseClick maps the
+        // item's position when it is called, so without waiting for the polish
+        // it clicks where the button was before the row was positioned again.
         function click(item) {
             verify(item !== null)
             wait(30)
+            for (let i = item; i; i = i.parent) waitForItemPolished(i)
             mouseClick(item)
         }
 
@@ -29,9 +33,21 @@ Item {
         function statusText(n) { return findChild(row(n), "setupStatusText").text }
         function choice(n) { return findChild(row(n), "engineChoice") }
 
+        // The sandbox config.txt as qml_main.cpp writes it, with no Isotone.txt.
+        readonly property string sandboxConfig: "Preamp: -3 dB\r\nInclude: peace.txt\r\nGraphicEQ: 25 0; 40 -1.5; 100 0\r\n"
+
         function init() {
             tryVerify(() => !Devicetool.working, 5000)
             script({ started: false })
+            // What Now and the engine choices read is on disk and in the model:
+            // an apply here attaches Isotone.txt and writes an output's Off
+            // setting, the Devices files rewrite the same config.txt, and the
+            // done-rows test replaces the outputs. Every test starts from the
+            // script, the unattached config and no output Off.
+            verify(TestHooks.setCompatConfig(sandboxConfig))
+            const fake = fakeScript()
+            for (const d of fake.devices) AppSettings.setValue("outputs/off/" + d.guid, false)
+            verify(Devices.loadScript(JSON.stringify(fake)))
             page.localPhase = "locked"
             waitForRendering(page)
         }
