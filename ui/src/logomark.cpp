@@ -9,7 +9,7 @@
 
 QIcon logo_mark_icon() {
     QIcon icon;
-    for (int size : {16, 20, 24, 32, 40, 48, 64}) {
+    for (int size : {16, 20, 24, 32, 40, 48, 64, 96, 128, 256}) {
         QPixmap pixmap(size, size);
         pixmap.fill(Qt::transparent);
         QPainter p(&pixmap);

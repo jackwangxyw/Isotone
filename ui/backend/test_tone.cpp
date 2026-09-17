@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <vector>
 
 #include "devices.h"
@@ -32,11 +34,23 @@ struct Released {
 
 TestTone::~TestTone() { stop(); }
 
-void TestTone::start(const std::wstring& endpoint, uint32_t channel, Failure on_failure) {
+void TestTone::start(const std::wstring& endpoint, uint32_t channel_mask, Source source, Failure on_failure) {
     stop();
     stop_ = false;
     frames_ = 0;
-    thread_ = std::thread([this, endpoint, channel, on_failure = std::move(on_failure)] { run(endpoint, channel, on_failure); });
+    thread_ = std::thread([this, endpoint, channel_mask, source = std::move(source), on_failure = std::move(on_failure)] {
+        run(endpoint, channel_mask, source, on_failure);
+    });
+}
+
+void TestTone::start(const std::wstring& endpoint, uint32_t channel, Failure on_failure) {
+    // Built at the endpoint's rate, on the tone's thread.
+    auto noise = std::make_shared<std::optional<PinkNoise>>();
+    const Source source = [noise](float* out, uint32_t frames, double sample_rate) {
+        if (!*noise) noise->emplace(sample_rate);
+        for (uint32_t i = 0; i < frames; ++i) out[i] = (*noise)->next();
+    };
+    start(endpoint, channel < 32 ? uint32_t{1} << channel : 0, source, std::move(on_failure));
 }
 
 void TestTone::stop() {
@@ -45,7 +59,7 @@ void TestTone::stop() {
     thread_.join();
 }
 
-void TestTone::run(std::wstring endpoint, uint32_t channel, Failure on_failure) {
+void TestTone::run(std::wstring endpoint, uint32_t channel_mask, Source source, Failure on_failure) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const auto fail = [&](HRESULT hr, const char* what) {
         if (on_failure) on_failure(hr, what);
@@ -86,7 +100,7 @@ void TestTone::run(std::wstring endpoint, uint32_t channel, Failure on_failure) 
                                              ((format->wBitsPerSample == 24 || format->wBitsPerSample == 32) && bytes == 4)));
         // Writing nothing would play whatever the buffer held.
         if (!writable) return fail(AUDCLNT_E_UNSUPPORTED_FORMAT, "mix format");
-        if (channel >= channels) return fail(E_INVALIDARG, "channel");
+        if (channel_mask == 0 || (channels < 32 && (channel_mask >> channels) != 0)) return fail(E_INVALIDARG, "channel");
 
         hr = client.p->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2000000 /* 200 ms */, 0, format, nullptr);
         if (FAILED(hr)) return fail(hr, "Initialize");
@@ -97,7 +111,6 @@ void TestTone::run(std::wstring endpoint, uint32_t channel, Failure on_failure) 
         hr = client.p->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&render.p));
         if (FAILED(hr)) return fail(hr, "GetService IAudioRenderClient");
 
-        PinkNoise noise(format->nSamplesPerSec);
         const UINT32 lead = std::min<UINT32>(buffer_frames, format->nSamplesPerSec / 20);   // about 50 ms queued
         const auto write = [&](BYTE* base, size_t index, float v) {
             if (is_float) {
@@ -112,6 +125,9 @@ void TestTone::run(std::wstring endpoint, uint32_t channel, Failure on_failure) 
             }
         };
 
+        std::vector<float> mono(lead);
+        source(mono.data(), 0, format->nSamplesPerSec);   // a source that builds itself (the noise) does it before the stream runs
+
         hr = client.p->Start();
         if (FAILED(hr)) return fail(hr, "Start");
         while (!stop_) {
@@ -124,7 +140,12 @@ void TestTone::run(std::wstring endpoint, uint32_t channel, Failure on_failure) 
                 hr = render.p->GetBuffer(n, &data);
                 if (FAILED(hr)) break;
                 std::memset(data, 0, static_cast<size_t>(n) * format->nBlockAlign);
-                for (UINT32 i = 0; i < n; ++i) write(data, static_cast<size_t>(i) * channels + channel, noise.next());
+                source(mono.data(), n, format->nSamplesPerSec);
+                for (UINT32 i = 0; i < n; ++i) {
+                    for (uint32_t c = 0; c < channels && c < 32; ++c) {
+                        if (channel_mask & (uint32_t{1} << c)) write(data, static_cast<size_t>(i) * channels + c, mono[i]);
+                    }
+                }
                 hr = render.p->ReleaseBuffer(n, 0);
                 if (FAILED(hr)) break;
                 frames_ += n;

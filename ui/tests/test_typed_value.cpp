@@ -71,3 +71,15 @@ TEST_CASE("a typed value that is not a number in the field's unit is refused") {
     CHECK(refused("1,5,0", TypedUnit::Plain));
     CHECK(refused("1.5,0", TypedUnit::Plain));
 }
+
+TEST_CASE("EQ by ear's level and sweep rate are typed in dBFS and octaves per second") {
+    CHECK(reads("\xE2\x88\x92" "30 dBFS", TypedUnit::Dbfs, -30.0));
+    CHECK(reads("-12", TypedUnit::Dbfs, -12.0));
+    CHECK(reads("-6 dB", TypedUnit::Dbfs, -6.0));
+    CHECK(reads("1 oct/s", TypedUnit::OctavesPerSecond, 1.0));
+    CHECK(reads("0.5", TypedUnit::OctavesPerSecond, 0.5));
+    CHECK(refused("3 dBFS", TypedUnit::Decibels));
+    CHECK(refused("1 oct/s", TypedUnit::Octaves));
+    CHECK(refused("1 oct", TypedUnit::OctavesPerSecond));
+    CHECK(refused("3 Hz", TypedUnit::Dbfs));
+}

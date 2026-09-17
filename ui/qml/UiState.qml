@@ -5,8 +5,10 @@ import QtQuick
 // tab, and the overlay layer dialogs and toasts open in (Main sets `overlay`).
 QtObject {
     id: ui
-    // "eq", "speakers", "devices", "settings".
+    // "eq", "speakers", "ear", "devices", "settings".
     property string view: "eq"
+    // EQ by ear asked to turn the volume down this session.
+    property bool earWarned: false
     // "general", "outputs", "appearance", "shortcuts", "about".
     property string settingsTab: "general"
     // The Devices view's selected output (braced GUID), for "Install" and "Repair" from the top bar.

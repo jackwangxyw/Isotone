@@ -64,7 +64,7 @@ Item {
         readonly property string guid: Outputs.currentGuid !== "" ? Outputs.currentGuid : Outputs.count === 0 ? Devices.defaultGuid : ""
         readonly property var device: Devices.revision >= 0 && guid !== "" ? Devices.row(guid) : ({})
         visible: device.status !== undefined && !device.working && device.status !== "unplugged"
-        x: 32 + Math.max(nameRow.implicitWidth, AppSettings.sidebarOpen ? 0 : outputRow.implicitWidth) + 10
+        x: 32 + nameRow.implicitWidth + 10
         anchors.verticalCenter: parent.verticalCenter
         spacing: 12
         Rectangle {

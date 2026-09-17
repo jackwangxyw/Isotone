@@ -50,6 +50,20 @@ Item {
             UiState.devicesSelection = ""
         }
 
+        // The output's name left the top bar (2026-09-15), and its width was still
+        // read with the sidebar collapsed: a ReferenceError, and no place for the pill.
+        function test_the_pill_follows_the_preset_name_with_the_sidebar_collapsed() {
+            failOnWarning(/ReferenceError/)
+            load([status(target, "detached", "none")])
+            const name = findChild(bar, "presetName")
+            for (const open of [true, false]) {
+                AppSettings.sidebarOpen = open
+                waitForRendering(bar)
+                compare(pill().x, 32 + name.width + 10, open ? "open" : "collapsed")
+            }
+            AppSettings.sidebarOpen = true
+        }
+
         function test_a_detached_output_shows_its_status_and_repair() {
             load([status(target, "detached", "none")])
             verify(pill().visible)

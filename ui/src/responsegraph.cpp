@@ -38,11 +38,22 @@ void ResponseGraph::setSession(EqSession* s) {
     if (session_) disconnect(session_, nullptr, this, nullptr);
     session_ = s;
     if (session_) {
-        connect(session_, &EqSession::curveChanged, this, &ResponseGraph::curveChanged);
-        connect(session_, &EqSession::spectrumChanged, this, [this] { update(); });
+        // The grid does not move with the curve.
+        connect(session_, &EqSession::curveChanged, this, [this] {
+            if (part_ != Grid) curveChanged();
+        });
+        connect(session_, &EqSession::spectrumChanged, this, [this] {
+            if (part_ == All || part_ == Spectrum) update();
+        });
     }
     emit sessionChanged();
     curveChanged();
+}
+
+void ResponseGraph::setPart(Part part) {
+    if (part == part_) return;
+    part_ = part;
+    emit styleChanged();
 }
 
 void ResponseGraph::curveChanged() {
@@ -84,9 +95,9 @@ std::vector<ResponseGraph::GridLine> ResponseGraph::gridLines(double min_hz, dou
     std::vector<GridLine> lines;
     const double lo = min_hz * (1 - 1e-9), hi = max_hz * (1 + 1e-9);
     for (double decade = std::pow(10.0, std::floor(std::log10(min_hz))); decade <= hi; decade *= 10.0) {
-        for (int m : {1, 2, 3, 4, 5, 6, 8}) {
+        for (double m : {1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0}) {
             const double f = std::round(m * decade * 1e6) / 1e6;
-            if (f >= lo && f <= hi) lines.push_back({f, m == 1 || m == 2 || m == 5});
+            if (f >= lo && f <= hi) lines.push_back({f, m == 1.0 || m == 2.0 || m == 5.0});
         }
     }
     if (lines.size() >= 3) return lines;
@@ -111,6 +122,18 @@ std::vector<double> ResponseGraph::labelFrequencies(double min_hz, double max_hz
         if (f > min_hz && f < max_hz) ends.push_back(f);
     ends.push_back(max_hz);
     return ends;
+}
+
+QColor ResponseGraph::separatorColour(const QColor& grid_major, const QColor& zero_line) {
+    constexpr float t = 0.25f;
+    const auto mix = [](float a, float b) { return a + (b - a) * t; };
+    return QColor::fromRgbF(mix(grid_major.redF(), zero_line.redF()), mix(grid_major.greenF(), zero_line.greenF()),
+                            mix(grid_major.blueF(), zero_line.blueF()), mix(grid_major.alphaF(), zero_line.alphaF()));
+}
+
+bool ResponseGraph::isDecade(double hz) {
+    const double exponent = std::log10(hz);
+    return std::abs(exponent - std::round(exponent)) < 1e-9;
 }
 
 double ResponseGraph::xOf(double hz) const {
@@ -209,43 +232,62 @@ void ResponseGraph::paint(QPainter* p) {
     const double h = height();
     const double pw = plotWidth(), ph = plotHeight();
     if (pw <= 0 || ph <= 0) return;
+    ++paint_count_;
     p->setRenderHint(QPainter::Antialiasing, true);
-
-    // Grid: every 1-2-5 decade line major, the rest minor.
     const double max_hz = drawnMaxHz();
-    for (const GridLine& line : gridLines(min_hz_, max_hz)) {
-        p->setPen(QPen(line.major ? grid_major_ : grid_minor_, 1.0));
-        const double x = std::round(xOf(line.hz)) + 0.5;
-        p->drawLine(QPointF(x, kTop), QPointF(x, kTop + ph));
-    }
 
-    QFont font(font_family_);
-    font.setPixelSize(11);
-    font.setFeature(QFont::Tag("tnum"), 1);
-    p->setFont(font);
-    const QFontMetricsF fm(font);
-    p->setPen(label_colour_);
-    // At the plot's edges a label is aligned inside it; one that would touch the
-    // previous label is left out.
-    double previous_right = -1e9;
-    for (double f : labelFrequencies(min_hz_, max_hz)) {
-        const QString label = f >= 1000 ? QStringLiteral("%1k").arg(f / 1000) : QString::number(f);
-        const double tw = fm.horizontalAdvance(label);
-        const double at = xOf(f);
-        const double x = at <= kLeft + 1 ? at : at >= kLeft + pw - 1 ? at - tw : at - tw / 2;
-        if (x < previous_right + 8) continue;
-        p->drawText(QPointF(x, h - 10), label);
-        previous_right = x + tw;
-    }
-    const double step = range_db_ >= 20 ? 12.0 : 6.0;
-    for (double level = -std::floor(range_db_ / step) * step; level <= range_db_; level += step) {
-        const double y = std::round(yOf(level)) + 0.5;
-        p->setPen(QPen(level == 0 ? zero_line_ : grid_major_, 1.0));
-        p->drawLine(QPointF(kLeft, y), QPointF(kLeft + pw, y));
-        const QString label =
-            level == 0 ? QStringLiteral("0") : minus_sign(QString::asprintf("%+d", static_cast<int>(level)));
+    if (part_ == All || part_ == Grid) {
+        // Grid: the decades strongest, every other label next, the rest faint, each
+        // drawn over the fainter ones.
+        const std::vector<double> labels = labelFrequencies(min_hz_, max_hz);
+        const auto vertical = [&](double hz, const QColor& colour) {
+            p->setPen(QPen(colour, 1.0));
+            const double x = std::round(xOf(hz)) + 0.5;
+            p->drawLine(QPointF(x, kTop), QPointF(x, kTop + ph));
+        };
+        const auto labelled = [&](double hz) { return std::find(labels.begin(), labels.end(), hz) != labels.end(); };
+        const std::vector<GridLine> lines = gridLines(min_hz_, max_hz);
+        for (const GridLine& line : lines) {
+            if (!labelled(line.hz) && !isDecade(line.hz)) vertical(line.hz, grid_minor_);
+        }
+        for (double f : labels) {
+            if (!isDecade(f)) vertical(f, separatorColour(grid_major_, zero_line_));
+        }
+        for (const GridLine& line : lines) {
+            if (isDecade(line.hz)) vertical(line.hz, zero_line_);
+        }
+        for (double f : labels) {
+            if (isDecade(f)) vertical(f, zero_line_);
+        }
+
+        QFont font(font_family_);
+        font.setPixelSize(11);
+        font.setFeature(QFont::Tag("tnum"), 1);
+        p->setFont(font);
+        const QFontMetricsF fm(font);
         p->setPen(label_colour_);
-        p->drawText(QPointF(kLeft - 10 - fm.horizontalAdvance(label), yOf(level) + 4), label);
+        // At the plot's edges a label is aligned inside it; one that would touch the
+        // previous label is left out.
+        double previous_right = -1e9;
+        for (double f : labels) {
+            const QString label = f >= 1000 ? QStringLiteral("%1k").arg(f / 1000) : QString::number(f);
+            const double tw = fm.horizontalAdvance(label);
+            const double at = xOf(f);
+            const double x = at <= kLeft + 1 ? at : at >= kLeft + pw - 1 ? at - tw : at - tw / 2;
+            if (x < previous_right + 8) continue;
+            p->drawText(QPointF(x, h - 10), label);
+            previous_right = x + tw;
+        }
+        const double step = range_db_ >= 20 ? 12.0 : 6.0;
+        for (double level = -std::floor(range_db_ / step) * step; level <= range_db_; level += step) {
+            const double y = std::round(yOf(level)) + 0.5;
+            p->setPen(QPen(level == 0 ? zero_line_ : grid_major_, 1.0));
+            p->drawLine(QPointF(kLeft, y), QPointF(kLeft + pw, y));
+            const QString label =
+                level == 0 ? QStringLiteral("0") : minus_sign(QString::asprintf("%+d", static_cast<int>(level)));
+            p->setPen(label_colour_);
+            p->drawText(QPointF(kLeft - 10 - fm.horizontalAdvance(label), yOf(level) + 4), label);
+        }
     }
 
     const size_t n = static_cast<size_t>(std::max(64.0, pw));
@@ -277,7 +319,8 @@ void ResponseGraph::paint(QPainter* p) {
                                 std::clamp(kTop + ph * (top_db - db[i]) / kSpectrumRangeDb, kTop, kTop + ph));
         return curveThrough(points);
     };
-    if (spectrum_visible_ && !muted && session_ && session_->spectrumLevels(sfreqs.data(), sn, spectrum.data())) {
+    if ((part_ == All || part_ == Spectrum) && spectrum_visible_ && !muted && session_ &&
+        session_->spectrumLevels(sfreqs.data(), sn, spectrum.data())) {
         const QPainterPath edge = spectrum_path(spectrum);
         QPainterPath area = edge;
         area.lineTo(kLeft + pw, kTop + ph);
@@ -291,7 +334,7 @@ void ResponseGraph::paint(QPainter* p) {
         p->strokePath(edge, QPen(spectrum_edge_, 1.0));
         p->restore();
     }
-    if (!session_) return;
+    if (!session_ || part_ == Grid || part_ == Spectrum) return;
 
     const isotone::EqState& state = session_->state();
     const auto polyline = [&](const std::vector<double>& db) {

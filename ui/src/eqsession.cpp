@@ -496,14 +496,23 @@ uint32_t EqSession::nextBandId() const {
     return id;
 }
 
-void EqSession::addBand(double hz, double db) {
-    if (!canAddBand() || !std::isfinite(hz) || !std::isfinite(db)) return;
+void EqSession::addBand(double hz, double db, double q, int channelMask) {
+    if (!canAddBand() || !std::isfinite(hz) || !std::isfinite(db) || !std::isfinite(q)) return;
+    const isotone::ChannelMask all = isotone::ui::layout_channel_mask(target_.layout.channels);
+    const isotone::ChannelMask m = static_cast<isotone::ChannelMask>(channelMask) & all;
+    if (channelMask != 0 && m == 0) return;   // none of the output's speakers
     isotone::Band b;
     b.id = nextBandId();
     b.type = isotone::FilterType::Peaking;
     b.fc = std::clamp(hz, 10.0, 22000.0);
     b.gain_db = std::clamp(std::round(db * 10.0) / 10.0, -24.0, 24.0);
-    b.width = 1.41;
+    b.width = std::clamp(q, 0.1, 50.0);
+    if (m != 0 && m != all) {
+        // Masks address the output's layout.
+        state_.layout_channels = target_.layout.channels;
+        state_.layout_speaker_mask = target_.layout.speaker_mask;
+        b.channels = m;
+    }
     insertBand(state_.bands.size(), b);
 }
 

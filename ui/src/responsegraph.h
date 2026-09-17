@@ -19,6 +19,7 @@
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 
+#include <atomic>
 #include <vector>
 
 class EqSession;
@@ -28,6 +29,11 @@ class ResponseGraph : public QQuickPaintedItem {
     QML_ELEMENT
 
     Q_PROPERTY(EqSession* session READ session WRITE setSession NOTIFY sessionChanged)
+    // The part this item draws: all of it, or the Grid, Spectrum or Curves, as
+    // layers stacked in that order, so that a new spectrum frame repaints the
+    // spectrum alone. Repainting the grid and the curves 60 times a second took
+    // 15.6 ms a frame in a maximized window, the spectrum 1.1 of it (2026-09-16).
+    Q_PROPERTY(Part part READ part WRITE setPart NOTIFY styleChanged)
     // Settings, General, Graph: the gain range (12, 15 or 24 dB) and the frequency
     // range. Each change bumps `revision`, so handles and the readout follow.
     Q_PROPERTY(double rangeDb READ rangeDb WRITE setRangeDb NOTIFY rangeChanged)
@@ -59,9 +65,17 @@ class ResponseGraph : public QQuickPaintedItem {
     Q_PROPERTY(int revision READ revision NOTIFY revisionChanged)
 
 public:
+    enum Part { All, Grid, Spectrum, Curves };
+    Q_ENUM(Part)
+
     explicit ResponseGraph(QQuickItem* parent = nullptr);
 
     void paint(QPainter* painter) override;
+
+    Part part() const { return part_; }
+    void setPart(Part part);
+    // How many times it has painted, for tests.
+    Q_INVOKABLE int paintCount() const { return paint_count_; }
 
     EqSession* session() const { return session_; }
     void setSession(EqSession* s);
@@ -73,8 +87,10 @@ public:
     double maxHz() const { return max_hz_; }
     void setMaxHz(double hz);
 
-    // The vertical grid for a frequency range: 1, 2, 3, 4, 5, 6 and 8 in each
-    // decade, major at 1, 2 and 5.
+    // The vertical grid for a frequency range: 1, 1.5, 2, 3, 4, 5, 6 and 8 in each
+    // decade, near an eighth of a decade apart (squig.link's lines), major at 1, 2
+    // and 5. Drawn in three weights (owner, 2026-09-16): the decades (100 Hz, 1 kHz,
+    // 10 kHz) strongest, every other label next, the rest faint.
     struct GridLine {
         double hz;
         bool major;
@@ -83,6 +99,12 @@ public:
     // Where the frequency labels go: the major lines, or every line when the
     // range holds fewer than three, or the range's ends when it holds fewer than two.
     static std::vector<double> labelFrequencies(double min_hz, double max_hz);
+    // A label's separator: a quarter of the way from the major grid colour to the zero
+    // line's, a tad over the minor lines (owner, 2026-09-16). A decade's is the zero
+    // line's colour.
+    static QColor separatorColour(const QColor& grid_major, const QColor& zero_line);
+    // A power of ten.
+    static bool isDecade(double hz);
 
     double plotLeft() const { return kLeft; }
     double plotTop() const { return kTop; }
@@ -135,6 +157,8 @@ private:
     double drawnMaxHz() const { return max_hz_ > min_hz_ ? max_hz_ : min_hz_ * 2.0; }
 
     QPointer<EqSession> session_;
+    Part part_ = All;
+    std::atomic<int> paint_count_{0};
     int revision_ = 0;
     double range_db_ = 15.0;
     double min_hz_ = 20.0, max_hz_ = 20000.0;

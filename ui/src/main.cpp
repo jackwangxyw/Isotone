@@ -17,6 +17,7 @@
 //   --view <view>[/<tab>]     open a view, and a Settings tab (settings/outputs)
 //   --tray                    start hidden in the tray (launch at sign-in with Start in the tray)
 //   --key <keys>              press keys ("Ctrl+M") after the clicks (repeatable, in order)
+//   --size <w>x<h>            the window's size (held to its minimum)
 //
 // One instance per user and data directory: a second launch shows the running
 // window and exits (singleinstance.h). A screenshot run is always its own, and
@@ -67,6 +68,8 @@ int main(int argc, char* argv[]) {
     // QApplication, not QGuiApplication: the tray icon is a Qt Widgets class.
     QApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("Isotone"));
+    // The taskbar's, Alt+Tab's and the title bar's, rather than Windows' blank one.
+    QGuiApplication::setWindowIcon(logo_mark_icon());
 
     QCommandLineParser parser;
     const QCommandLineOption screenshot(QStringLiteral("screenshot"), QStringLiteral("Save the window to <file> and exit."),
@@ -91,7 +94,7 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption fake_devicetool(QStringLiteral("fake-devicetool"), QStringLiteral("Answer devicetool from <script>."),
                                              QStringLiteral("script"));
     const QCommandLineOption first_run(QStringLiteral("first-run"), QStringLiteral("Show first run."));
-    const QCommandLineOption view(QStringLiteral("view"), QStringLiteral("Open <view> (eq, devices, settings, settings/outputs)."),
+    const QCommandLineOption view(QStringLiteral("view"), QStringLiteral("Open <view> (eq, ear, devices, settings, settings/outputs)."),
                                   QStringLiteral("view"));
     parser.addOption(fake_devicetool);
     parser.addOption(first_run);
@@ -100,6 +103,8 @@ int main(int argc, char* argv[]) {
     parser.addOption(tray);
     const QCommandLineOption key(QStringLiteral("key"), QStringLiteral("Press <keys> after the clicks."), QStringLiteral("keys"));
     parser.addOption(key);
+    const QCommandLineOption size(QStringLiteral("size"), QStringLiteral("Size the window to <w>x<h>."), QStringLiteral("wxh"));
+    parser.addOption(size);
     parser.process(app);
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
@@ -178,6 +183,11 @@ int main(int argc, char* argv[]) {
     }
     // Settings: global hotkeys, the tray icon and its menu, a later launch's request.
     auto* root_window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
+    if (parser.isSet(size)) {
+        const QStringList wh = parser.value(size).split(QLatin1Char('x'));
+        if (wh.size() != 2) return 1;
+        root_window->resize(std::max(wh[0].toInt(), root_window->minimumWidth()), std::max(wh[1].toInt(), root_window->minimumHeight()));
+    }
     const auto show_window = [root_window] {
         if (root_window->windowState() & Qt::WindowMinimized)
             root_window->showNormal();

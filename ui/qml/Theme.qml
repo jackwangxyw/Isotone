@@ -88,6 +88,11 @@ QtObject {
         const s = Math.abs(v).toFixed(decimals)
         return (v < 0 && Number(s) !== 0 ? "−" : "+") + s
     }
+    // EQ by ear's level: "−30 dBFS", a tenth where it has one.
+    function dbfs(db) {
+        const s = Number(Math.abs(db).toFixed(1))
+        return (db < 0 && s !== 0 ? "−" : "") + s + " dBFS"
+    }
     function frequency(hz) {
         return hz >= 1000 ? (hz / 1000).toFixed(2) + " kHz" : Math.round(hz) + " Hz"
     }

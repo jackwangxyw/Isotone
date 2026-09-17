@@ -58,6 +58,14 @@ number, type icon and name, frequency, gain, Q, channels, enable; values
 click-to-edit. The list scrolls; a band EQ by ear creates is added at the end,
 selected, scrolled into view, and drawn on the graph.
 
+EQ by ear (owner, 2026-09-16): it makes an entirely fresh preset rather than
+editing the output's, started by the view's own New control (until then the tone
+plays through whatever the output has); it is for stereo and 2.1 outputs only, L and R being the
+front pair; Start, Top and End work in any order; Add band on an enabled peak
+on the same channels within a sixth of an octave of Top adds to that peak's gain
+instead of making a band. The tone is `SineTone` through
+`TestTone` (`decisions.md`, "Stage 5 begins").
+
 Settings pages share one header with tabs: General, Outputs, Appearance, Shortcuts,
 About. Outputs is the first-run table (output, format, current engine, engine
 choice): Change asks for Windows approval once, Apply runs every change, restarts

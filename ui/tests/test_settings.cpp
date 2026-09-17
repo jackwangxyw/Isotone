@@ -7,6 +7,8 @@
 #include "doctest.h"
 
 #include <QAction>
+#include <QImage>
+#include <QPainter>
 #include <QMenu>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -93,12 +95,25 @@ TEST_CASE("the graph maps frequency on its range, and gain on each gain range") 
 }
 
 TEST_CASE("the grid and its labels follow any frequency range") {
-    // The default range draws what the boards show.
+    // 1, 1.5, 2, 3, 4, 5, 6 and 8 in each decade, near an eighth of a decade apart
+    // (squig.link's lines); the labelled ones are the 1s, 2s and 5s.
     auto lines = ResponseGraph::gridLines(20, 20000);
-    std::vector<double> hz;
-    for (const auto& l : lines) hz.push_back(l.hz);
-    CHECK(hz == std::vector<double>{20, 30, 40, 50, 60, 80, 100, 200, 300, 400, 500, 600, 800,
-                                    1000, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 20000});
+    std::vector<double> hz, major;
+    for (const auto& l : lines) {
+        hz.push_back(l.hz);
+        if (l.major) major.push_back(l.hz);
+    }
+    CHECK(hz == std::vector<double>{20, 30, 40, 50, 60, 80, 100, 150, 200, 300, 400, 500, 600, 800,
+                                    1000, 1500, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 15000, 20000});
+    CHECK(major == std::vector<double>{20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000});
+    // No gap between neighbours is more than twice another.
+    double widest = 0, narrowest = 1;
+    for (size_t i = 1; i < hz.size(); ++i) {
+        const double gap = std::log10(hz[i] / hz[i - 1]);
+        widest = std::max(widest, gap);
+        narrowest = std::min(narrowest, gap);
+    }
+    CHECK(widest / narrowest <= 2.3);
     CHECK(ResponseGraph::labelFrequencies(20, 20000) ==
           std::vector<double>{20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000});
 
@@ -114,6 +129,62 @@ TEST_CASE("the grid and its labels follow any frequency range") {
 
     const auto octave = ResponseGraph::labelFrequencies(300, 700);
     CHECK(octave.size() >= 3);
+}
+
+TEST_CASE("the decades are the strongest separators, the other labels next, the rest faint") {
+    // The owner, 2026-09-16: major separators at 100, 1k and 10k, less major ones at
+    // every other label, minor ones at every other line.
+    ResponseGraph graph;
+    graph.setSize(QSizeF(1060, 404));
+    const QColor minor(0x20, 0x20, 0x20), major(0x60, 0x60, 0x60), zero(0xa0, 0xa0, 0xa0);
+    graph.setProperty("gridMinor", minor);
+    graph.setProperty("gridMajor", major);
+    graph.setProperty("zeroLine", zero);
+    const auto check = [&](double min_hz, double max_hz) {
+        CAPTURE(min_hz);
+        CAPTURE(max_hz);
+        graph.setMinHz(min_hz);
+        graph.setMaxHz(max_hz);
+        QImage image(1060, 404, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        graph.paint(&painter);
+        painter.end();
+        // Between the +3 dB and +6 dB lines, clear of the horizontal grid.
+        const int y = static_cast<int>(graph.yOf(4.5));
+        const auto at = [&](double hz) { return image.pixelColor(static_cast<int>(std::round(graph.xOf(hz))), y); };
+        const QColor clear = ResponseGraph::separatorColour(major, zero);
+        const std::vector<double> labels = ResponseGraph::labelFrequencies(min_hz, max_hz);
+        const auto labelled = [&](double hz) { return std::find(labels.begin(), labels.end(), hz) != labels.end(); };
+        int decades = 0;
+        for (const auto& l : ResponseGraph::gridLines(min_hz, max_hz)) {
+            CAPTURE(l.hz);
+            if (ResponseGraph::isDecade(l.hz)) {
+                CHECK(at(l.hz) == zero);
+                ++decades;
+            } else {
+                CHECK(at(l.hz) == (labelled(l.hz) ? clear : minor));
+            }
+        }
+        for (double f : labels) {
+            CAPTURE(f);
+            CHECK(at(f) == (ResponseGraph::isDecade(f) ? zero : clear));
+        }
+        return decades;
+    };
+    CHECK(check(20, 20000) == 3);   // 100, 1k, 10k
+    check(300, 700);     // labels on lines that are not 1s, 2s or 5s
+    check(1100, 1900);   // the narrow steps
+    CHECK(check(900, 1100) == 1);   // a decade in the narrow steps
+    // A tad less obvious than halfway (owner, 2026-09-16): a quarter of the way from
+    // the major grid colour to the zero line's.
+    CHECK(ResponseGraph::separatorColour(major, zero) == QColor(0x70, 0x70, 0x70));
+
+    CHECK(ResponseGraph::isDecade(100));
+    CHECK(ResponseGraph::isDecade(10000));
+    CHECK_FALSE(ResponseGraph::isDecade(20));
+    CHECK_FALSE(ResponseGraph::isDecade(2000));
+    CHECK_FALSE(ResponseGraph::isDecade(1500));
 }
 
 TEST_CASE("an inverted frequency range does not break the mapping") {

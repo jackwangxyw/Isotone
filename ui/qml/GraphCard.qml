@@ -7,6 +7,8 @@ Rectangle {
     id: root
     // Where the readout is; negative for none.
     property real hoverFrequency: -1
+    // EQ by ear: the tone's cursor and the marks, in place of the hover readout.
+    property bool ear: false
     signal menuRequested(int row, real x, real above, real below)
     // The handle of a row, for tests: they all share an objectName.
     function handleItem(row) { return handles.itemAt(row) }
@@ -33,13 +35,13 @@ Rectangle {
         function onSelectionChanged() { root.commitWheel() }
     }
 
-    ResponseGraph {
-        id: graph
-        objectName: "responseGraph"
+    // The graph in three layers, so a spectrum frame repaints only the spectrum
+    // (ResponseGraph::part).
+    component GraphLayer: ResponseGraph {
         x: 10
         y: 14
-        width: parent.width - 20
-        height: parent.height - 18
+        width: root.width - 20
+        height: root.height - 18
         session: EqSession
         fontFamily: Theme.font
         spectrumVisible: AppSettings.spectrumOn
@@ -60,6 +62,13 @@ Rectangle {
         minHz: GeneralSettings.minHz
         maxHz: GeneralSettings.maxHz
         spectrumSmoothing: GeneralSettings.smoothing
+    }
+    GraphLayer { objectName: "graphGrid"; part: ResponseGraph.Grid }
+    GraphLayer { objectName: "graphSpectrum"; part: ResponseGraph.Spectrum }
+    GraphLayer {
+        id: graph
+        objectName: "responseGraph"
+        part: ResponseGraph.Curves
 
         MouseArea {
             anchors.fill: parent
@@ -79,10 +88,97 @@ Rectangle {
             onExited: root.hoverFrequency = -1
         }
 
+        // EQ by ear: the marked span, the marks, and the tone's cursor, dragged to sweep.
+        Item {
+            id: ear
+            objectName: "earOverlay"
+            visible: root.ear
+            anchors.fill: parent
+            function xOf(hz) { return graph.revision >= 0 && graph.plotWidth > 0 ? graph.xOf(hz) : 0 }
+            Rectangle {
+                visible: EqByEar.start > 0 && EqByEar.end > 0
+                x: Math.min(ear.xOf(EqByEar.start), ear.xOf(EqByEar.end))
+                y: graph.plotTop
+                width: Math.abs(ear.xOf(EqByEar.end) - ear.xOf(EqByEar.start))
+                height: graph.plotHeight
+                color: Qt.alpha(Theme.accent, 0.08)
+            }
+            Repeater {
+                model: [{ letter: "S", hz: EqByEar.start }, { letter: "T", hz: EqByEar.top }, { letter: "E", hz: EqByEar.end }]
+                delegate: Item {
+                    id: markLine
+                    required property var modelData
+                    visible: modelData.hz > 0
+                    x: Math.round(ear.xOf(modelData.hz))
+                    Repeater {
+                        model: Math.max(0, Math.ceil((graph.plotHeight - 16) / 7))
+                        delegate: Rectangle {
+                            required property int index
+                            y: graph.plotTop + 16 + index * 7
+                            width: 1
+                            height: Math.min(3, graph.plotTop + graph.plotHeight - y)
+                            color: Theme.muted
+                        }
+                    }
+                    Text {
+                        x: -width / 2
+                        y: graph.plotTop + 1
+                        text: markLine.modelData.letter
+                        font.family: Theme.font
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        color: Theme.muted
+                    }
+                }
+            }
+            Rectangle {
+                id: cursor
+                objectName: "earCursor"
+                x: Math.round(ear.xOf(EqByEar.frequency)) - 1
+                y: graph.plotTop
+                width: 2
+                height: graph.plotHeight
+                color: Theme.accent
+            }
+            Rectangle {
+                // Right of the cursor, or left of it where the plot ends.
+                x: cursor.x + 9 + width <= graph.plotLeft + graph.plotWidth ? cursor.x + 9 : cursor.x - 7 - width
+                y: graph.plotTop + 26
+                width: cursorText.implicitWidth + 22
+                height: 24
+                radius: 6
+                color: Theme.accent
+                Text {
+                    id: cursorText
+                    anchors.centerIn: parent
+                    text: Theme.frequency(EqByEar.frequency)
+                    font.family: Theme.font
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                    color: Theme.textOnAccent
+                }
+            }
+            // A press anywhere on the plot moves the tone there and a drag carries on,
+            // as on the slider (owner, 2026-09-16). The handles are above it; a double
+            // click still adds a band.
+            MouseArea {
+                objectName: "earPlotArea"
+                x: graph.plotLeft
+                y: graph.plotTop
+                width: graph.plotWidth
+                height: graph.plotHeight
+                cursorShape: Qt.SizeHorCursor
+                function follow(mouse) { EqByEar.frequency = graph.frequencyAt(graph.plotLeft + Math.max(0, Math.min(width, mouse.x))) }
+                onPressed: (mouse) => follow(mouse)
+                onPositionChanged: (mouse) => { if (pressed) follow(mouse) }
+                onDoubleClicked: (mouse) => EqSession.addBand(graph.frequencyAt(graph.plotLeft + mouse.x), graph.dbAt(graph.plotTop + mouse.y))
+            }
+        }
+
         // Hover readout: a dashed line and the composite at that frequency.
         Item {
             id: readout
-            visible: root.hoverFrequency > 0
+            visible: root.hoverFrequency > 0 && !root.ear
             // xOf and compositeAt are not properties: the conditions on revision and
             // plotWidth make the bindings re-run when the curve or the size changes.
             // (A comma expression does not: the compiled binding drops the unused read.)

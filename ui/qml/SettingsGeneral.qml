@@ -43,6 +43,16 @@ Item {
             }
         }
 
+        SettingsSection { text: "Window" }
+        SettingsRow {
+            label: "Always on top"
+            Toggle {
+                objectName: "alwaysOnTop"
+                checked: GeneralSettings.alwaysOnTop
+                onToggled: (on) => AppSettings.setValue("window/alwaysOnTop", on)
+            }
+        }
+
         SettingsSection { text: "Presets" }
         SettingsRow {
             label: "Switch preset when the default output changes"
@@ -100,6 +110,16 @@ Item {
                         rangePopover.openAt(p.x, p.y)
                     }
                 }
+            }
+        }
+
+        SettingsRow {
+            label: "Short window"
+            Segmented {
+                objectName: "shortWindow"
+                options: ["Graph", "Bands"]
+                current: GeneralSettings.shortWindow === "bands" ? 1 : 0
+                onPicked: (index) => GeneralSettings.setShortWindow(index === 1 ? "bands" : "graph")
             }
         }
 

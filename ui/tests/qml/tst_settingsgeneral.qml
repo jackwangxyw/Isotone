@@ -58,7 +58,8 @@ Item {
         function test_toggles_persist() {
             const toggles = [["startInTray", "general/startInTray"], ["keepInTray", "general/keepInTray"],
                              ["switchOnDefaultOutput", "general/switchOnDefaultOutput"],
-                             ["autoPreampForNew", "general/autoPreampForNew"]]
+                             ["autoPreampForNew", "general/autoPreampForNew"],
+                             ["alwaysOnTop", "window/alwaysOnTop"]]
             for (const [name, key] of toggles) {
                 const t = child(name)
                 verify(t !== null, name)
@@ -77,6 +78,11 @@ Item {
             verify(!child("keepInTray").checked)
             AppSettings.setValue("general/keepInTray", "true")
             compare(GeneralSettings.keepInTray, true)
+            // Always on top is off unless chosen.
+            compare(GeneralSettings.alwaysOnTop, false)
+            AppSettings.setValue("window/alwaysOnTop", "true")
+            compare(GeneralSettings.alwaysOnTop, true)
+            AppSettings.setValue("window/alwaysOnTop", false)
         }
 
         function test_launch_at_sign_in_writes_the_run_value() {
@@ -121,6 +127,21 @@ Item {
             compare(g.rangeDb, 12)
             fuzzyCompare(g.dbAt(g.plotTop), 12, 1e-9)
             compare(child("gainRange").current, 0)
+        }
+
+        function test_short_window_picks_the_graph_or_the_bands() {
+            const control = child("shortWindow")
+            compare(control.current, 0)
+            segment(control, 1)
+            compare(AppSettings.value("graph/shortWindow"), "bands")
+            compare(GeneralSettings.shortWindow, "bands")
+            compare(control.current, 1)
+            segment(control, 0)
+            compare(GeneralSettings.shortWindow, "graph")
+            // Anything else read back is the graph.
+            AppSettings.setValue("graph/shortWindow", "sideways")
+            compare(GeneralSettings.shortWindow, "graph")
+            GeneralSettings.setShortWindow("graph")
         }
 
         function test_frequency_range_popover() {

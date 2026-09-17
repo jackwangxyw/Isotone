@@ -2,16 +2,22 @@ import QtQuick
 import Isotone
 
 // The window: sidebar, the view for UiState.view, and the overlay that popovers,
-// dialogs and toasts open in. 1440 x 900 is the boards' size; 1120 x 760 the
-// minimum (docs/decisions.md, prototype decisions).
+// dialogs and toasts open in. 1440 x 900 is the boards' size. The least width is
+// 1120 (docs/decisions.md, prototype decisions); the least height is what Settings,
+// General, Short window keeps (owner, 2026-09-16).
 Window {
     id: window
     width: 1440
     height: 900
     minimumWidth: 1120
-    minimumHeight: 760
+    minimumHeight: GeneralSettings.shortWindowMinimumHeight
     visible: true
     title: "Isotone"
+    // Settings, General, Always on top.
+    // A hint given replaces the default decorations, so the title bar's are given too:
+    // the stay-on-top hint alone left no title bar, buttons or system menu.
+    readonly property int titleBar: Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+    flags: GeneralSettings.alwaysOnTop ? Qt.Window | titleBar | Qt.WindowStaysOnTopHint : Qt.Window
     color: Theme.background
 
     Connections {
@@ -19,6 +25,7 @@ Window {
         function onCurrentChanged() {
             EqSession.useOutput(Outputs)
             if (UiState.view === "speakers" && EqSession.outputChannels <= 2) UiState.view = "eq"
+            if (UiState.view === "ear" && !EqByEar.supported) UiState.view = "eq"
         }
     }
     Component.onCompleted: {
@@ -95,12 +102,38 @@ Window {
                 onBandMenuRequested: (row, x, above, below) => bandMenu.openAt(row, x, above, below)
                 onPresetsRequested: (x, y) => presetsMenu.openAt(x, y)
             }
-            Loader {
+            // A view scrolls in a window shorter than its `minimumHeight`, where it has one.
+            Flickable {
+                id: otherFlick
+                objectName: "viewFlick"
                 anchors.fill: parent
-                active: UiState.view !== "eq"
-                source: UiState.view === "speakers" ? "SpeakersView.qml"
-                      : UiState.view === "devices" ? "DevicesView.qml"
-                      : UiState.view === "settings" ? "SettingsView.qml" : ""
+                visible: UiState.view !== "eq"
+                contentWidth: width
+                contentHeight: Math.max(height, otherView.item && otherView.item.minimumHeight !== undefined ? otherView.item.minimumHeight : 0)
+                interactive: contentHeight > height
+                clip: interactive
+                boundsBehavior: Flickable.StopAtBounds
+                Connections {
+                    target: UiState
+                    function onViewChanged() { otherFlick.contentY = 0 }
+                }
+                Loader {
+                    id: otherView
+                    width: otherFlick.width
+                    height: otherFlick.contentHeight
+                    active: UiState.view !== "eq"
+                    source: UiState.view === "speakers" ? "SpeakersView.qml"
+                          : UiState.view === "ear" ? "EarView.qml"
+                          : UiState.view === "devices" ? "DevicesView.qml"
+                          : UiState.view === "settings" ? "SettingsView.qml" : ""
+                }
+            }
+            // EQ by ear opens the same menus as the Equalizer view.
+            Connections {
+                target: otherView.item
+                ignoreUnknownSignals: true
+                function onBandMenuRequested(row, x, above, below) { bandMenu.openAt(row, x, above, below) }
+                function onPresetsRequested(x, y) { presetsMenu.openAt(x, y) }
             }
         }
     }

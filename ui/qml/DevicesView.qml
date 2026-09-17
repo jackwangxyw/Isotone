@@ -7,6 +7,8 @@ import Isotone
 // when it is installed but on no output.
 Item {
     id: root
+    // The minimum window's height before short windows; a shorter one scrolls (Main).
+    readonly property int minimumHeight: 760
 
     // Devices.revision is read in each binding that calls into Devices, so it runs again on a new read.
     readonly property string selected: Devices.revision >= 0 && Devices.indexOf(UiState.devicesSelection) >= 0 ? UiState.devicesSelection

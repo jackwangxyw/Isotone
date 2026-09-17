@@ -2621,6 +2621,326 @@ stop, then down through the middle at 0.9 s, the last peaks at the bottom edge a
 while idle fails 72 assertions, and the old fixed cutoff fails 2. `ui_tests` 42,
 `ui_model_tests` 110, `ui_qml_tests` 267.
 
+## 2026-09-16: Stage 5 begins: the owner's decisions, and the tone
+
+**Owner's decisions**, on the questions raised at the start of stage 5:
+
+- **EQ by ear makes an entirely fresh preset.** It does not edit the preset the
+  output has. This settles which bands an A/B refit may replace. The view has its
+  own New control that starts it; until then the tone plays through whatever the
+  output has (asked with the alternatives of starting it on first Play or on
+  opening the view).
+- **Stereo and 2.1 only.** Anything with more channels is not a use case for it
+  and is ignored. L and R are the front pair.
+- **Marks in any order work.** The prototype's handling of them is not a rule: the
+  prototype was for checking the basic starting point of the UI, nothing more.
+- **The spectrum does what it does** while the tone plays.
+
+Plan 8.1's Web Audio tone and its warning when the edited output is not the
+default are gone with Electron: the tone renders straight to the output being
+edited, so it always passes through that output's engine.
+
+**The tone.** `SineTone` (`ui/backend/sine_tone.h`) is the generator, and
+`TestTone` now plays any source on a channel mask; the Speakers pink noise is the
+same overload as before, on one channel.
+
+- A full-scale sine is 0 dBFS, so the default -30 dBFS is a peak of 0.0316. The
+  pink noise's -30 dBFS is RMS, 3 dB louder than a sine of the same number.
+- The phase runs through every change. A new frequency glides in octaves (one
+  pole, 20 ms), the level ramps (one pole, 10 ms), and on/off is the level fading
+  to or from silence, snapped to exact zero under -140 dBFS so the tail does not
+  decay into denormals.
+- Auto sweep: a rate in octaves per second, carrying the glide with it so a sweep
+  does not lag, turning at 20 Hz and 20 kHz by what it went past. Setting a
+  frequency while it sweeps moves it there and it sweeps on.
+- The render is identical however the stream slices it, which the setters rely
+  on: they are atomics read once per render.
+
+Tests (`ui/tests/test_sine_tone.cpp`, seven cases): level and frequency at 44.1,
+48 and 96 kHz; the 20 Hz to 20 kHz range; over 1000 random frequency, level and
+on/off changes in random blocks, no sample step past the sine's own slope plus
+one ramp step; the glide; the fades and exact silence; slicing; the sweep's rate
+and both turns, rendered in 10 ms blocks as the stream does. Mutation-checked,
+each caught: no glide (1 assertion), level applied at once (3), phase restarted
+each render (2), no snap to silence (1), a sweep that lags (3), the direction
+reset on every render (2), no turn at the ends (2).
+
+**Live, on CABLE Input with IsoAPO, captured from its ring** (IsoAPO's output), a
+scratch harness driving `SineTone` through `TestTone`, the region written flat
+first:
+
+| Check | Result |
+|---|---|
+| 1 kHz, -30 dBFS, mask L, R, Both | -30.000 dBFS on the channels chosen, exact zeros on the other |
+| PK 1 kHz −12 dB Q 1 | 1 kHz −42.000, 300 Hz −31.441; RBJ maths −42.000 and −31.441 |
+| Same, bypassed (control) | −30.000 |
+| Tone changes (glides 100 to 400 Hz, level, on/off, sweeps up and down) through a flat EQ | largest sample step 0.9617 of the bound, which is the 400 Hz sine itself; zeros only in the two off periods; L and R identical; sweep ended at 134.35 Hz as computed |
+| Band gain dragged 0 to −12 dB and back (0.3, 1 and 3 s, about 45 writes a second in process) and typed jumps, under a 1 kHz tone | detector `x[n+1] − 2cos(ω)x[n] + x[n−1]`, zero for any 1 kHz sine: 2.5e-3 of the amplitude at worst while the gain moves, 4.2e-7 steady. Controls on a synthetic sine: an instant −12 dB step 0.098 to 0.75 by phase, a 1 ms linear ramp 4.2e-3. The level follows each drag and a jump settles at −42.0 |
+| Pink noise on R (the Speakers overload) | matches `PinkNoise`'s loop sample for sample over 6 s (7.5e-9); L exact zeros |
+
+The drag result is IsoAPO's. On an Equalizer APO output an edit is heard when it
+is committed, and each write rebuilds its filters from rest (2026-09-13), so a
+drag there cannot be click-free; that stays as it is.
+
+Nothing persisted: every write went to the region, which went with the stream.
+The saved state files were not touched. That listing corrects the machine state
+below: `%ProgramData%\IsoAPO\devices` holds a file for CABLE Input
+(`{798436d2-...}.bin`, written 2026-09-15 23:18, from the owner's use of the
+app on the cable) as well as the headphones'.
+
+`ui_tests` 49, `ui_model_tests` 110, `ui_qml_tests` 267. `isotone.exe` was not
+relinked: the owner's copy was running from `build-ui`.
+
+## 2026-09-16: EQ by ear, sweep
+
+The sweep half of stage 5, built to the `EqByEar` board with its geometry from
+the generator (`gen_screens.py`, `eq_by_ear`, `log_slider`, `band_list`).
+
+**`EqByEar`** (`ui/src/eqbyear.h`, a QML singleton over `EqSession`) holds the
+tone, the frequency, the marks and the band they make. The view is
+`EarView.qml` with `SweepSlider.qml`, `EarBandList.qml` and `VolumeDialog.qml`;
+`GraphCard` draws the cursor, the marks and the marked span when `ear` is set.
+
+Where the spec and the owner were silent:
+
+- **Only on stereo and 2.1 outputs.** The navigation item shows when the output
+  is 2 channels, or 3 with the 2.1 mask `0xB` (3.0 is not 2.1); an output that
+  stops being one sends the view back to the Equalizer. L and R are channels 0
+  and 1, the front pair. A band on Both is every channel on stereo and the front
+  pair on 2.1, not the sub.
+- **The band from marks**: Peak at Top, Q = Top / |End − Start| to two places,
+  held to 0.1 to 50 (Start and End at one frequency is 50), −3 dB for Peak and +3
+  for Dip. Marks may be in any order. A mark records the frequency to the hertz;
+  Add band clears them. `EqSession::addBand` takes the Q and a channel mask so the
+  band is one undo step, and stamps the layout on the state when the mask is not
+  every channel.
+- **New** is a button at the left of the controls, the presets' own New flow
+  (unsaved changes are asked about first).
+- **The volume dialog** shows before the first play of each app session, with the
+  tone level and the output. Entering the view makes no sound, so it is not shown
+  then.
+- **Level**: a slider from −60 to 0 dBFS and a typed value, held to −90 to 0 (over
+  full scale is clipping). **Sweep rate**: typed, 0.05 to 10 octaves a second.
+  `TypedUnit` gained `Dbfs` and `OctavesPerSecond`, so the shown text can be
+  edited in place.
+- **Keys** while the view shows: Left and Right a 48th of an octave, with Shift a
+  sixth, Page Up and Page Down an octave, Space play and pause. A field being typed
+  in keeps its keys; a dialog or popover with the focus holds them all. Delete
+  removes the selected band here too.
+- **The tone stops** (fades out) when the view goes, the window hides, or the
+  output or its layout changes; the marks clear with the output. A paused tone
+  keeps its stream for 2 s, so playing again does not reopen it. A channel change
+  while playing fades out, reopens the stream on the new channels after 120 ms,
+  and fades in. A stream that fails stops the tone with a "Tone stopped" toast.
+- **The cursor** on the graph drags to sweep; the hover readout is off in this view.
+
+Tests: `test_eqbyear.cpp` (6 cases: the band from marks, which outputs, nudges and
+range, marks, Add band on stereo and 2.1 and one undo step, another output),
+`tst_earview.qml` (11: marks and Add band, scrolling to the new band, the volume
+dialog once, keys, a field keeping its keys, the log slider, channel, level and
+rate, leaving the view, the cursor), typed units. Mutation-checked, 16 of 16
+caught: Q from a signed span, Dip's sign, 2.1's Both as every channel, 2.1 by
+channel count alone, the tone and marks kept on another output, marks not
+rounded, marks not cleared by Add band, the level not held under 0 dBFS, the
+layout not stamped with a mask, the Q not passed, the dialog asked every time,
+the tone kept when the view goes, the list not scrolled to a new band, Page Up
+not bound, a linear slider, a cursor that does not follow. Two survived a first
+run and changed the tests: the layout stamp needed a state that names no layout,
+and scrolling on a count change was redundant (adding a band selects it) and went.
+
+**Live, the app on CABLE Input** (a second build in `build-ui-check`, scratch
+data and config directories), captured from IsoAPO's ring; the cable's saved
+state was backed up first and is byte-identical after:
+
+| Check | Result |
+|---|---|
+| Marks set from the slider, Add band | band 9: 3.41 kHz, −3.0 dB, Q 1.89, selected, scrolled into view; screenshots match the board's positions (marks at 566, list at 640, rows at 733 to 853) |
+| Play through the dialog, 3556.56 Hz from the slider | 3556.559 Hz at −41.833 dBFS; −30 + Auto preamp −7.621 + the nine bands' −4.216 = −41.837 |
+| Auto sweep at 1 oct/s | 1.0001 oct/s fitted over 2.5 s, the display and cursor following |
+
+## 2026-09-16: The graph lagged maximized with the spectrum running
+
+The owner: maximized, with the spectrum running, the whole app lags and the
+spectrum is not smooth. On his 2560 × 1440 display, with pink noise into CABLE
+Input, Qt's render loop timing (`qt.scenegraph.time.renderloop`) put all of it in
+the sync phase, which blocks the GUI thread: 6 ms a frame at 1440 × 900, 15 ms
+(17 at p90) maximized, where frames came every 19 ms instead of 16. Timing inside
+`ResponseGraph::paint` (temporary, not kept) split the 15.6 ms at 2228 × 873: grid
+and labels 4.4, spectrum 1.1, band bells 5.3, composite fill and stroke 4.6, the
+maths under 0.3. Every spectrum frame rasterized the whole graph, though only
+the spectrum had changed, and the bells' share grows with the band count.
+
+`ResponseGraph` now draws a `part`: all of it (the Appearance preview), or the
+grid, the spectrum or the curves, and `GraphCard` stacks three. A spectrum frame
+repaints the spectrum; an edit repaints the curves and the spectrum, not the grid;
+the range, the size and the style repaint all three. The picture is the same:
+screenshots of both views before and after differ in about 950 pixels, by at most
+2 of 255, from blending layers instead of drawing on one surface.
+
+After, the same run: sync 1 ms maximized and under 1 windowed, frames every 16 ms
+in both. `tst_graphlayers.qml` counts each part's paints; repainting every part on
+a spectrum frame fails it, as does repainting the grid on an edit.
+
+`ui_tests` 50, `ui_model_tests` 116, `ui_qml_tests` 281.
+
+## 2026-09-16: Adding to a peak by ear, and short windows
+
+**Add band where a peak already is adds to it** (owner). The same place is an
+enabled Peak band on the same channels (a band on every channel counts as the
+output's every channel) within a sixth of an octave of Top; the nearest if more
+than one. Its gain takes the marks' −3 dB (Peak) or +3 dB (Dip), held to ±24; its
+frequency and Q stay; it is selected, and the change is one finished edit (one
+undo step, written to the output). At the 64-band limit Add band stays enabled
+over such a peak. Mutation-checked, 8 of 8: never merging, a third of an octave,
+channels ignored (it merged the 2.1 right into the pair's band), disabled bands,
+other types, the first rather than the nearest, the limit, and no finished edit.
+The last survived first because `undo()` records a pending edit before undoing; the
+test now counts `committed`.
+
+**Short windows** (owner: in a short, wide window show only the graph or only the
+bands, automatically, with a setting for which). Settings, General, Graph, **Short
+window**: Graph (the default) or Bands, `graph/shortWindow`.
+
+- The Equalizer view shows both while the graph gets at least 200 px (a window 678
+  high and up, as before); under that, only the one chosen. The graph alone takes
+  the height under the top bar less 24; the strip alone keeps its 402.
+- The window's least height is what is kept at its least: 300 for Graph (a 200 px
+  graph), 478 for Bands. It was 760. The least width stays 1120.
+- The sidebar scrolls when the window is too short for its navigation and its
+  foot, in both widths, instead of the foot running into the navigation. The
+  Devices view (760) and EQ by ear (754) scroll inside a shorter window; Settings
+  and Speakers already scrolled. The other views are unchanged.
+- `--size <w>x<h>` sizes the window for checks.
+
+Checked in screenshots at 1440 × 700, 478, 300 and 100 (held to 300), with each
+setting, both sidebar widths, EQ by ear and Devices. `tst_shortwindow.qml` (the
+threshold, each choice and its least height, the sidebar at 900, 478 and 300);
+mutation-checked, 3 of 3: the strip always shown, the setting not read, the sidebar
+not scrolling.
+
+**A top bar error found on the way**: the status pill's position still read the
+output name's width, taken out of the top bar on 2026-09-15, so with the sidebar
+collapsed its binding threw a ReferenceError and kept its old value. It follows the
+preset name now; `tst_devicespill.qml` fails on the warning with the old line.
+
+`ui_tests` 50, `ui_model_tests` 117, `ui_qml_tests` 288.
+
+## 2026-09-16: New beside the frequency, and always on top
+
+- **EQ by ear's New** is a primary button right of the frequency and its nudges
+  (owner), no longer at the left of the channel row.
+- **Always on top** (owner: like PowerToys' Always On Top): Settings, General, a
+  Window section with one toggle, `window/alwaysOnTop`, off by default. The window
+  carries `Qt.WindowStaysOnTopHint` while it is on, and changing it applies at once.
+  Checked on the running app from outside it (`GetWindowLongPtr`, `WS_EX_TOPMOST`):
+  on at start when saved on; off, then on after the toggle; on, then off after it.
+  The window's flags binding has no unit test; that live check is its evidence.
+
+`ui_tests` 50, `ui_model_tests` 117, `ui_qml_tests` 289.
+
+## 2026-09-16: EQ by ear's channel is the top bar's; the title bar with always on top
+
+**EQ by ear** (owner):
+
+- **No channel picker of its own**: it repeated the top bar's. The tone plays on
+  the view's channel: L, R or both for L, R and L+R on stereo. On 2.1 the top bar
+  has the Showing picker instead, so the tone is L or R when that front speaker is
+  shown without the other, and both otherwise. A band from marks takes the same
+  channels as before, from that. Mutation-checked, 4 of 4: the view not followed,
+  not followed at start, 2.1 always both, L and R swapped.
+- **Level and auto sweep** are on the play row, right of the frequency; the row
+  above it is gone and everything under moved up 48 px (the view's least height is
+  706).
+- **New** is **New preset**, still primary, left of Clear and Add band.
+
+**Always on top lost the title bar.** Evidence, from the running window's styles
+(`GetWindowLongPtr`): off, `0x96CF0000` (caption, system menu, sizing frame,
+minimize and maximize); on, `0x96040000`, the sizing frame alone, so no buttons
+and nothing to drag. Qt takes the hints a window is given as all of its
+decorations, and `Qt.WindowStaysOnTopHint` alone gave none. The flags now carry the
+title bar's hints with it. After: `0x96CF0000` in every state (started on, started
+off, toggled on, toggled off), with only `WS_EX_TOPMOST` changing.
+
+`ui_tests` 50, `ui_model_tests` 118, `ui_qml_tests` 289.
+
+## 2026-09-16: A press on the graph moves the tone; the app's icon
+
+- **EQ by ear's graph**: a press anywhere on the plot moves the tone there and a
+  drag carries on, as the slider does (owner). It replaces the 18 px strip around
+  the cursor. Band handles are above it, so a press on one takes the band and
+  leaves the tone; a double click still adds a band. Tested in `tst_earview.qml`;
+  without the press handler, or the double click, it fails.
+- **The icon** (owner: a placeholder until the real logo): `logo_mark_icon`, the
+  tray's, is the application's window icon, now drawn up to 256 px, and
+  `res/isotone.ico` (the same drawings, a PNG entry per size, 16 to 256) is the
+  exe's own through `res/isotone.rc`. Read back from Windows: one icon in the exe
+  (`ExtractIconEx`), and the running window's large and small icons
+  (`WM_GETICON`), all three the logo mark. A pinned taskbar shortcut may show
+  Windows' cached icon until it is pinned again.
+
+`ui_tests` 50, `ui_model_tests` 118, `ui_qml_tests` 290.
+
+## 2026-09-16: The frequency grid, as squig.link draws it
+
+The owner could not tell what the minor lines were. They were 1, 2, 3, 4, 5, 6 and 8
+in each decade: from 100 to 200 (and 1k to 2k, 10k to 20k) there was no line in a
+gap of 0.30 decades, where 50 to 100 had three. Read in squig.link's
+`graphtool.js` (fetched 2026-09-16, `xvals = [2,3,4,5,6,8,10,15]` over three
+decades, `tickPattern = [3,0,0,1,0,0,2,0]`, `tickThickness = [.2,.4,.4,.9,1.5]`):
+lines at 1, 1.5, 2, 3, 4, 5, 6 and 8, every gap between 0.08 and 0.18 decades,
+with the 2s (20, 200, 2k, 20k) heaviest, the 5s and 10s next, the rest faint.
+
+`ResponseGraph::gridLines` now gives those lines with a weight: Strong for the 2s,
+Major for the 1s and 5s (the labelled ones, as before), Minor for the rest. Minor
+lines draw in the minor grid colour, Major in the major, Strong halfway from the
+major grid colour to the zero line's, 1 px each. The labels are unchanged. The
+narrow-range fallback is as it was, with Major every fifth step. Tested: the lines
+and weights at 20 Hz to 20 kHz, and no gap more than 2.3 times another; without
+1.5, or with the 1s strongest, it fails. Checked in both themes.
+
+`ui_tests` 50, `ui_model_tests` 118, `ui_qml_tests` 290.
+
+## 2026-09-16: A clear separator at every label
+
+The owner, on the squig.link weights: not what was meant. The labels are right;
+**the clear separators go at every label**, all alike. The 2s' extra weight is
+gone. The lines stay squig.link's (1, 1.5, 2, 3, 4, 5, 6, 8 in a decade), and
+`GridLine` is back to major or not.
+
+The paint draws every grid line that has no label faint (the minor grid colour),
+then a separator at every label frequency, whatever range the labels come from (1s,
+2s and 5s; every line on a range with few of those; the narrow steps), in
+`separatorColour`, halfway from the major grid colour to the zero line's. The
+labels are the same list, drawn as before. Tested by painting the graph into an
+image at 20 Hz to 20 kHz, 300 to 700 and 1100 to 1900: each label's column is the
+separator colour and each other line's the minor colour; drawing the old major and
+minor colours instead fails 23 of 38 checks. Checked in both themes.
+
+`ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
+
+## 2026-09-16: Three weights of separator
+
+The owner, after trying every label alike: **major separators at 100, 1k and 10k,
+less major ones at every other label, minor ones at every other line.**
+
+- The decades (a power of ten, `ResponseGraph::isDecade`) draw in the zero line's
+  colour, whether or not they carry a label, so a narrow range with 1 kHz in it
+  still has its major line.
+- Every other label draws in `separatorColour` (halfway from the major grid colour
+  to the zero line's), as the entry before.
+- Every other line draws in the minor grid colour.
+
+Tested by painting the graph at 20 Hz to 20 kHz (three decades), 300 to 700, 1100
+to 1900 and 900 to 1100 (a decade in the narrow steps); drawing the decades as the
+other labels fails 8 checks. Checked in both themes.
+
+Then (owner): the less major lines a tad less obvious, closer to the minor ones.
+`separatorColour` is now a quarter of the way from the major grid colour to the zero
+line's, not halfway: #2F3237 in the dark theme, from #383C41 (minor #1A1D22, major
+#26292E, zero #4B4F54). The test pins the quarter, and failed at halfway.
+
+`ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
+
 ---
 
 # Where things stand (2026-09-16)
@@ -2636,6 +2956,7 @@ while idle fails 72 assertions, and the old fixed cutoff fails 2. `ui_tests` 42,
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
+| 5. EQ by ear | sweep complete and approved by the owner in use; A/B not started | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -2699,12 +3020,15 @@ on); live propagation of preset edits to other outputs (now on save); and whethe
 a preset's row should tell two outputs apart when their names are nearly the same
 ("CABLE Input" and "CABLE In" cost him an evening's confusion).
 
-**Stage 5** (EQ by ear) is designed with the UI; its screens are in the spec, and
-stage 4's tree is tidy for it: no agent worktrees or branches left, `main` clean,
-the three UI suites green (42 / 110 / 267), and CI green. What stage 5 inherits
-that it will touch: `EqSession` (the edited state and undo), `ResponseGraph`,
-`DeviceLink` (where an edit goes, native or Equalizer APO), the spectrum and the
-test tone.
+**Stage 5** (EQ by ear): the sweep is done (2026-09-16), with what the owner added
+while using it: New preset, adding to a peak already there, the channel taken from
+the top bar, a press on the graph moving the tone. Along the way, from his use:
+short windows (Settings, General, Short window), always on top, the graph repainting
+only the spectrum on each frame (the maximized lag), the frequency grid's three
+weights, and the placeholder icon. **A/B is next**: reference and test tones, the
+test level, recorded points and the refit (plan 8.4, the `EqByEarAB` board), kept
+separate so it can be removed. Open for A/B: which bands a refit may replace in the
+fresh preset, and whether points are kept.
 **Stage 6** (packaging) is not started.
 
 ## State of the owner's machine
@@ -2716,8 +3040,9 @@ longer runs on CABLE Input (its pre-mix class there had been applying
 other endpoint is untouched. Nothing the owner listens to routes through the
 cable. The staged `C:\Program Files\Isotone\IsoAPO.dll` is the final backend
 review's build (SHA-256 EE9AECEE…8567, param block v5); the owner deleted the
-previous DLL's backup. `%ProgramData%\IsoAPO\devices` holds no
-saved state. CABLE Input's
+previous DLL's backup. `%ProgramData%\IsoAPO\devices` holds CABLE
+Input's saved state from the owner's use of the app on it (2026-09-15) and the
+headphones'. CABLE Input's
 install record predates `Isotone.InstallMode`; `status` derives MFX from the
 slot, and a repair after a detach needs `--mode mfx`.
 

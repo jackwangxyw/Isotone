@@ -1,0 +1,4 @@
+// The exe's own icon, which Explorer and a pinned taskbar shortcut show: the
+// placeholder logo mark (owner, 2026-09-16), logo_mark_icon's drawings
+// (src/logomark.cpp) at 16 to 256 px, each a PNG entry.
+IDI_ICON1 ICON "isotone.ico"

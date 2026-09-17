@@ -21,6 +21,8 @@ enum class TypedUnit {
     Plain,      // no unit: balance
     Metres,     // "m": a speaker's distance
     Milliseconds,   // "ms": delays
+    Dbfs,       // "dBFS" or "dB": EQ by ear's level
+    OctavesPerSecond,   // "oct/s": the auto sweep's rate
 };
 
 // The value in the field's base unit (dB, Hz, Q, octaves, dB per octave), or

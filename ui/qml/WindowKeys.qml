@@ -22,7 +22,7 @@ Item {
     // A shortcut, not a key handler: a field being typed in keeps Delete for its text.
     Shortcut {
         sequence: ShortcutRegistry.revision >= 0 ? ShortcutRegistry.sequence("delete") : ""   // Settings, Shortcuts
-        enabled: UiState.view === "eq" && !ShortcutRegistry.capturing && !root.held
+        enabled: (UiState.view === "eq" || UiState.view === "ear") && !ShortcutRegistry.capturing && !root.held
         onActivated: EqSession.deleteBand(EqSession.selectedRow)
     }
     AppShortcuts { keysActive: !root.held }

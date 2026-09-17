@@ -72,7 +72,7 @@ public:
     Q_ENUM(Role)
 
     // What a click-to-edit field holds (typed_value.h).
-    enum Unit { Decibels, Hertz, Q, Octaves, SlopeDb, Plain, Metres, Milliseconds };
+    enum Unit { Decibels, Hertz, Q, Octaves, SlopeDb, Plain, Metres, Milliseconds, Dbfs, OctavesPerSecond };
     Q_ENUM(Unit)
 
     explicit EqSession(QObject* parent = nullptr);
@@ -178,8 +178,9 @@ public:
     // A copy with a fresh id, next to the band, selected.
     Q_INVOKABLE void duplicateBand(int row);
     Q_INVOKABLE void resetGain(int row);
-    // A peaking band, selected. Does nothing at kParamMaxBands bands.
-    Q_INVOKABLE void addBand(double hz, double db);
+    // A peaking band, selected. Does nothing at kParamMaxBands bands. `channelMask`
+    // is over the output's layout, as setChannelMask's, 0 for every channel.
+    Q_INVOKABLE void addBand(double hz, double db, double q = 1.41, int channelMask = 0);
     Q_INVOKABLE void deleteBand(int row);
     // A drag or a typed value is done: commits it to the output, and re-sorts
     // by frequency if that is the order.

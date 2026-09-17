@@ -23,6 +23,9 @@ add_library(isotone_ui_backend STATIC
     backend/speaker_setup.h
     backend/test_tone.cpp
     backend/test_tone.h
+    # EQ by ear
+    backend/sine_tone.cpp
+    backend/sine_tone.h
     # Devices work package.
     backend/config_attach.cpp
     backend/config_attach.h
@@ -46,6 +49,9 @@ qt_add_library(isotone_ui STATIC
     src/appsettings.h
     src/eqsession.cpp
     src/eqsession.h
+    # EQ by ear
+    src/eqbyear.cpp
+    src/eqbyear.h
     src/filterglyph.cpp
     src/filterglyph.h
     src/outputs.cpp
@@ -175,6 +181,11 @@ qt_add_qml_module(isotone_ui
         qml/WindowKeys.qml
         qml/PressWatch.qml
         qml/WindowClose.qml
+        # EQ by ear
+        qml/EarView.qml
+        qml/EarBandList.qml
+        qml/SweepSlider.qml
+        qml/VolumeDialog.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -195,13 +206,14 @@ add_dependencies(isotone_ui isotone-devicetool)
 # Settings: the single instance's local socket.
 target_link_libraries(isotone_ui PUBLIC Qt6::Network)
 
-qt_add_executable(isotone WIN32 src/main.cpp)
+# res/isotone.rc: the exe's icon.
+qt_add_executable(isotone WIN32 src/main.cpp res/isotone.rc)
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
 if(ISOTONE_BUILD_TESTS)
     add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
                    tests/test_speaker_setup.cpp tests/test_config_attach.cpp tests/test_settings_backend.cpp
-                   tests/test_compat_retry.cpp)
+                   tests/test_compat_retry.cpp tests/test_sine_tone.cpp)
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
     target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
@@ -209,7 +221,7 @@ if(ISOTONE_BUILD_TESTS)
 
     add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp
                    tests/test_devices.cpp tests/test_settings.cpp tests/test_session_fixes.cpp
-                   tests/test_spectrum_display.cpp)
+                   tests/test_spectrum_display.cpp tests/test_eqbyear.cpp)
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
