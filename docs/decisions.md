@@ -2965,6 +2965,48 @@ points are kept). Stage 5 is done without it.
 
 `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
 
+## 2026-09-17: Linux, the targets and the environment
+
+**Targets** (owner): every desktop and session, as EasyEffects does: Wayland and
+X11; GNOME, KDE Plasma and Cinnamon. The owner uses Linux Mint (Cinnamon).
+
+**Environment** (agreed, not yet set up):
+
+- A Linux Mint Cinnamon VM on this machine, reached over SSH, for the builds,
+  PipeWire, measurement through virtual sinks (the Linux counterpart of the VB-Cable
+  rig) and screenshots of the UI in a real session. About 4 cores, 8 GB, 60 GB.
+  Windows here is 11 Home, so no Hyper-V: VirtualBox (free, no account) first;
+  VMware Workstation Pro is the alternative if Wayland desktops need better 3D.
+  The owner installs VirtualBox and Mint, then `openssh-server`, and adds a public
+  key generated on this machine.
+- Later, VMs or snapshots for GNOME on Wayland and KDE Plasma on Wayland and X11,
+  once there is a UI to check on them.
+- Not WSL2 (not installed here): headless only, no desktop to check the tray,
+  hotkeys or windows in, so a VM covers both needs.
+- The owner's own Mint machine has no Claude and will not: it is for his final
+  test of an installed package, not development.
+
+**What the Linux side needs**, in order:
+
+1. **Stage 1c spike**: the PipeWire topology (a virtual sink, its monitor captured,
+   the core, playback to the hardware sink; or PipeWire's own filter hosting),
+   decided by a measured -12 dB at 1 kHz, as the Windows spikes were.
+2. **The daemon** (stage 3's Linux half): POSIX shared memory for the param block
+   and the audio ring, saved state under `$XDG_CONFIG_HOME/isotone`, rate changes,
+   the default sink through WirePlumber metadata, a user systemd unit.
+3. **CI**: the daemon (and the UI) built on Ubuntu, with a headless PipeWire and
+   null sinks for measurement (not yet tried on GitHub's runners).
+4. **The UI's Windows layer** (14 files include Windows headers): outputs and their
+   notifications from PipeWire, edits to the daemon, the tones into the virtual sink,
+   the Devices view (daemon and sink present, no install), the layout picker,
+   launch at sign-in as XDG autostart. Wayland limits: global hotkeys go through
+   the GlobalShortcuts portal (KDE and recent GNOME), an app cannot keep itself on
+   top, and GNOME needs the AppIndicator extension for the tray.
+5. **Packaging**: a .deb first (Mint, Ubuntu), Flatpak after its own spike (a
+   daemon owning a virtual sink from inside the sandbox).
+
+Windows packaging (stage 6) does not depend on any of this.
+
 ---
 
 # Where things stand (2026-09-16)
@@ -3027,7 +3069,9 @@ points IntelliSense at `build/compile_commands.json`.
 
 **Stage 3** remaining:
 
-1. **Linux daemon**, deferred with 1c.
+1. **Linux daemon**, with 1c: the targets, the environment and the order are in
+   "Linux, the targets and the environment" (2026-09-17). Next step is the owner's:
+   the Mint VM with SSH.
 
 **Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
 real install, repair and uninstall from Devices with the Windows prompt;
