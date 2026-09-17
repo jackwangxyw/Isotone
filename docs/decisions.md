@@ -2941,6 +2941,30 @@ line's, not halfway: #2F3237 in the dark theme, from #383C41 (minor #1A1D22, maj
 
 `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
 
+## 2026-09-16: A/B is for later; stage 4's open decisions
+
+**A/B mode is set aside** (owner): he will not use it; it may come later if people
+ask for it. Plan 8.4 and the `EqByEarAB` board stay as the design for then, with the
+questions it left open (which bands a refit may replace in a fresh preset, whether
+points are kept). Stage 5 is done without it.
+
+**Stage 4's open decisions** (owner):
+
+- **Global hotkeys are on by default.** `ShortcutRegistry::isGlobal` reads a Global
+  never set as on, for EQ, Mute, Next and Previous preset, as the boards show; the
+  tray shows their keys from the start. Said once before the change: a global
+  Ctrl+Left and Ctrl+Right take word jumps from every other app while Isotone runs;
+  each can be turned off or rebound in Settings, Shortcuts. The registry test
+  failed on the old default (4 checks); the tray test now expects the keys by
+  default.
+- **Preset edits reach other outputs on save**, as they do: switching outputs loads
+  that output's preset and asks to save first.
+- **Output names that differ by a little stay as they are**: they are the devices'
+  names, which the app cannot change.
+- Launch at sign-in's check after a restart is his, later.
+
+`ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
+
 ---
 
 # Where things stand (2026-09-16)
@@ -2956,7 +2980,7 @@ line's, not halfway: #2F3237 in the dark theme, from #383C41 (minor #1A1D22, maj
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
-| 5. EQ by ear | sweep complete and approved by the owner in use; A/B not started | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
+| 5. EQ by ear | complete: the sweep, approved by the owner in use; A/B set aside for later (owner) | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
 `core (ubuntu-latest)` and `reference data is reproducible`. The first push
@@ -3015,20 +3039,17 @@ the toggles write and remove it correctly (checked against a sandboxed key, the
 real one untouched). Windows actually running that key at sign-in is the one
 thing left, for whenever he next restarts.
 
-Open decisions for the owner: global hotkeys off by default (the boards show them
-on); live propagation of preset edits to other outputs (now on save); and whether
-a preset's row should tell two outputs apart when their names are nearly the same
-("CABLE Input" and "CABLE In" cost him an evening's confusion).
+The open decisions were settled on 2026-09-16: global hotkeys on by default,
+preset edits reaching other outputs on save, and output names left as the devices
+give them.
 
 **Stage 5** (EQ by ear): the sweep is done (2026-09-16), with what the owner added
 while using it: New preset, adding to a peak already there, the channel taken from
 the top bar, a press on the graph moving the tone. Along the way, from his use:
 short windows (Settings, General, Short window), always on top, the graph repainting
 only the spectrum on each frame (the maximized lag), the frequency grid's three
-weights, and the placeholder icon. **A/B is next**: reference and test tones, the
-test level, recorded points and the refit (plan 8.4, the `EqByEarAB` board), kept
-separate so it can be removed. Open for A/B: which bands a refit may replace in the
-fresh preset, and whether points are kept.
+weights, and the placeholder icon. **A/B is set aside for later** (owner): plan 8.4
+and the `EqByEarAB` board are its design if it is wanted.
 **Stage 6** (packaging) is not started.
 
 ## State of the owner's machine

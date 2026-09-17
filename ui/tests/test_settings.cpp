@@ -213,8 +213,8 @@ TEST_CASE("shortcut defaults") {
     for (const char* id : {"eq", "mute", "nextPreset", "previousPreset"}) {
         CAPTURE(id);
         CHECK(r.globalCapable(QString::fromLatin1(id)));
-        // Off until turned on: a global Ctrl+Left takes word navigation from every other app.
-        CHECK_FALSE(r.isGlobal(QString::fromLatin1(id)));
+        // On until turned off (owner, 2026-09-16), as the boards show them.
+        CHECK(r.isGlobal(QString::fromLatin1(id)));
     }
     for (const char* id : {"savePreset", "undo", "redo", "delete", "gain"}) {
         CAPTURE(id);
@@ -391,11 +391,12 @@ TEST_CASE("the tray menu") {
     // EQ, Mute, -, Output, Preset, -, Open Isotone, Quit
     const QList<QAction*> items = menu->actions();
     REQUIRE(items.size() == 8);
-    // Keys only beside an action whose Global is on (off by default): elsewhere they do nothing.
+    // Keys only beside an action whose Global is on (on by default): elsewhere they do nothing.
+    CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+E"));
+    CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+M"));
+    shortcuts.setGlobal(QStringLiteral("eq"), false);
     CHECK(items[0]->text() == QStringLiteral("EQ"));
-    CHECK(items[1]->text() == QStringLiteral("Mute"));
     shortcuts.setGlobal(QStringLiteral("eq"), true);
-    shortcuts.setGlobal(QStringLiteral("mute"), true);
     CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+E"));
     CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+M"));
     shortcuts.setGlobal(QStringLiteral("mute"), false);
