@@ -133,6 +133,13 @@ public:
     static constexpr size_t kSpectrumPoints = 320;
     static constexpr double kSpectrumRangeDb = 60.0;   // EqSession::kSpectrumRangeDb, the same scale
     static void smoothForDisplay(std::vector<double>& db, double amount);
+
+    // Which of `y` a polyline needs to stay within `tol` of all of it:
+    // Ramer-Douglas-Peucker on the vertical distance alone, which is the whole
+    // error where x is one sample per pixel and monotonic. The ends are always
+    // kept. Drawing a band's bell is dominated by its segment count, and most of
+    // a bell is flat, so this is what keeps a drag cheap with many bands.
+    static std::vector<uint8_t> simplifyKeep(const std::vector<double>& y, double tol);
     static QPainterPath curveThrough(const std::vector<QPointF>& points);
 
 signals:

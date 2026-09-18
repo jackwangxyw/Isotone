@@ -24,6 +24,13 @@ namespace {
 
 constexpr double kSampleRate = 48000.0;
 
+// How far a drawn bell may sit from the sampled one, in pixels. Against the
+// unsimplified rendering of a set including a Q 12 and a Q 30 band, 0.05 moves
+// 0.5% of the pixels by at most 8 of 255 (mean 1.9), which is a fraction of one
+// antialiased edge. Loosening it does not buy speed: 0.3 costs the same and
+// moves those pixels by up to 36.
+constexpr double kSimplifyPx = 0.05;
+
 QString minus_sign(QString s) { return s.replace(QLatin1Char('-'), QChar(0x2212)); }
 
 }  // namespace
@@ -190,6 +197,37 @@ bool ResponseGraph::onView(int row) const {
     return isotone::band_affects_channel(*b, viewChannel());
 }
 
+std::vector<uint8_t> ResponseGraph::simplifyKeep(const std::vector<double>& y, double tol) {
+    const size_t n = y.size();
+    std::vector<uint8_t> keep(n, 0);
+    if (n == 0) return keep;
+    keep[0] = keep[n - 1] = 1;
+    if (n < 3) return keep;
+
+    std::vector<std::pair<size_t, size_t>> todo{{0, n - 1}};
+    while (!todo.empty()) {
+        const auto [lo, hi] = todo.back();
+        todo.pop_back();
+        if (hi <= lo + 1) continue;
+        const double slope = (y[hi] - y[lo]) / static_cast<double>(hi - lo);
+        double worst = tol;
+        size_t at = 0;
+        for (size_t i = lo + 1; i < hi; ++i) {
+            const double d = std::abs(y[i] - (y[lo] + slope * static_cast<double>(i - lo)));
+            if (d > worst) {
+                worst = d;
+                at = i;
+            }
+        }
+        // Nothing past the tolerance: the chord already stands for this span.
+        if (at == 0) continue;
+        keep[at] = 1;
+        todo.push_back({lo, at});
+        todo.push_back({at, hi});
+    }
+    return keep;
+}
+
 // A Gaussian across neighbouring points, in dB. Settings, General, Spectrum,
 // Smoothing: 0 leaves the points alone, 1 is a window about an octave wide (the
 // points are 1/32 of a decade apart), and the ends average over what there is.
@@ -337,11 +375,39 @@ void ResponseGraph::paint(QPainter* p) {
     if (!session_ || part_ == Grid || part_ == Spectrum) return;
 
     const isotone::EqState& state = session_->state();
+    const auto y_at = [&](const std::vector<double>& db, size_t i) {
+        return std::clamp(yOf(db[i]), kTop - 2.0, kTop + ph + 2.0);
+    };
     const auto polyline = [&](const std::vector<double>& db) {
         QPainterPath path;
         for (size_t i = 0; i < n; ++i) {
-            const QPointF pt(x_at(i), std::clamp(yOf(db[i]), kTop - 2.0, kTop + ph + 2.0));
+            const QPointF pt(x_at(i), y_at(db, i));
             i == 0 ? path.moveTo(pt) : path.lineTo(pt);
+        }
+        return path;
+    };
+
+    // The same curve with the points that carry no shape left out: the cost of a
+    // bell is its segment count, and most of a bell is flat. Ramer-Douglas-Peucker
+    // on the vertical distance alone, which is the whole error here because x is
+    // one sample per pixel and monotonic. kSimplifyPx bounds how far the drawn
+    // line may sit from the sampled one, so a sharp band keeps every point it
+    // needs and a wide one keeps almost none.
+    //
+    // Sampling more coarsely instead would have been one line, but it blunts
+    // exactly the high-Q bells: at half the points a Q 30 band moved a pixel by
+    // 124 of 255, against the 2 of 255 that the layer split was held to.
+    const auto simplified = [&](const std::vector<double>& db) {
+        std::vector<double> y(n);
+        for (size_t i = 0; i < n; ++i) y[i] = y_at(db, i);
+        const std::vector<uint8_t> keep = simplifyKeep(y, kSimplifyPx);
+        QPainterPath path;
+        bool first = true;
+        for (size_t i = 0; i < n; ++i) {
+            if (!keep[i]) continue;
+            const QPointF pt(x_at(i), y[i]);
+            first ? path.moveTo(pt) : path.lineTo(pt);
+            first = false;
         }
         return path;
     };
@@ -358,7 +424,7 @@ void ResponseGraph::paint(QPainter* p) {
                 c = band_colours_[static_cast<int>((b->id - 1) % static_cast<uint32_t>(band_colours_.size()))].value<QColor>();
                 c.setAlphaF(0.5f);
             }
-            p->strokePath(polyline(db), QPen(c, 1.25));
+            p->strokePath(simplified(db), QPen(c, 1.25));
         }
     }
 

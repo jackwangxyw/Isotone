@@ -2965,6 +2965,55 @@ points are kept). Stage 5 is done without it.
 
 `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290.
 
+## 2026-09-17: Dragging a handle lagged maximized, and it was the bells
+
+The owner, after the maximized spectrum lag was fixed: maximized, dragging the
+handles on the graph makes everything lag. The layer split held, so this was
+something else.
+
+Timing inside `ResponseGraph::paint` at a 2168 px plot width, per paint:
+
+```
+  bands   bell maths   bell path   bell stroke   composite
+      1         0.07        0.05          3.05        0.56
+     10         0.73        0.42         27.38        0.80
+     24         1.83        1.09        109.84        1.47
+```
+
+`strokePath` on the bells is 97% of it and grows with the band count, so at 24
+bands one curves paint took about 110 ms: six dropped frames for every mouse
+move. Not the edit path, which costs 0.175 ms for the pair of calls a drag makes,
+and not the spectrum. Auto preamp adds about 1 ms a pair and is not the problem
+either. `drawPolyline` in place of `strokePath` changed nothing, so it is the
+antialiased rasterisation itself, around 1.4 microseconds a segment, and each
+bell carried one segment per pixel of plot width.
+
+**Each bell is now simplified before it is stroked**, by Ramer-Douglas-Peucker on
+the vertical distance alone, which is the whole error where x is one sample per
+pixel and monotonic. Most of a bell is flat, and those points cost stroke time
+while carrying no shape.
+
+**Sampling more coarsely instead would have been one line, and it is wrong.** It
+blunts exactly the high-Q bells: against the unsimplified rendering of a set
+including a Q 12 and a Q 30 band, halving the points moved pixels by up to 124 of
+255. The simplification at 0.05 px moves 0.5% of the pixels by at most 8 of 255,
+mean 1.9, which is a fraction of one antialiased edge. Loosening the tolerance
+buys no speed, so it is left tight: 0.3 px costs the same and moves those pixels
+by up to 36.
+
+`ResponseGraph::simplifyKeep` is a static member beside `smoothForDisplay` so it
+can be tested: a straight line keeps only its ends, a one-pixel spike keeps the
+spike and its neighbours, a bell keeps under half its points, and every point
+dropped stays within the tolerance of the line that replaced it.
+
+End-to-end drag timings were too noisy on a loaded machine to tune against (ten
+bands swung between 28 and 45 ms a step across identical configurations); the
+in-paint figures above are the ones to trust. This is a large improvement rather
+than a complete fix at high band counts. If it is still not smooth, the
+structural answer is to keep the dragged band's bell with the composite and leave
+the other bells on a layer that does not repaint during a drag, which makes the
+cost one bell a frame whatever the band count.
+
 ## 2026-09-17: Linux, the targets and the environment
 
 **Targets** (owner): every desktop and session, as EasyEffects does: Wayland and
@@ -3244,6 +3293,80 @@ actual rate change. The systemd user unit is written and parses, but has never b
 installed, because that wants a package (stage 6's Linux half) rather than a
 hand-copied file.
 
+
+## 2026-09-17: The Linux daemon finished to the edge of stage 4
+
+Everything the previous entry listed as not done is done, and each piece is
+measured through real audio rather than inspected. `linux/daemon/measure.py`:
+
+```
+      case    freq       flat   with band   measured   analytic     error
+      live    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+      cold    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+      ring    1000                -18.021               vs sink    +0.000
+      live     100     -6.021      -6.181     -0.161     -0.161    +0.001
+      cold     100     -6.021      -6.181     -0.161     -0.161    +0.001
+     44100    1000     -6.021     -18.021    -12.000    -12.000    +0.000
+       5.1    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+```
+
+**The audio ring.** The daemon writes the post-EQ audio into the region's ring,
+which is what the UI's spectrum drains. The writer takes interleaved frames and a
+filter hands over planar ones, so the audio thread interleaves into a buffer
+sized on the main loop with everything else, and the ring is claimed, given its
+channel count and prefaulted there too, exactly as `IsoApo::LockForProcess` does
+it. `isotone-state capture` reads it back, the counterpart of `isotone-shm
+capture`. The `ring` row above is that readback against what reached the sink:
+the same audio, so the same figure, and it agrees to +0.000 dB.
+
+**Following the default sink.** Without `--sink`, the daemon binds WirePlumber's
+`default` metadata and moves with `default.audio.sink`: the output links, the
+shared region and the saved state all follow together, and the processor is
+re-sized because the new sink may run at another rate.
+
+It never targets its own virtual sink. That is not a corner case but the ordinary
+state: making Isotone the default is how applications come to play into it, and
+feeding it back to itself would be a loop, since its monitor is the core's input.
+Told to do that, the daemon keeps feeding whatever real sink it already had.
+
+The limit that leaves: a daemon started while Isotone is *already* the default
+has nothing to feed until a real sink is made default once. `--sink` is the way
+round it, and the honest fix is for the UI to set the target, which is stage 4's
+job rather than a guess made here about which sink the owner meant.
+
+**A rate change, exercised rather than assumed.** `pw-metadata -n settings 0
+clock.force-rate 44100` mid-stream: the audio thread finds a shape it cannot
+serve, passes that block through untouched, and asks the main loop to re-size.
+The published rate follows 48000 to 44100 and back, the heartbeat keeps climbing
+across both changes (144, 251, 309), and the measurement above still reads
+-12.000 at the forced rate.
+
+**Channels past stereo.** A layout table maps PipeWire's channel names to the
+speaker bits the core addresses bands, routing and bass management by, and drives
+three things at once: the `audio.position` the virtual sink is created with, the
+DSP port names, and the `speaker_mask` given to `remap_channels` and published in
+the header. `--channels 1, 2, 4, 6 or 8`. The `5.1` row is a six-channel core
+into a six-channel sink.
+
+Ports are matched by speaker name, never by position in a sorted list. A 5.1 sink
+sorts `playback_FC` before `playback_FL`, so taking the first two would quietly
+send the left channel to the centre speaker; the same trap was in the measurement
+rig and is fixed there too. A target that does not carry one of our positions
+does not get that channel and the daemon says so ("isotone_hw carries 2 of our 6
+channels"), which is how a 5.1 core feeding a stereo sink still plays its front
+pair rather than nothing.
+
+**One measurement bug worth recording,** because it looked like a daemon fault.
+The ring first read 0.600 dB low. The capture runs longer than the tone and the
+sink keeps running in between, so the ring holds silence at both ends, and
+projecting onto the reference phasor across that pulls the level down. The window
+has to find the signal first, which is what the sink's own capture already did.
+Nothing was wrong with the ring.
+
+**Still not done**, and all of it is stage 4 or later: the UI's Windows layer,
+packaging, and a daemon that is told its target by the UI rather than by a flag
+or the session manager.
+
 ---
 
 # Where things stand (2026-09-16)
@@ -3306,12 +3429,12 @@ points IntelliSense at `build/compile_commands.json`.
 
 **Stage 3** remaining:
 
-1. **Linux daemon**: done and measured, see "Stage 3's Linux half, the daemon,
-   measured" (2026-09-17). Stage 1c is done too. What is left on the Linux side is
-   the default sink through WirePlumber metadata, the audio ring the UI's spectrum
-   reads, a rate change actually exercised, then item 4 (the UI's Windows layer)
-   and item 5 (packaging). The Mint VM is wanted when the UI port starts, not
-   before.
+1. **Linux daemon**: done and measured, through "The Linux daemon finished to the
+   edge of stage 4" (2026-09-17). Stage 1c, the daemon, the transport, the audio
+   ring, following the default sink, a rate change and channels to 7.1 are all
+   done and measured; CI has a linux-host job that runs both measurements under a
+   PipeWire of its own. What is left on the Linux side is item 4 (the UI's Windows
+   layer) and item 5 (packaging). The Mint VM is wanted when the UI port starts.
 
 **Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
 real install, repair and uninstall from Devices with the Windows prompt;

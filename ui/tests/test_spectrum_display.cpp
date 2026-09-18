@@ -223,3 +223,79 @@ TEST_CASE("the spectrum is drawn inside the plot, even where the curve runs alon
     CHECK(under == 0);
     CHECK(over == 0);
 }
+
+// The bells' simplification (ResponseGraph::simplifyKeep). A band's bell costs
+// what its segment count costs, and most of a bell is flat: dragging a handle
+// maximized with 24 bands spent 110 ms a frame stroking bells, against 1.8 ms
+// computing them (2026-09-17).
+
+// Every point the simplification drops must still be within the tolerance of
+// the line that replaces it, or the drawn bell is not the computed one.
+static double worstError(const std::vector<double>& y, const std::vector<uint8_t>& keep) {
+    double worst = 0.0;
+    size_t last = 0;
+    for (size_t i = 1; i < y.size(); ++i) {
+        if (!keep[i]) continue;
+        const double slope = (y[i] - y[last]) / static_cast<double>(i - last);
+        for (size_t j = last + 1; j < i; ++j)
+            worst = std::max(worst, std::abs(y[j] - (y[last] + slope * static_cast<double>(j - last))));
+        last = i;
+    }
+    return worst;
+}
+
+TEST_CASE("a straight line needs only its ends") {
+    std::vector<double> y(500);
+    for (size_t i = 0; i < y.size(); ++i) y[i] = 10.0 + 0.25 * static_cast<double>(i);
+    const std::vector<uint8_t> keep = ResponseGraph::simplifyKeep(y, 0.05);
+    CHECK(std::count(keep.begin(), keep.end(), uint8_t{1}) == 2);
+    CHECK(keep.front() == 1);
+    CHECK(keep.back() == 1);
+}
+
+TEST_CASE("a flat run with a sharp peak keeps the peak") {
+    std::vector<double> y(1000, 100.0);
+    y[500] = 40.0;   // one pixel column, 60 px tall: a high-Q band
+    const std::vector<uint8_t> keep = ResponseGraph::simplifyKeep(y, 0.05);
+    CHECK(keep[500] == 1);
+    // Its neighbours too, or the peak would be a wide triangle instead of a spike.
+    CHECK(keep[499] == 1);
+    CHECK(keep[501] == 1);
+    CHECK(worstError(y, keep) <= 0.05);
+}
+
+TEST_CASE("a bell is simplified but stays within the tolerance") {
+    // A peaking band's shape in pixels: smooth, curved everywhere, flat at the ends.
+    std::vector<double> y(2168);
+    for (size_t i = 0; i < y.size(); ++i) {
+        const double t = (static_cast<double>(i) - 1100.0) / 90.0;
+        y[i] = 440.0 - 260.0 / (1.0 + t * t);
+    }
+    const std::vector<uint8_t> keep = ResponseGraph::simplifyKeep(y, 0.05);
+    const auto kept = static_cast<size_t>(std::count(keep.begin(), keep.end(), uint8_t{1}));
+
+    CHECK(worstError(y, keep) <= 0.05);
+    // Worth doing at all: the flat tails are most of the plot.
+    CHECK(kept < y.size() / 2);
+    CHECK(kept > 20);   // and it has not thrown the shape away
+}
+
+TEST_CASE("a looser tolerance keeps fewer points, and both stay inside their own") {
+    std::vector<double> y(1024);
+    for (size_t i = 0; i < y.size(); ++i) {
+        const double t = (static_cast<double>(i) - 500.0) / 60.0;
+        y[i] = 300.0 - 200.0 / (1.0 + t * t);
+    }
+    const std::vector<uint8_t> tight = ResponseGraph::simplifyKeep(y, 0.05);
+    const std::vector<uint8_t> loose = ResponseGraph::simplifyKeep(y, 1.0);
+    CHECK(std::count(loose.begin(), loose.end(), uint8_t{1}) <
+          std::count(tight.begin(), tight.end(), uint8_t{1}));
+    CHECK(worstError(y, tight) <= 0.05);
+    CHECK(worstError(y, loose) <= 1.0);
+}
+
+TEST_CASE("simplifyKeep handles the degenerate sizes") {
+    CHECK(ResponseGraph::simplifyKeep({}, 0.05).empty());
+    CHECK(ResponseGraph::simplifyKeep({5.0}, 0.05) == std::vector<uint8_t>{1});
+    CHECK(ResponseGraph::simplifyKeep({5.0, 7.0}, 0.05) == std::vector<uint8_t>{1, 1});
+}
