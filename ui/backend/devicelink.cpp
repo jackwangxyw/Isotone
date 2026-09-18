@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cwctype>
 #include <fstream>
+#include <cctype>
 #include <sstream>
 
 namespace isotone::ui {
@@ -43,6 +44,17 @@ std::string narrow(const std::wstring& w) {
 }
 
 }  // namespace
+
+// The identity travels narrow so that every backend can hold it; the Win32 calls
+// want it wide. A canonical endpoint GUID is ASCII, so this is lossless.
+std::wstring widen_id(const std::string& id) {
+    std::wstring w;
+    w.reserve(id.size());
+    for (char c : id) w += static_cast<wchar_t>(static_cast<unsigned char>(c));
+    return w;
+}
+
+std::string narrow_id(const std::wstring& id) { return narrow(id); }
 
 DeviceLink::DeviceLink(std::wstring region_namespace, std::wstring compat_config_dir, int retry_for_ms)
     : namespace_(std::move(region_namespace)),
@@ -80,7 +92,7 @@ bool DeviceLink::ensure_region() {
     const ULONGLONG now = GetTickCount64();
     if (last_open_attempt_ != 0 && now - last_open_attempt_ < kReopenIntervalMs) return false;
     last_open_attempt_ = now;
-    const std::wstring name = isotone::win::mapping_name(namespace_.c_str(), target_.guid);
+    const std::wstring name = isotone::win::mapping_name(namespace_.c_str(), widen_id(target_.guid));
     if (mapping_.open(name) != ERROR_SUCCESS) return false;
     region_opened_ = true;
     return true;
@@ -135,7 +147,9 @@ DWORD DeviceLink::save(const EqState& state, const EqState& engine_state) {
     return ERROR_SUCCESS;
 }
 
-std::wstring DeviceLink::saved_state_path() const { return isotone::ui::saved_state_path(namespace_, target_.guid); }
+std::wstring DeviceLink::saved_state_path() const {
+    return isotone::ui::saved_state_path(namespace_, widen_id(target_.guid));
+}
 
 bool DeviceLink::load_current(EqState* out) {
     if (target_.backend == Backend::native) {
@@ -159,12 +173,14 @@ bool DeviceLink::load_current(EqState* out) {
         std::stringstream text;
         text << in.rdbuf();
         const ChannelLayout layout{target_.layout.channels, target_.layout.speaker_mask};
-        const std::wstring bare = target_.guid.size() == 38 ? target_.guid.substr(1, 36) : target_.guid;
+        const std::string bare = target_.guid.size() == 38 ? target_.guid.substr(1, 36) : target_.guid;
         for (const isotone::compat::ParsedDevice& d :
              isotone::compat::parse_isotone_file(text.str(), [&](const std::string&) { return layout; })) {
-            std::wstring guid(d.endpoint_guid.begin(), d.endpoint_guid.end());
-            for (wchar_t& c : guid) c = static_cast<wchar_t>(towlower(c));
-            if (guid.find(bare) == std::wstring::npos) continue;
+            // Both sides are narrow now, so the identity is compared where it
+            // lives instead of being widened to meet a wide target.
+            std::string guid = d.endpoint_guid;
+            for (char& c : guid) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (guid.find(bare) == std::string::npos) continue;
             *out = d.state;
             return true;
         }
@@ -205,7 +221,7 @@ void DeviceLink::compat_thread() {
         }
         if (!request) continue;
         isotone::compat::DeviceConfig device;
-        device.endpoint_guid = narrow(request->target.guid);
+        device.endpoint_guid = request->target.guid;
         device.layout = ChannelLayout{request->target.layout.channels, request->target.layout.speaker_mask};
         device.sample_rate = request->target.layout.sample_rate;
         device.state = request->state;
@@ -250,7 +266,7 @@ uint64_t DeviceLink::compat_writes() const {
 
 void DeviceLink::start_capture() {
     capture_ = std::make_unique<isotone::compat::LoopbackCapture>();
-    if (FAILED(capture_->start(narrow(target_.guid), 2000))) capture_.reset();
+    if (FAILED(capture_->start(target_.guid, 2000))) capture_.reset();
 }
 
 uint32_t DeviceLink::read_audio(float* out, uint32_t max_frames, uint32_t* channels, double* sample_rate) {

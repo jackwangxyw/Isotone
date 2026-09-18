@@ -33,7 +33,7 @@ namespace {
 constexpr uint32_t k71 = 0x63F, k51 = 0x60F;
 
 OutputTarget surround(uint32_t channels = 8, uint32_t mask = k71, Backend backend = Backend::none,
-                      std::wstring guid = L"") {
+                      std::string guid = "") {
     return OutputTarget{std::move(guid), backend, OutputLayout{channels, mask, 48000}};
 }
 
@@ -94,7 +94,7 @@ TEST_CASE("a band's target on a surround output: its mask and label") {
     CHECK(label() == QStringLiteral("Heights"));
 
     // Stereo keeps its labels.
-    session.useTarget(surround(2, 0x3, Backend::none, L"{8f4d2a10-0000-4000-8000-0000000057e0}"));
+    session.useTarget(surround(2, 0x3, Backend::none, "{8f4d2a10-0000-4000-8000-0000000057e0}"));
     session.loadState(&s);
     CHECK(label() == QStringLiteral("L+R"));
     QFile::remove(temp_path("targets.json"));
@@ -152,7 +152,7 @@ TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state
     QDir(dir).removeRecursively();
     QDir().mkpath(dir);
     AppPaths::setCompatConfigDir(dir);
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000c0a7e}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000c0a7e}";
     const auto written = [&](const std::function<bool(const EqState&)>& want) {
         for (int i = 0; i < 100; ++i) {
             // Shared for delete too: the writer replaces the file while it is read.
@@ -198,7 +198,7 @@ TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state
 }
 
 TEST_CASE("solo and test tones reach the output and are never saved") {
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000050101e}";   // no such endpoint: no region, no audio
+    const std::string guid = "{8f4d2a10-0000-4000-8000-00000050101e}";   // no such endpoint: no region, no audio
     // A Local\ link: the saved state is the self test's, never %ProgramData%.
     EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
     Speakers speakers(&session);
@@ -210,7 +210,7 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
     s.speakers.swap_left_right = true;
     s.speakers.muted = 0x80;
     session.loadState(&s);
-    const std::wstring path = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(true), guid);
+    const std::wstring path = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(true), isotone::ui::widen_id(guid));
     std::filesystem::remove(path);
     const auto saved = [&] {
         ParamBlock block{};
@@ -293,7 +293,7 @@ TEST_CASE("a failure of a tone already stopped does not end test tones") {
     EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("stale.json")));
-    session.useTarget(surround(8, k71, Backend::native, L"{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
+    session.useTarget(surround(8, k71, Backend::native, "{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
     QSignalSpy failed(&speakers, &Speakers::toneFailed);
     speakers.setTestTones(true);   // its tone fails on its thread
     Sleep(1000);                   // the failure is queued by now
@@ -353,7 +353,7 @@ TEST_CASE("bass management takes its ranges in 10 Hz steps") {
 TEST_CASE("distances are kept per output and read back from the delays") {
     const QString store = temp_path("distance.json");
     QFile::remove(store);
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000000d157}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-00000000d157}";
     EqSession session;
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(store));
@@ -384,7 +384,7 @@ TEST_CASE("distances are kept per output and read back from the delays") {
 TEST_CASE("speaker groups are added, kept per output, and removed") {
     const QString store = temp_path("groups.json");
     QFile::remove(store);
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-000000009009}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-000000009009}";
     EqSession session;
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(store));
@@ -407,7 +407,7 @@ TEST_CASE("speaker groups are added, kept per output, and removed") {
     again.setStore(SpeakerStore(store));
     other.useTarget(surround(8, k71, Backend::none, guid));
     CHECK(again.groups().size() == 5);
-    other.useTarget(surround(8, k71, Backend::none, L"{8f4d2a10-0000-4000-8000-00000000aaaa}"));
+    other.useTarget(surround(8, k71, Backend::none, "{8f4d2a10-0000-4000-8000-00000000aaaa}"));
     CHECK(again.groups().size() == 4);   // another output's groups
 
     speakers.setShowing(QStringLiteral("group:Heights"));
@@ -480,7 +480,7 @@ TEST_CASE("changing the layout calls the layout setter for the output, with test
     CHECK(speakers.setLayout(QStringLiteral("5.1")) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));   // no output
     CHECK(calls == 0);
 
-    session.useTarget(surround(8, k71, Backend::none, L"{8f4d2a10-0000-4000-8000-00000000cafe}"));
+    session.useTarget(surround(8, k71, Backend::none, "{8f4d2a10-0000-4000-8000-00000000cafe}"));
     CHECK(speakers.layoutName() == QStringLiteral("7.1"));
     CHECK(speakers.layoutChannels(QStringLiteral("5.1")) == 6);
     CHECK(speakers.layoutChannels(QStringLiteral("Stereo")) == 2);

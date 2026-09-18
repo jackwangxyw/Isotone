@@ -70,7 +70,7 @@ std::string read_text(const std::filesystem::path& path) {
 TEST_CASE("an Equalizer APO write blocked by another reader is tried again, not lost") {
     const std::filesystem::path dir = scratch_dir(L"isotone-compat-retry");
     const std::filesystem::path file = dir / "Isotone.txt";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000000aa}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000000aa}";
     {
         DeviceLink link(L"Local\\unused.", dir.wstring());
         link.set_target(OutputTarget{guid, Backend::equalizer_apo, OutputLayout{2, 0x3, 48000}});
@@ -108,7 +108,7 @@ TEST_CASE("an Equalizer APO write blocked by another reader is tried again, not 
 TEST_CASE("a write that stays blocked stops being retried and keeps its error") {
     const std::filesystem::path dir = scratch_dir(L"isotone-compat-retry3");
     const std::filesystem::path file = dir / "Isotone.txt";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000000cc}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000000cc}";
     {
         DeviceLink link(L"Local\\\\unused.", dir.wstring(), 300);   // give up after 300 ms, not 10 s
         link.set_target(OutputTarget{guid, Backend::equalizer_apo, OutputLayout{2, 0x3, 48000}});
@@ -134,7 +134,7 @@ TEST_CASE("a write that stays blocked stops being retried and keeps its error") 
 TEST_CASE("a newer edit replaces the one being retried") {
     const std::filesystem::path dir = scratch_dir(L"isotone-compat-retry2");
     const std::filesystem::path file = dir / "Isotone.txt";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000000bb}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000000bb}";
     {
         DeviceLink link(L"Local\\unused.", dir.wstring());
         link.set_target(OutputTarget{guid, Backend::equalizer_apo, OutputLayout{2, 0x3, 48000}});

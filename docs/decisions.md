@@ -3540,6 +3540,44 @@ under `pipefail` before any measurement.
 
 All measurements still pass, including the new `stale` case, from a clean build.
 
+
+## 2026-09-18: The identity goes narrow
+
+`OutputTarget::guid` is a `std::string`. It is the one thing every backend has to
+agree on: an endpoint GUID as "{lower-case}" on Windows, a PipeWire `node.name` on
+Linux. A canonical GUID is ASCII, so nothing is lost, and the Windows backend
+widens at its own edge through `widen_id` and `narrow_id`.
+
+The identity is narrow all the way through the model now, not converted at each
+use: `Outputs::Output::guid`, `default_guid_`, `current_guid_`, `selectGuid`,
+`Speakers::guid_`, `EqByEar::stream_guid_` and `ImportPreview`'s. Wide strings
+survive only where they are genuinely Win32's: device and connection names, the
+devicetool's arguments, `SpeakerStore`'s keys, and the calls into
+`isotone::devices` and `isotone::win`.
+
+**The header count was a bad estimate of the work.** 31 `std::wstring` in `ui/src`
+headers suggested a wide refactor; the first build gave five errors, all in
+`devicelink.cpp`, because the Qt layer carries the identity as a `QString`. It
+then grew to 34 and 40 as each translation unit got its turn, and settled at
+around 90 sites, nearly all one-line conversions at a boundary. The compiler found
+every one.
+
+Two of them were mine, from sweeping with a regular expression: `e.guid` in
+`outputs.cpp` and `devicestatus.cpp` is the *devices* layer's endpoint, which is
+legitimately wide, and a pattern that matched "anything ending in .guid" narrowed
+it. Both were caught by the same build. A regular expression does not know which
+layer a name belongs to, and the two layers here spell the field the same way.
+
+`ui_tests` 45943, `ui_model_tests` 2002, `ui_qml_tests` 290: the same counts as
+before the change, which is what says the behaviour did not move. Linux still
+builds and its tests pass.
+
+What this unblocks is the point: a Linux `DeviceLink` can now name a sink without
+pretending it has a GUID. Still Windows-only in the header: the `DWORD` returns,
+the `Backend` enum's `equalizer_apo`, and the region namespace and compat
+directory the constructor takes. Those are the next seam, and they only matter
+when the Linux backend is written.
+
 ---
 
 # Where things stand (2026-09-16)

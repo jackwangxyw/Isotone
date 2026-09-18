@@ -212,7 +212,7 @@ int main(int argc, char* argv[]) {
 
     if (parser.isSet(output)) {
         auto* outputs = engine.singletonInstance<Outputs*>("Isotone", "Outputs");
-        if (!outputs || !outputs->selectGuid(parser.value(output).toStdWString())) {
+        if (!outputs || !outputs->selectGuid(parser.value(output).toStdString())) {
             std::fprintf(stderr, "%s is not a working output\n", qPrintable(parser.value(output)));
             return 1;
         }

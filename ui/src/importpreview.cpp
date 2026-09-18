@@ -14,7 +14,7 @@
 #include "isotone/param_block.h"
 
 ImportPreview::ImportPreview(const QString& file_name, std::string text, std::vector<isotone::ui::OutputTarget> outputs,
-                             const std::wstring& guid, QObject* parent)
+                             const std::string& guid, QObject* parent)
     : QObject(parent), file_name_(file_name), text_(std::move(text)), outputs_(std::move(outputs)) {
     for (const isotone::ui::OutputTarget& t : outputs_)
         if (t.guid == guid) target_ = t;
@@ -32,7 +32,7 @@ void ImportPreview::setOutputGuid(const QString& guid) {
         emit changed();
         return;
     }
-    const std::wstring g = guid.toStdWString();
+    const std::string g = guid.toStdString();
     if (!for_every_output_ && g == target_.guid) return;
     for (const isotone::ui::OutputTarget& t : outputs_) {
         if (t.guid != g) continue;

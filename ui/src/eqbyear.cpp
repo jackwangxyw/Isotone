@@ -251,7 +251,7 @@ void EqByEar::startStream() {
     stream_mask_ = toneMask();
     QPointer<EqByEar> self(this);
     tone_.start(
-        stream_guid_, stream_mask_,
+        isotone::ui::widen_id(stream_guid_), stream_mask_,
         [this](float* out, uint32_t frames, double sample_rate) { sine_.render(out, frames, sample_rate); },
         [self, generation](HRESULT hr, const char*) {
             QMetaObject::invokeMethod(

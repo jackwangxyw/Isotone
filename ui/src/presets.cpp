@@ -147,7 +147,7 @@ void Presets::rebuild() {
 // ---------------------------------------------------------------------------
 // The current output
 
-QString Presets::currentGuid() const { return session_ ? QString::fromStdWString(session_->target().guid) : QString(); }
+QString Presets::currentGuid() const { return session_ ? QString::fromStdString(session_->target().guid) : QString(); }
 
 Presets::OutputMemory& Presets::memory() { return memory_[currentGuid()]; }
 
@@ -166,7 +166,7 @@ QString Presets::currentName() const { return current_name_; }
 QString Presets::outputName(const QString& guid) const {
     if (outputs_) {
         for (const OutputInfo& o : outputs_())
-            if (QString::fromStdWString(o.target.guid).compare(guid, Qt::CaseInsensitive) == 0) return o.name;
+            if (QString::fromStdString(o.target.guid).compare(guid, Qt::CaseInsensitive) == 0) return o.name;
     }
     return store_.outputName(guid);
 }
@@ -281,7 +281,7 @@ void Presets::propagate(const QString& id) {
     const isotone::EqState eq = p->eq;
     const QString current = currentGuid();
     for (const OutputInfo& o : outputs_()) {
-        const QString guid = QString::fromStdWString(o.target.guid);
+        const QString guid = QString::fromStdString(o.target.guid);
         if (guid == current || store_.assignment(guid) != id) continue;
         memory_.erase(guid);
         writeTo(o.target, eq);
@@ -383,7 +383,7 @@ void Presets::assign(const QString& guid, const QString& name) {
     memory_.erase(guid);
     if (p && outputs_) {
         for (const OutputInfo& o : outputs_())
-            if (QString::fromStdWString(o.target.guid) == guid) writeTo(o.target, p->eq);
+            if (QString::fromStdString(o.target.guid) == guid) writeTo(o.target, p->eq);
     }
     if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1), {AssignedRole, LoadableRole});
 }
@@ -465,7 +465,7 @@ ImportPreview* Presets::openImport(const QUrl& file) {
     }
     if (session_ && session_->target().backend == isotone::ui::Backend::none) targets.push_back(session_->target());
     return new ImportPreview(QFileInfo(f).fileName(), decode(f.readAll()), std::move(targets),
-                             session_ ? session_->target().guid : std::wstring());
+                             session_ ? session_->target().guid : std::string());
 }
 
 QString Presets::importPreset(ImportPreview* preview, const QString& name) {
@@ -480,7 +480,7 @@ QString Presets::importPreset(ImportPreview* preview, const QString& name) {
     const QString id = store_.add(name, eq);
     if (id.isEmpty()) return QString();
     // For every output: loaded here, and no other output written.
-    const QString guid = preview->forEveryOutput() ? currentGuid() : QString::fromStdWString(target.guid);
+    const QString guid = preview->forEveryOutput() ? currentGuid() : QString::fromStdString(target.guid);
     rebuild();
     if (guid == currentGuid()) {
         apply(*store_.byId(id));
@@ -497,7 +497,7 @@ QVariantList Presets::outputChoices() const {
     if (!outputs_) return list;
     const QString current = currentGuid();
     for (const OutputInfo& o : outputs_()) {
-        const QString guid = QString::fromStdWString(o.target.guid);
+        const QString guid = QString::fromStdString(o.target.guid);
         const QVariantMap entry{
             {QStringLiteral("guid"), guid}, {QStringLiteral("name"), o.name}, {QStringLiteral("current"), guid == current}};
         if (guid == current) {

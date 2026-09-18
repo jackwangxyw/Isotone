@@ -196,7 +196,7 @@ private:
     SpeakerStore store_;
     std::vector<isotone::ui::Speaker> speakers_;
     std::vector<isotone::ui::SpeakerGroup> user_groups_;
-    std::wstring guid_;
+    std::string guid_;
     uint32_t channels_ = 0, mask_ = 0;
     double farthest_ = isotone::ui::kDefaultFarthestM;   // EqSession's undo extra, so undo restores it
     QStringList supported_;

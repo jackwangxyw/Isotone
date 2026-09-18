@@ -146,7 +146,7 @@ TEST_CASE("state_for_output sets the output's layout") {
 
 TEST_CASE("DeviceLink writes a native output's region, and finds it again once the engine creates it") {
     const std::wstring ns = L"Local\\IsotoneUiTest." + std::to_wstring(GetCurrentProcessId()) + L".";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000000abcd}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-00000000abcd}";
     DeviceLink link(ns);
     link.set_target(OutputTarget{guid, Backend::native, OutputLayout{2, 0x3, 48000}});
 
@@ -157,7 +157,7 @@ TEST_CASE("DeviceLink writes a native output's region, and finds it again once t
     CHECK_FALSE(link.region_open());
 
     isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(ns.c_str(), guid)) == ERROR_SUCCESS);
+    REQUIRE(engine.create_or_open(isotone::win::mapping_name(ns.c_str(), isotone::ui::widen_id(guid))) == ERROR_SUCCESS);
     // The next attempt waits out the reopen interval, then finds the region.
     Sleep(1100);
     CHECK(link.apply(state) == ERROR_SUCCESS);
@@ -234,9 +234,9 @@ TEST_CASE("every filter type reaches either backend and loads back with the same
     };
 
     const std::wstring ns = L"Local\\IsotoneUiFilters." + std::to_wstring(GetCurrentProcessId()) + L".";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-0000000fa17e}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000fa17e}";
     isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(ns.c_str(), guid)) == ERROR_SUCCESS);
+    REQUIRE(engine.create_or_open(isotone::win::mapping_name(ns.c_str(), isotone::ui::widen_id(guid))) == ERROR_SUCCESS);
 
     wchar_t temp[MAX_PATH];
     REQUIRE(GetTempPathW(MAX_PATH, temp) > 0);
@@ -290,7 +290,7 @@ TEST_CASE("DeviceLink writes an Equalizer APO output's block only when an edit i
         std::filesystem::path(temp) / (L"isotone-ui-compat-" + std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(dir);
     const std::filesystem::path file = dir / "Isotone.txt";
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000000beef}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-00000000beef}";
     {
         DeviceLink link(L"Local\\unused.", dir.wstring());
         link.set_target(OutputTarget{guid, Backend::equalizer_apo, OutputLayout{2, 0x3, 48000}});
@@ -324,7 +324,7 @@ TEST_CASE("DeviceLink writes an Equalizer APO output's block only when an edit i
         REQUIRE(reader.load_current(&loaded));
         REQUIRE(loaded.bands.size() == 1);
         CHECK(loaded.bands[0].gain_db == doctest::Approx(-4.1));
-        OutputTarget elsewhere{L"{8f4d2a10-0000-4000-8000-00000000f00d}", Backend::equalizer_apo, OutputLayout{}};
+        OutputTarget elsewhere{"{8f4d2a10-0000-4000-8000-00000000f00d}", Backend::equalizer_apo, OutputLayout{}};
         reader.set_target(elsewhere);
         CHECK_FALSE(reader.load_current(&loaded));
     }

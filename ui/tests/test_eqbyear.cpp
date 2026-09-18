@@ -19,7 +19,7 @@ using namespace isotone::ui;
 namespace {
 
 OutputTarget layout(uint32_t channels, uint32_t mask) {
-    return OutputTarget{L"", Backend::none, OutputLayout{channels, mask, 48000}};
+    return OutputTarget{"", Backend::none, OutputLayout{channels, mask, 48000}};
 }
 
 Band peak(uint32_t id, double fc, double gain) {

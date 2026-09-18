@@ -82,10 +82,10 @@ struct NativeRig {
     std::unique_ptr<Speakers> speakers;
     std::unique_ptr<Presets> presets;
     explicit NativeRig(const char* name, uint32_t channels = 8, uint32_t mask = k71) : space(fixNamespace(name)) {
-        a = OutputTarget{L"{8f4d2a10-0000-4000-8000-00000000f001}", Backend::native, OutputLayout{channels, mask, 48000}};
-        b = OutputTarget{L"{8f4d2a10-0000-4000-8000-00000000f002}", Backend::native, OutputLayout{channels, mask, 48000}};
-        REQUIRE(ra.create_or_open(isotone::win::mapping_name(space.c_str(), a.guid)) == ERROR_SUCCESS);
-        REQUIRE(rb.create_or_open(isotone::win::mapping_name(space.c_str(), b.guid)) == ERROR_SUCCESS);
+        a = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f001}", Backend::native, OutputLayout{channels, mask, 48000}};
+        b = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f002}", Backend::native, OutputLayout{channels, mask, 48000}};
+        REQUIRE(ra.create_or_open(isotone::win::mapping_name(space.c_str(), isotone::ui::widen_id(a.guid))) == ERROR_SUCCESS);
+        REQUIRE(rb.create_or_open(isotone::win::mapping_name(space.c_str(), isotone::ui::widen_id(b.guid))) == ERROR_SUCCESS);
         session = std::make_unique<EqSession>(std::make_unique<ui::DeviceLink>(space, compat.path().toStdWString()));
         speakers = std::make_unique<Speakers>(session.get());
         speakers->setStore(SpeakerStore(QDir(data.path()).filePath(QStringLiteral("speakers.json"))));
@@ -100,7 +100,7 @@ struct NativeRig {
         for (const OutputTarget& t : {a, b}) std::filesystem::remove(path(t));
     }
     static std::wstring path(const OutputTarget& t) {
-        return win::persisted_state_path(win::persisted_state_dir(true), t.guid);
+        return win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid));
     }
     static EqState saved(const OutputTarget& t) {
         ParamBlock block{};
@@ -192,7 +192,7 @@ TEST_CASE("fixes: saving or loading a preset keeps solo on the output") {
 
 TEST_CASE("fixes: a layout change is not an undo step and clears the history") {
     EqSession s;   // backend none: nothing is written anywhere
-    const std::wstring guid = L"{8f4d2a10-0000-4000-8000-00000000f010}";
+    const std::string guid = "{8f4d2a10-0000-4000-8000-00000000f010}";
     s.useTarget(OutputTarget{guid, Backend::none, OutputLayout{8, k71, 48000}});
     EqState st;
     st.layout_channels = 8;
@@ -263,7 +263,7 @@ TEST_CASE("fixes: an output left with EQ off comes back in Auto and not modified
     rig.session->useTarget(rig.b);
     rig.session->setEqOn(false);
     rig.session->useTarget(rig.a);
-    rig.presets->assign(QString::fromStdWString(rig.b.guid), QStringLiteral("Boost"));
+    rig.presets->assign(QString::fromStdString(rig.b.guid), QStringLiteral("Boost"));
     const EqState other = region(rig.rb);
     REQUIRE(other.bypass);
     CHECK(other.preamp_db == doctest::Approx(rig.session->preampDb()).epsilon(1e-4));
@@ -376,7 +376,7 @@ TEST_CASE("fixes: a native output never gets more than 64 bands") {
     CHECK(to_param_block(rig.session->engineState(), &block));
 
     // Another output assigned it gets the same 64 bands, and Auto's value for them.
-    rig.presets->assign(QString::fromStdWString(rig.b.guid), QStringLiteral("Big"));
+    rig.presets->assign(QString::fromStdString(rig.b.guid), QStringLiteral("Big"));
     CHECK(rig.rb.params()->band_count == kParamMaxBands);
     CHECK(region(rig.rb).preamp_db == 0.0);
 }
@@ -411,10 +411,10 @@ TEST_CASE("fixes: removing a preset whose assignments cannot be written still re
     CHECK(rig.presets->names().isEmpty());
     CHECK(count.size() == 1);
     CHECK(rig.presets->currentName() == QStringLiteral("Untitled"));
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.a.guid)).isEmpty());
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.a.guid)).isEmpty());
     // What is on disk reads the same.
     PresetStore again(rig.data.path());
     CHECK(again.presets().empty());
-    CHECK(again.byId(again.assignment(QString::fromStdWString(rig.a.guid))) == nullptr);
+    CHECK(again.byId(again.assignment(QString::fromStdString(rig.a.guid))) == nullptr);
     QDir(outputs).removeRecursively();
 }

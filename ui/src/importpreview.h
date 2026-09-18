@@ -52,11 +52,11 @@ class ImportPreview : public QObject {
 public:
     // `outputs`: the outputs it can be for; `guid` the one it is for at first.
     ImportPreview(const QString& file_name, std::string text, std::vector<isotone::ui::OutputTarget> outputs,
-                  const std::wstring& guid, QObject* parent = nullptr);
+                  const std::string& guid, QObject* parent = nullptr);
 
     QString fileName() const { return file_name_; }
     QString suggestedName() const;
-    QString outputGuid() const { return for_every_output_ ? QString() : QString::fromStdWString(target_.guid); }
+    QString outputGuid() const { return for_every_output_ ? QString() : QString::fromStdString(target_.guid); }
     bool forEveryOutput() const { return for_every_output_; }
     void setOutputGuid(const QString& guid);
     double preampDb() const { return state_.preamp_db; }

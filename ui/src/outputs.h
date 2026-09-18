@@ -41,7 +41,7 @@ public:
     enum Role { NameRole = Qt::UserRole + 1, BackendLabelRole, ActivityRole, CurrentRole };
 
     struct Output {
-        std::wstring guid;
+        std::string guid;   // the platform's id; widened only at the Win32 edge
         QString name;
         isotone::ui::Backend backend = isotone::ui::Backend::none;
         isotone::ui::OutputLayout layout;
@@ -65,7 +65,7 @@ public:
 
     Q_INVOKABLE void select(int row);
     // By endpoint GUID, any form canonical_endpoint_guid takes. False if it is not a working output.
-    bool selectGuid(const std::wstring& endpoint);
+    bool selectGuid(const std::string& endpoint);
     Q_INVOKABLE void refresh();
 
     // Settings, General, "Switch preset when the default output changes": selects
@@ -82,11 +82,11 @@ signals:
 
 private:
     void probe();
-    std::wstring default_guid_;   // among all render endpoints, working or not
+    std::string default_guid_;   // among all render endpoints, working or not
     bool refreshed_ = false;
 
     std::vector<Output> outputs_;
-    std::wstring current_guid_;
+    std::string current_guid_;
     std::unique_ptr<isotone::devices::DeviceWatcher> watcher_;
     QTimer probe_timer_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);

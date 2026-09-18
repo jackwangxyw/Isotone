@@ -105,7 +105,7 @@ void Speakers::sessionChanged() {
     }
     if (session_ && session_->undoExtra() != farthest_) {   // a distance change undone or redone
         farthest_ = session_->undoExtra();
-        if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
+        if (!store_.setFarthest(isotone::ui::widen_id(guid_), farthest_)) emit saveFailed();
     }
     updateOverrides();   // what solo leaves playing follows the small speakers
     emit setupChanged();
@@ -126,8 +126,8 @@ void Speakers::reloadOutput() {
     channels_ = target.layout.channels;
     mask_ = target.layout.speaker_mask;
     speakers_ = channels_ > 2 ? isotone::ui::layout_speakers(channels_, mask_) : std::vector<isotone::ui::Speaker>{};
-    user_groups_ = store_.groups(guid_);
-    farthest_ = store_.farthest(guid_);
+    user_groups_ = store_.groups(isotone::ui::widen_id(guid_));
+    farthest_ = store_.farthest(isotone::ui::widen_id(guid_));
     if (session_) session_->setUndoExtra(farthest_, true);
     endResetModel();
     supported_.clear();
@@ -174,7 +174,7 @@ int Speakers::layoutChannels(const QString& name) const {
 void Speakers::refreshSupportedLayouts() {
     QStringList names;
     std::vector<isotone::devices::SpeakerLayout> layouts;
-    if (!guid_.empty() && SUCCEEDED(isotone::devices::supported_speaker_layouts(guid_, &layouts))) {
+    if (!guid_.empty() && SUCCEEDED(isotone::devices::supported_speaker_layouts(isotone::ui::widen_id(guid_), &layouts))) {
         for (isotone::devices::SpeakerLayout l : layouts) names << QLatin1String(kLayoutNames[static_cast<int>(l)]);
     }
     if (names == supported_) return;
@@ -188,7 +188,7 @@ int Speakers::setLayout(const QString& name) {
     if (guid_.empty()) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
     // A tone's stream is on the old format.
     setTestTones(false);
-    return layout_setter_(guid_, layout);
+    return layout_setter_(isotone::ui::widen_id(guid_), layout);
 }
 
 QVariantList Speakers::speakerList() const {
@@ -237,7 +237,7 @@ bool Speakers::addGroup(const QString& name, const QStringList& codes) {
     for (const QString& c : codes) group.codes.push_back(c.toStdString());
     if (isotone::ui::codes_mask(group.codes, channels_, mask_) == 0) return false;
     user_groups_.push_back(group);
-    if (!store_.setGroups(guid_, user_groups_)) emit saveFailed();
+    if (!store_.setGroups(isotone::ui::widen_id(guid_), user_groups_)) emit saveFailed();
     if (session_) session_->setUserGroups(user_groups_);
     emit groupsChanged();
     return true;
@@ -248,7 +248,7 @@ void Speakers::removeGroup(const QString& name) {
                                  [&](const isotone::ui::SpeakerGroup& g) { return g.name == name.toStdString(); });
     if (it == user_groups_.end()) return;
     user_groups_.erase(it);
-    if (!store_.setGroups(guid_, user_groups_)) emit saveFailed();
+    if (!store_.setGroups(isotone::ui::widen_id(guid_), user_groups_)) emit saveFailed();
     if (session_) session_->setUserGroups(user_groups_);
     if (showing_ == QStringLiteral("group:") + name) setShowing(QStringLiteral("all"));
     emit groupsChanged();
@@ -319,7 +319,7 @@ void Speakers::setDistance(int row, double metres) {
         isotone::ui::set_speaker_distance(&s->speakers, channels_, &farthest_, c, metres);
         session_->setUndoExtra(farthest_, false);
     });
-    if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
+    if (!store_.setFarthest(isotone::ui::widen_id(guid_), farthest_)) emit saveFailed();
     rowsChanged();
 }
 
@@ -330,7 +330,7 @@ void Speakers::setDelay(int row, double ms) {
         isotone::ui::set_speaker_delay(&s->speakers, &farthest_, c, ms);
         session_->setUndoExtra(farthest_, false);
     });
-    if (!store_.setFarthest(guid_, farthest_)) emit saveFailed();
+    if (!store_.setFarthest(isotone::ui::widen_id(guid_), farthest_)) emit saveFailed();
     rowsChanged();
 }
 
@@ -409,7 +409,7 @@ void Speakers::startTone() {
     if (!validRow(playing_) || guid_.empty() || !session_ || session_->target().backend == isotone::ui::Backend::none) return;
     QPointer<Speakers> self(this);
     const quint64 generation = ++tone_generation_;
-    tone_.start(guid_, speakers_[static_cast<size_t>(playing_)].channel, [self, generation](HRESULT hr, const char*) {
+    tone_.start(isotone::ui::widen_id(guid_), speakers_[static_cast<size_t>(playing_)].channel, [self, generation](HRESULT hr, const char*) {
         QMetaObject::invokeMethod(
             self.data(),
             [self, hr, generation] {

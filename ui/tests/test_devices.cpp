@@ -364,7 +364,7 @@ TEST_CASE("Outputs lists an Equalizer APO output only while config.txt includes 
     }
     const auto listed = [](const Outputs& o, const QString& guid) {
         for (const Outputs::Output& out : o.outputs())
-            if (QString::fromStdWString(out.guid) == guid) return true;
+            if (QString::fromStdString(out.guid) == guid) return true;
         return false;
     };
     Outputs outputs;

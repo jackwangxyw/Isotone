@@ -55,7 +55,7 @@ void Outputs::refresh() {
                           equalizerApoOutputListed(QString::fromStdWString(e.guid), attached);
         if (!native && !eapo) continue;
         Output o;
-        o.guid = e.guid;
+        o.guid = isotone::ui::narrow_id(e.guid);
         o.name = QString::fromStdWString(e.connection_name.empty() ? e.friendly_name : e.connection_name) +
                  (e.device_name.empty() ? QString() : QStringLiteral(" (%1)").arg(QString::fromStdWString(e.device_name)));
         o.backend = native ? isotone::ui::Backend::native : isotone::ui::Backend::equalizer_apo;
@@ -68,7 +68,7 @@ void Outputs::refresh() {
         found.push_back(std::move(o));
     }
 
-    const std::wstring previous = current_guid_;
+    const std::string previous = current_guid_;
     const Output* before = current();
     const isotone::ui::OutputLayout before_layout = before ? before->layout : isotone::ui::OutputLayout{};
     beginResetModel();
@@ -93,9 +93,10 @@ void Outputs::refresh() {
     emit currentActivityChanged();
 
     // Settings, General: the default output moved.
-    std::wstring default_guid;
+    std::string default_guid;
     for (const isotone::devices::Endpoint& e : endpoints)
-        if (e.state == DEVICE_STATE_ACTIVE && e.default_console) default_guid = e.guid;
+        if (e.state == DEVICE_STATE_ACTIVE && e.default_console)
+            default_guid = isotone::ui::narrow_id(e.guid);
     const bool moved = refreshed_ && default_guid != default_guid_;
     default_guid_ = default_guid;
     refreshed_ = true;
@@ -151,7 +152,7 @@ QString Outputs::currentActivity() const {
 
 QString Outputs::currentGuid() const {
     const Output* o = current();
-    return o ? QString::fromStdWString(o->guid) : QString();
+    return o ? QString::fromStdString(o->guid) : QString();
 }
 
 QString Outputs::currentName() const {
@@ -169,8 +170,9 @@ void Outputs::select(int row) {
     emit currentActivityChanged();
 }
 
-bool Outputs::selectGuid(const std::wstring& endpoint) {
-    const std::wstring guid = isotone::win::canonical_endpoint_guid(endpoint);
+bool Outputs::selectGuid(const std::string& endpoint) {
+    const std::string guid =
+        isotone::ui::narrow_id(isotone::win::canonical_endpoint_guid(isotone::ui::widen_id(endpoint)));
     for (size_t i = 0; i < outputs_.size(); ++i) {
         if (outputs_[i].guid != guid) continue;
         select(static_cast<int>(i));
@@ -182,7 +184,7 @@ bool Outputs::selectGuid(const std::wstring& endpoint) {
 // probe_engine blocks for its sampling interval: every IsoAPO output in turn, on
 // a thread of its own, one round at a time.
 void Outputs::probe() {
-    std::vector<std::wstring> native;
+    std::vector<std::string> native;
     for (const Output& o : outputs_)
         if (o.backend == isotone::ui::Backend::native) native.push_back(o.guid);
     if (native.empty() || probing_.exchange(true)) return;
@@ -190,11 +192,11 @@ void Outputs::probe() {
     std::shared_ptr<std::atomic<bool>> alive = alive_;
     std::thread([self, alive, native, this] {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        std::vector<std::pair<std::wstring, QString>> results;
-        for (const std::wstring& guid : native) {
+        std::vector<std::pair<std::string, QString>> results;
+        for (const std::string& guid : native) {
             QString activity = QStringLiteral("unknown");
             isotone::devices::EngineProbe result;
-            if (SUCCEEDED(isotone::devices::probe_engine(guid, &result))) {
+            if (SUCCEEDED(isotone::devices::probe_engine(isotone::ui::widen_id(guid), &result))) {
                 switch (result.activity) {
                     case isotone::devices::EngineActivity::running: activity = QStringLiteral("running"); break;
                     case isotone::devices::EngineActivity::idle: activity = QStringLiteral("idle"); break;

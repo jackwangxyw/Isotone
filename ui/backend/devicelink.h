@@ -44,10 +44,20 @@ namespace isotone::ui {
 enum class Backend { none, native, equalizer_apo };
 
 struct OutputTarget {
-    std::wstring guid;        // {lower-case}
+    // How the platform names the output this state belongs to: an endpoint GUID
+    // as "{lower-case}" on Windows, a PipeWire node.name on Linux. Narrow rather
+    // than wide because it is the one thing every backend has to agree on, and
+    // the Windows one widens it at its own edge; a canonical GUID is ASCII, so
+    // nothing is lost.
+    std::string guid;
     Backend backend = Backend::none;
     OutputLayout layout;
 };
+
+// The identity as the Win32 calls want it, and back. Only the Windows backend
+// needs these.
+std::wstring widen_id(const std::string& id);
+std::string narrow_id(const std::wstring& id);
 
 class DeviceLink {
 public:

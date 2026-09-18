@@ -140,7 +140,7 @@ private:
     QTimer idle_;     // closes a paused tone's stream
     quint64 generation_ = 0;
     bool stream_ = false;
-    std::wstring stream_guid_;
+    std::string stream_guid_;
     uint32_t stream_mask_ = 0;
 
     // What the session was for, to tell another output or layout.

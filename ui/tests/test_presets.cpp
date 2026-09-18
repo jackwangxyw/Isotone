@@ -310,9 +310,9 @@ struct Rig {
     std::unique_ptr<Presets> presets;
 
     explicit Rig(const char* name) : ns(testNamespace(name)) {
-        a = OutputTarget{L"{8f4d2a10-0000-4000-8000-0000000000a1}", Backend::native, OutputLayout{2, 0x3, 48000}};
-        b = OutputTarget{L"{8f4d2a10-0000-4000-8000-0000000000b2}", Backend::native, OutputLayout{2, 0x3, 48000}};
-        c = OutputTarget{L"{8f4d2a10-0000-4000-8000-0000000000c3}", Backend::equalizer_apo, OutputLayout{8, 0x63F, 48000}};
+        a = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000a1}", Backend::native, OutputLayout{2, 0x3, 48000}};
+        b = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000b2}", Backend::native, OutputLayout{2, 0x3, 48000}};
+        c = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000c3}", Backend::equalizer_apo, OutputLayout{8, 0x63F, 48000}};
         outputs = {{a, QStringLiteral("Headphones")}, {b, QStringLiteral("Monitor")}, {c, QStringLiteral("Living room")}};
         session = std::make_unique<EqSession>(link(ns, compat.path()));
         makePresets();
@@ -325,11 +325,11 @@ struct Rig {
         presets.reset();
         session.reset();
         for (const OutputTarget& t : {a, b, c}) {
-            std::filesystem::remove(win::persisted_state_path(win::persisted_state_dir(true), t.guid));
+            std::filesystem::remove(win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid)));
         }
     }
     static std::wstring savedPath(const OutputTarget& t) {
-        return win::persisted_state_path(win::persisted_state_dir(true), t.guid);
+        return win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid));
     }
 };
 
@@ -365,13 +365,13 @@ TEST_CASE("presets: an unassigned output is untitled and not modified until it i
     CHECK(rig.presets->currentName() == QStringLiteral("Mine"));
     CHECK_FALSE(rig.presets->untitled());
     CHECK_FALSE(rig.presets->modified());
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.a.guid)) == QStringLiteral("Mine"));
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.a.guid)) == QStringLiteral("Mine"));
 }
 
 TEST_CASE("presets: loading a preset replaces the EQ, keeps what is the output's, and writes its saved state") {
     Rig rig("load");
     isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), rig.a.guid)) == ERROR_SUCCESS);
+    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
 
     rig.session->useTarget(rig.a);
     EqState own;
@@ -514,7 +514,7 @@ TEST_CASE("presets: next and previous go round the list in order") {
 TEST_CASE("presets: the preset an output plays is recognised when the output is shown again") {
     Rig rig("recognise");
     isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), rig.a.guid)) == ERROR_SUCCESS);
+    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
     rig.session->useTarget(rig.a);
     {
         PresetStore store(rig.data.path());
@@ -550,8 +550,8 @@ TEST_CASE("presets: the preset an output plays is recognised when the output is 
 TEST_CASE("presets: a saved preset reaches every other output assigned it, and unsaved edits do not") {
     Rig rig("propagate");
     isotone::win::SharedMapping engineA, engineB;
-    REQUIRE(engineA.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), rig.a.guid)) == ERROR_SUCCESS);
-    REQUIRE(engineB.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), rig.b.guid)) == ERROR_SUCCESS);
+    REQUIRE(engineA.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
+    REQUIRE(engineB.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.b.guid))) == ERROR_SUCCESS);
     // B has a balance of its own.
     EqState bOwn;
     bOwn.channel_gain_db[0] = -3.0103;
@@ -565,9 +565,9 @@ TEST_CASE("presets: a saved preset reaches every other output assigned it, and u
     }
     rig.makePresets();
     rig.presets->load(QStringLiteral("HD 650"));
-    rig.presets->assign(QString::fromStdWString(rig.b.guid), QStringLiteral("HD 650"));
-    rig.presets->assign(QString::fromStdWString(rig.c.guid), QStringLiteral("HD 650"));
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.c.guid)) == QStringLiteral("HD 650"));
+    rig.presets->assign(QString::fromStdString(rig.b.guid), QStringLiteral("HD 650"));
+    rig.presets->assign(QString::fromStdString(rig.c.guid), QStringLiteral("HD 650"));
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.c.guid)) == QStringLiteral("HD 650"));
     REQUIRE(regionState(engineB).bands.size() == 3);
     CHECK(regionState(engineB).channel_gain_db[0] == doctest::Approx(-3.0103));
     // A preset is for every output until it is narrowed (owner, 2026-09-15).
@@ -613,7 +613,7 @@ TEST_CASE("presets: rename, duplicate, remove and New on the current output") {
 
     CHECK(rig.presets->rename(QStringLiteral("HD 650"), QStringLiteral("HD 650 · tuned")) == QStringLiteral("HD 650 · tuned"));
     CHECK(rig.presets->currentName() == QStringLiteral("HD 650 · tuned"));
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.a.guid)) == QStringLiteral("HD 650 · tuned"));
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.a.guid)) == QStringLiteral("HD 650 · tuned"));
 
     CHECK(rig.presets->duplicate(QStringLiteral("HD 650 · tuned")) == QStringLiteral("HD 650 · tuned 2"));
     CHECK(rig.presets->rowCount() == 2);
@@ -679,19 +679,19 @@ TEST_CASE("presets: import reads for the output it is for, creates the preset an
 
     // For the 7.1 output, "R" is its front right: still channel 1; the layout follows.
     QSignalSpy changed(preview.get(), &ImportPreview::changed);
-    preview->setOutputGuid(QString::fromStdWString(rig.c.guid));
+    preview->setOutputGuid(QString::fromStdString(rig.c.guid));
     CHECK(changed.size() == 1);
     CHECK(preview->state().layout_channels == 8);
 
     // Imported for C, which is not the current output: written there, A untouched.
     CHECK(rig.presets->importPreset(preview.get(), QStringLiteral("HD 650 · oratory1990")) ==
           QStringLiteral("HD 650 · oratory1990"));
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.c.guid)) == QStringLiteral("HD 650 · oratory1990"));
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.c.guid)) == QStringLiteral("HD 650 · oratory1990"));
     CHECK(rig.session->rowCount() == 0);
     CHECK(rig.presets->currentName() == QStringLiteral("Untitled"));
 
     // For A: loaded on it.
-    preview->setOutputGuid(QString::fromStdWString(rig.a.guid));
+    preview->setOutputGuid(QString::fromStdString(rig.a.guid));
     CHECK(rig.presets->importPreset(preview.get(), QStringLiteral("HD 650 · oratory1990")) ==
           QStringLiteral("HD 650 · oratory1990 2"));
     CHECK(rig.presets->currentName() == QStringLiteral("HD 650 · oratory1990 2"));
@@ -704,7 +704,7 @@ TEST_CASE("presets: import reads for the output it is for, creates the preset an
     CHECK(rig.presets->importPreset(preview.get(), QStringLiteral("For everything")) ==
           QStringLiteral("For everything"));
     CHECK(rig.presets->currentName() == QStringLiteral("For everything"));
-    CHECK(rig.presets->assignedName(QString::fromStdWString(rig.c.guid)) == QStringLiteral("HD 650 · oratory1990"));
+    CHECK(rig.presets->assignedName(QString::fromStdString(rig.c.guid)) == QStringLiteral("HD 650 · oratory1990"));
 
     // A file with no preamp of its own has none chosen, so Auto (owner, 2026-09-15).
     writeFile(file, "Filter 1: ON PK Fc 1000 Hz Gain 8 dB Q 1\n");
@@ -799,8 +799,8 @@ TEST_CASE("presets: a preset is for every output until it is narrowed to one") {
     // (2026-09-15). Before this a preset was tied to the output it was saved on.
     Rig rig("scope");
     rig.session->useTarget(rig.a);
-    const QString a = QString::fromStdWString(rig.a.guid);
-    const QString b = QString::fromStdWString(rig.b.guid);
+    const QString a = QString::fromStdString(rig.a.guid);
+    const QString b = QString::fromStdString(rig.b.guid);
 
     rig.session->setEqPart(hd650());
     CHECK(rig.presets->saveAs(QStringLiteral("Everywhere")) == QStringLiteral("Everywhere"));
@@ -847,8 +847,8 @@ TEST_CASE("presets: a preset narrowed to one output does not load on another") {
     // way back. It does not load there at all now; its row says which output it is
     // for, and it can be widened from there.
     Rig rig("foreign");
-    const QString a = QString::fromStdWString(rig.a.guid);
-    const QString b = QString::fromStdWString(rig.b.guid);
+    const QString a = QString::fromStdString(rig.a.guid);
+    const QString b = QString::fromStdString(rig.b.guid);
 
     rig.session->useTarget(rig.b);
     rig.session->setEqPart(hd650());
@@ -892,8 +892,8 @@ TEST_CASE("presets: a preset narrowed to one output does not load on another") {
 
 TEST_CASE("presets: saving for another output makes the preset and leaves this one alone") {
     Rig rig("savefor");
-    const QString a = QString::fromStdWString(rig.a.guid);
-    const QString b = QString::fromStdWString(rig.b.guid);
+    const QString a = QString::fromStdString(rig.a.guid);
+    const QString b = QString::fromStdString(rig.b.guid);
     rig.session->useTarget(rig.a);
     rig.session->setEqPart(hd650());
 
@@ -915,7 +915,7 @@ TEST_CASE("presets: an output keeps a preset that is for it across a switch away
     // was gone when he came back to it ("went to a new untitled one, the filters
     // saved over tho").
     Rig rig("kept");
-    const QString b = QString::fromStdWString(rig.b.guid);
+    const QString b = QString::fromStdString(rig.b.guid);
 
     rig.session->useTarget(rig.b);
     rig.session->setEqPart(hd650());

@@ -60,7 +60,7 @@ public:
     Q_INVOKABLE void useLayout(int channels, int speakerMask) {
         auto* session = engine_->singletonInstance<EqSession*>("Isotone", "EqSession");
         session->useTarget(isotone::ui::OutputTarget{
-            L"", isotone::ui::Backend::none,
+            "", isotone::ui::Backend::none,
             isotone::ui::OutputLayout{static_cast<uint32_t>(channels), static_cast<uint32_t>(speakerMask), 48000.0}});
     }
     // Band strip: a wheel with pixelDelta (a high-resolution wheel), which
