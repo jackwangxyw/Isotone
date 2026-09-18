@@ -72,6 +72,11 @@ windows/devices/      isotone_devices: render endpoints, their format and engine
                       speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
+linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG
+linux/daemon/         isotone-daemon: the virtual sink, the core in a PipeWire filter node,
+                      links to the hardware sink, systemd user unit; isotone-state (show/set/save)
+linux/spike/          stage 1c: the topology spike and the null sinks the rig declares
+linux/measure_lib.py  the shared measurement rig; linux/ci-audio.sh runs it under its own PipeWire
 ui/backend/           the UI without Qt: DeviceLink (where edits go), spectrum, typed values, speaker setup,
                       test tone, config.txt attach, diagnostics
 ui/src/               EqSession (the edited state, undo), Outputs, Presets, Devices and Devicetool, Speakers,
@@ -82,6 +87,39 @@ tools/                gen_reference.py, check_shm_transport.py
 docs/design/          approved screens, the prototype's source, their generator; gitignored, this machine only
 docs/notes/           the stage 4 work packages' records (force-added: docs/* is gitignored)
 ```
+
+## Build and test (Linux, over WSL)
+
+Linux work happens in a WSL2 Ubuntu 24.04 distro, not a VM (decisions.md, "Linux,
+the environment as built"). It matches CI's compiler exactly, g++ 13.3. Drive it
+from Git Bash: `MSYS_NO_PATHCONV=1` stops Git Bash rewriting Linux paths into
+Windows ones, and `wsl.exe` emits UTF-16.
+
+```bash
+export MSYS_NO_PATHCONV=1
+wsl.exe -d Ubuntu-24.04 -e bash -c '<command>' 2>&1 | tr -d '\0'
+```
+
+Source stays on the Windows side so there is one tree; build into the Linux
+filesystem, because compiling across `/mnt/c` is slow:
+
+```bash
+cd /mnt/c/Users/jackw/OneDrive/Documents/GitHub/Isotone
+cmake -S . -B ~/build-linux -G Ninja -DISOTONE_WARNINGS_AS_ERRORS=ON
+cmake --build ~/build-linux
+ctest --test-dir ~/build-linux                            # core and the POSIX transport
+python3 linux/spike/measure.py                            # stage 1c, in the session's PipeWire
+python3 linux/daemon/measure.py                           # stage 3, the daemon
+ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # both, under a PipeWire of its own
+```
+
+- `linux/spike` and `linux/daemon` are added only when pkg-config finds
+  `libpipewire-0.3`. The transport and its tests build on any Linux.
+- The rig needs no audio hardware: both ends of the chain are null sinks, declared
+  in `linux/spike/10-isotone-spike.conf`. `pactl` is not to be trusted for this;
+  it reports sinks that never become PipeWire nodes.
+- Do not use the repository's `build/` from Linux. That is the Windows build
+  directory, and CI's Linux job is the only thing that builds into it.
 
 ## Rules
 

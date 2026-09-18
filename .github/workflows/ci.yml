@@ -60,6 +60,47 @@ jobs:
           python -m pip install --quiet numpy
           python tools/check_shm_transport.py build
 
+  linux-host:
+    name: linux host (daemon, measured)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libpipewire-0.3-dev is what the top-level list file looks for before it
+      # adds linux/spike and linux/daemon at all; without it this job silently
+      # builds the same thing the core job already does. pipewire-bin carries
+      # pw-link, pw-play and pw-record, which the measurement drives the graph
+      # with, and dbus-x11 carries dbus-run-session, which WirePlumber needs.
+      - name: Install PipeWire
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libpipewire-0.3-dev pipewire pipewire-bin wireplumber dbus-x11 python3-numpy
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DISOTONE_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      # The Linux host has to actually be in this build, or the job proves
+      # nothing: without libpipewire the top-level list file skips linux/spike
+      # and linux/daemon and everything here still passes. Fail loudly rather
+      # than pass quietly.
+      - name: The Linux host is in the build
+        run: |
+          test -x build/linux/daemon/isotone-daemon || { echo "the daemon was not built"; exit 1; }
+          test -x build/linux/spike/isotone-pw-spike || { echo "the spike was not built"; exit 1; }
+          test -x build/linux/daemon/isotone-state || { echo "isotone-state was not built"; exit 1; }
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # The stage 1c and stage 3 acceptance measurements, through a real PipeWire
+      # graph. Both ends are null sinks, so no audio hardware is involved; the
+      # script starts its own PipeWire, WirePlumber and D-Bus session.
+      - name: Measure the daemon and the spike
+        run: bash linux/ci-audio.sh
+
   reference-data:
     name: reference data is reproducible
     runs-on: ubuntu-latest

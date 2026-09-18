@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Isotone authors
+#
+# A user unit, not a system one. The daemon belongs to the session: it reads the
+# session's PipeWire socket, it writes state under $XDG_CONFIG_HOME, and its
+# shared region is the user's. Nothing here needs root, which is the whole
+# difference from Windows, where the engine is audiodg running as LocalService.
+#
+# Install to ~/.config/systemd/user/ (a package puts it in
+# /usr/lib/systemd/user/), then:
+#
+#   systemctl --user enable --now isotone-daemon
+#
+# --sink is left to a drop-in until the daemon follows the default sink itself:
+#
+#   systemctl --user edit isotone-daemon
+#   [Service]
+#   Environment=ISOTONE_SINK=alsa_output.pci-0000_00_1f.3.analog-stereo
+
+[Unit]
+Description=Isotone system-wide equalizer
+Documentation=https://github.com/jackwangxyw/Isotone
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+# Without this the daemon starts, finds no graph, and sits there doing nothing.
+Requisite=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/isotone-daemon --sink ${ISOTONE_SINK}
+Restart=on-failure
+RestartSec=2
+# The audio thread needs to keep its deadline. rtkit grants this at runtime when
+# it is present; the limit has to be here for the request to be allowed at all.
+LimitRTPRIO=95
+LimitNICE=-19
+# It talks to PipeWire and writes one directory. Nothing else.
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/isotone
+
+[Install]
+WantedBy=default.target

@@ -69,6 +69,29 @@ if(WIN32 AND MSVC)
     add_subdirectory(windows/devices)
 endif()
 
+# The Linux host. Gated on libpipewire actually being installed, so the Windows
+# builds and the MinGW stand-in are unchanged, and so a Linux build without the
+# development package still configures (CI's core job does not install it).
+if(UNIX AND NOT APPLE)
+    # The transport needs only POSIX shared memory, so it and its tests build on
+    # any Linux, with or without the PipeWire development package. This block is
+    # after enable_testing(), so those tests are registered with CTest.
+    add_subdirectory(linux/transport)
+    add_subdirectory(linux/transport/tests)
+
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
+        if(PIPEWIRE_FOUND)
+            message(STATUS "libpipewire-0.3 ${PIPEWIRE_VERSION}: building the Linux host")
+            add_subdirectory(linux/spike)
+            add_subdirectory(linux/daemon)
+        else()
+            message(STATUS "libpipewire-0.3 not found: skipping the Linux host")
+        endif()
+    endif()
+endif()
+
 # The UI needs Qt 6.11 with its MSVC kit: pass
 # -DISOTONE_BUILD_UI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.11.2/msvc2022_64.
 option(ISOTONE_BUILD_UI "Build the Qt Quick UI" OFF)

@@ -2970,7 +2970,8 @@ points are kept). Stage 5 is done without it.
 **Targets** (owner): every desktop and session, as EasyEffects does: Wayland and
 X11; GNOME, KDE Plasma and Cinnamon. The owner uses Linux Mint (Cinnamon).
 
-**Environment** (agreed, not yet set up):
+**Environment** (agreed, then superseded: see "Linux, the environment as built"
+below, which records what was actually stood up and why):
 
 - A Linux Mint Cinnamon VM on this machine, reached over SSH, for the builds,
   PipeWire, measurement through virtual sinks (the Linux counterpart of the VB-Cable
@@ -3006,6 +3007,242 @@ X11; GNOME, KDE Plasma and Cinnamon. The owner uses Linux Mint (Cinnamon).
    daemon owning a virtual sink from inside the sandbox).
 
 Windows packaging (stage 6) does not depend on any of this.
+
+## 2026-09-17: Linux, the environment as built
+
+The Mint VM above was not built. A WSL2 Ubuntu 24.04 distro was, and all of items
+1 to 3 run on it. The VM is still wanted for item 4, and only for it.
+
+**The premise for choosing VirtualBox was wrong.** "Windows here is 11 Home, so no
+Hyper-V" confuses the Hyper-V role and its management tooling, which Home does
+lack, with the hypervisor itself, which is already running on this machine for
+virtualization-based security:
+
+    HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard
+        EnableVirtualizationBasedSecurity   = 1
+    HKLM\...\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity
+        Enabled                             = 1
+    service HvHost                            RUNNING
+
+With VBS on, VirtualBox cannot use its own VT-x hypervisor and falls back to
+Hyper-V's platform API, which is slower and historically less reliable. Getting
+full-speed VirtualBox would mean turning memory integrity off on the owner's daily
+machine, which is not a trade worth making for a build box. WSL2 rides the
+hypervisor that is already there. It cost one elevated `wsl --install` and one
+reboot.
+
+**Why WSL2 is the better first environment.** Items 1 to 3 (the spike, the daemon,
+CI) are headless and CI-verified, so matching CI matters more than matching the
+owner's desktop. `ubuntu-latest` resolved to `ubuntu24/20260907.300` on the run of
+ced78b6, and this distro is the same Ubuntu 24.04 with the same g++ 13.3.0. The
+MinGW GCC 16.1 stand-in in `build-gcc` never matched it: libstdc++ 13's regex once
+crashed on input GCC 16 handled, and that failure only ever appeared in CI. There
+is also no SSH, no key exchange and no VM networking to keep alive between
+sessions; it is driven as `wsl.exe -d Ubuntu-24.04 -e bash -c '...'`.
+
+**The box.** Ubuntu 24.04.5, kernel 6.18.33.2-microsoft, systemd as PID 1 through
+`/etc/wsl.conf` (`[boot] systemd=true`), user `jackw` (uid 1000) with passwordless
+sudo, and `XDG_RUNTIME_DIR=/run/user/1000`, which PipeWire's user session needs.
+g++ 13.3.0, cmake 3.28.3, ninja 1.11.1, libpipewire-0.3 1.0.5, wireplumber 0.4.17,
+scipy 1.11.4. The source tree stays on the Windows side at `/mnt/c/...` so there is
+one tree; builds go to `~/build-linux` in the Linux filesystem, because compiling
+across the 9p mount is slow. Two traps: Git Bash rewrites Linux paths in the
+command line, so `MSYS_NO_PATHCONV=1` is needed, and `pactl` lives in
+`pulseaudio-utils`, which `pipewire` does not pull in.
+
+**Verified on it.** `core` builds clean with `-DISOTONE_WARNINGS_AS_ERRORS=ON`;
+ctest passes core_tests in 5.37 s; `tools/gen_reference.py --check` reproduces the
+scipy data to 1.455e-11.
+
+**Measurement needs no audio hardware,** which is the finding that made the VM
+unnecessary for items 1 to 3. Two null sinks stand in for the virtual sink and the
+hardware sink (`pactl load-module module-null-sink sink_name=isotone_virt`, whose
+`isotone_virt.monitor` source appears with it). `pw-play --target isotone_virt`
+against `pw-record --target isotone_virt.monitor` round-trips a 1 kHz sine at
+amplitude 0.5 at -9.032 dBFS, against -9.03 predicted, peak 1000.13 Hz. That is the
+rig stage 1c's -12 dB measurement will use. `pw-record` must be ended with SIGINT,
+not SIGKILL, or it never writes the WAV header.
+
+**What WSL2 does not cover.** WSLg provides a rootless Wayland and X11 surface
+(`WAYLAND_DISPLAY=wayland-0`, `DISPLAY=:0`, sockets under `/mnt/wslg`), so the Qt UI
+will run and can be screenshotted there. What it does not provide is a desktop
+environment: no Cinnamon panel or tray, no xdg-desktop-portal GlobalShortcuts
+backend, no window manager honouring always-on-top. Every item 4 check that the
+Wayland limits above are about still needs the Mint VM, and GNOME and KDE VMs
+after it.
+
+
+
+## 2026-09-17: Stage 1c complete, the PipeWire topology measured
+
+`linux/spike/` holds the spike: `pw_spike.cpp` (187 lines) hosting
+`isotone_core`'s `Processor` in a PipeWire filter node, `measure.py` running the
+acceptance measurement, and `10-isotone-spike.conf` declaring the rig's sinks.
+Same filter as stage 1b on Windows, peaking 1 kHz -12 dB Q 1, so the two platforms
+are measured against the same analytic response:
+
+```
+    freq     bypass   filtered   measured   analytic     error
+    1000     -6.021    -18.021    -12.000    -12.000    -0.000
+     100     -6.021     -6.181     -0.161     -0.161    +0.001
+```
+
+Those are the stage 1b figures to three decimals (-12.000 and -0.161). Stage 1's
+acceptance criterion is now met on Linux as well as both Windows backends.
+
+**The topology, as the plan's EasyEffects model predicted.** Applications play into
+a null sink; its monitor feeds the core; the core's output goes to the hardware
+sink:
+
+```
+pw-play -> isotone_virt (null sink)
+           isotone_virt.monitor -> isotone-spike:in_{FL,FR}
+           isotone-spike:out_{FL,FR} -> isotone_hw:playback_{FL,FR}
+                                        isotone_hw.monitor -> pw-record
+```
+
+**`pw_filter`, not a pair of `pw_stream`s.** One node with two DSP input ports and
+two DSP output ports is handed both sides in the same graph cycle, so there is no
+ring buffer between capture and playback and no second clock to drift against.
+`pw_filter_get_dsp_buffer()` hands back planar float32, one buffer per port, which
+is exactly the shape `Processor::process(float* const*, uint32_t)` already takes;
+no conversion layer is needed on this platform. The links are made from outside
+with `pw-link` rather than in the spike, so the topology under test is visible in
+the measurement script.
+
+**Every link is explicit, and that is not incidental.** Three traps cost time here,
+all of them the same shape: a tool reporting success while doing something else.
+
+1. `pactl load-module module-null-sink` returns a module id and the sink appears in
+   `pactl list short sinks`, but after the daemon has been restarted no PipeWire
+   node is created for it. `pw-cli ls Node` showed only WirePlumber's `auto_null`
+   while `pactl` listed four sinks. The rig therefore declares its nodes in a
+   `pipewire.conf.d` drop-in, which also means they come back with the daemon and a
+   run is reproducible.
+2. `pw-record --target isotone_hw.monitor` is a Pulse-ism. No PipeWire node carries
+   that name, so the target silently fails, the stream falls back to the default
+   source, and the capture reads the tone straight off `isotone_virt` with the core
+   nowhere in the path. It fails quietly: the first run measured a clean -6.021 dBFS
+   in *both* modes, which looks like a working rig and a broken filter. The fix is
+   `--target 0` ("do not link") plus an explicit `pw-link`, same as the rest of the
+   graph.
+3. `pw-record` must be ended with SIGINT. On SIGKILL it never writes the WAV header.
+
+The bypass column is the control, and it earns its place: the run that had the
+core out of the path produced identical bypass and filtered numbers, so the
+measurement does discriminate between a working chain and a bypassed one.
+
+**What the spike deliberately is not.** No shared-memory transport, no saved state,
+no default-sink tracking, and `Processor::initialize()` is still called from the
+real-time thread on the first block. That last one is the daemon's first job:
+initialize allocates, so a rate or quantum change has to be handled on the main
+loop and the processor handed over.
+
+**Build.** The top-level list file adds `linux/spike` only when `pkg_check_modules`
+finds `libpipewire-0.3`, so Windows builds, the MinGW stand-in and CI's current
+Ubuntu job (which does not install the development package) are all unchanged.
+Builds clean under g++ 13.3 with `-DISOTONE_WARNINGS_AS_ERRORS=ON`.
+
+
+## 2026-09-17: Stage 3's Linux half, the daemon, measured
+
+`linux/` now holds the transport, the daemon and the measurement rig. The stage 1
+criterion is met through the daemon on all three paths a state can reach the
+processor by:
+
+```
+    freq    path       flat   with band   measured   analytic     error
+    1000    live     -6.021     -18.021    -12.000    -12.000    -0.000
+    1000    cold     -6.021     -18.021    -12.000    -12.000    -0.000
+     100    live     -6.021      -6.181     -0.161     -0.161    +0.001
+     100    cold     -6.021      -6.181     -0.161     -0.161    +0.001
+```
+
+`flat` is the daemon with nothing written, and it measures the input amplitude
+exactly, so the pass-through is unity. `live` is `isotone-state set` writing the
+shared region while audio plays, the path every UI edit takes. `cold` is
+`isotone-state save` writing the file and the daemon then starting fresh and
+seeding its region from it, the path a sink takes when it comes up before any UI
+runs. `linux/daemon/measure.py`.
+
+**The transport** (`linux/transport/`, `isotone_transport_posix`) is a POSIX
+shared-memory object plus the saved-state file. It is thin, 2 source files, because
+the layout, the seqlock and the ring are core's and already portable. Two
+differences from Windows, both simplifications: a sink is identified by its
+PipeWire `node.name` rather than an endpoint GUID, and both ends run as the same
+user, so the object is 0600 and needs no security descriptor. The Windows side
+needs `kMappingSddl` only because its host is audiodg running as LocalService.
+
+One difference is not a simplification. A POSIX shm object outlives the process
+that made it, so unlike the Windows mapping it can be found stale. A daemon killed
+between `shm_open` and the header write leaves a region no later run could use, so
+`create_or_open` re-initialises an invalid region rather than refusing it;
+refusing would wedge that sink until someone deleted the file by hand. A region
+that is valid is adopted untouched. `transport_posix_tests` covers both, and all
+four of its less obvious behaviours were mutation checked: removing the host-field
+zeroing, accepting a relative `XDG_CONFIG_HOME`, dropping the hash suffix that
+keeps truncated long names distinct, and removing the stale-region recovery each
+make exactly the test that covers it fail.
+
+**The daemon** (`linux/daemon/`) creates everything itself through PipeWire's
+`adapter` and `link-factory` factories: the virtual sink applications play into,
+the filter node carrying the core, and the four links between them and the
+hardware sink. No configuration file drops a sink in and no session manager has to
+understand a filter.
+
+That is deliberate. WirePlumber only grew smart-filter placement in 0.5, and
+Ubuntu 24.04, which Linux Mint 22 is built on, ships 0.4.17; `grep` over its
+shipped configuration finds nothing about smart filters. Relying on that feature
+would have cut off the owner's own distribution.
+
+`Processor::initialize()` allocates, so it never runs on the audio thread. The
+processor is sized for 8192 frames up front, and a graph shape it cannot serve
+makes `on_process` pass the audio through untouched and hand the work to the main
+loop through `pw_loop_invoke`, one request at a time so a stalled main loop cannot
+queue thousands.
+
+**`isotone-state`** is what `isotone-shm` is on Windows: `show`, `set` and `save`
+against a sink's live region and its saved file. It links no PipeWire, so it can
+inspect a sink with no daemon running.
+
+**CI** gains a `linux-host` job. It installs `libpipewire-0.3-dev`, builds with
+`-DISOTONE_WARNINGS_AS_ERRORS=ON`, runs ctest, and then runs both acceptance
+measurements through a real PipeWire graph with `linux/ci-audio.sh`, which starts
+its own PipeWire, WirePlumber and D-Bus session in a scratch runtime directory.
+Both ends of the chain are null sinks, so no audio hardware is involved. The job
+asserts the three Linux binaries exist before it measures: without the development
+package the top-level list file skips `linux/` entirely and every other step would
+still pass.
+
+The whole sequence was run from a clean build on Ubuntu 24.04 with g++ 13.3, the
+same compiler `ubuntu-latest` resolves to. It has not run on a GitHub runner yet.
+
+**Three findings, all the same shape as stage 1c's: a tool reporting success
+while doing something else.**
+
+1. **An adapter node has no ports until a session manager configures it.** Started
+   with PipeWire alone, the declared null sinks appear in `pw-cli ls Node` with
+   correct names and `media.class`, and `pw-link` lists no ports for them at all,
+   which looks exactly like PipeWire having ignored the configuration. The ports
+   arrive when something sets `PortConfig mode=dsp`, so the headless rig has to run
+   WirePlumber even though it needs none of its policy.
+2. **`node.always-process` is not what creates those ports.** It was tried first on
+   that theory and changed nothing. It is kept for a different and real reason:
+   it stops a null sink suspending between measurements, which would drop its
+   ports and make a run flaky.
+3. **`pw-play --target <sink>` leans on session-manager policy.** Every link in the
+   rig is now made explicitly, playback included, so the measurement depends on no
+   policy at all. An unlinked stream is simply not scheduled, so nothing of the
+   file is lost between starting it and linking it.
+
+**What is not done, and is not pretended to be.** The daemon does not yet follow
+the default sink through WirePlumber metadata; `--sink` is given to it. It creates
+the audio ring in the region but never writes to it, so the UI's spectrum has
+nothing to read yet. Channel count and speaker mask are fixed at stereo and 0. The
+rate-change handover is implemented and reviewed but has not been exercised by an
+actual rate change. The systemd user unit is written and parses, but has never been
+installed, because that wants a package (stage 6's Linux half) rather than a
+hand-copied file.
 
 ---
 
@@ -3069,9 +3306,12 @@ points IntelliSense at `build/compile_commands.json`.
 
 **Stage 3** remaining:
 
-1. **Linux daemon**, with 1c: the targets, the environment and the order are in
-   "Linux, the targets and the environment" (2026-09-17). Next step is the owner's:
-   the Mint VM with SSH.
+1. **Linux daemon**: done and measured, see "Stage 3's Linux half, the daemon,
+   measured" (2026-09-17). Stage 1c is done too. What is left on the Linux side is
+   the default sink through WirePlumber metadata, the audio ring the UI's spectrum
+   reads, a rate change actually exercised, then item 4 (the UI's Windows layer)
+   and item 5 (packaging). The Mint VM is wanted when the UI port starts, not
+   before.
 
 **Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
 real install, repair and uninstall from Devices with the Windows prompt;
