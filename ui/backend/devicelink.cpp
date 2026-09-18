@@ -65,6 +65,8 @@ DeviceLink::~DeviceLink() {
     stop_compat();
 }
 
+bool DeviceLink::region_open() const { return mapping_.is_open(); }
+
 void DeviceLink::set_target(const OutputTarget& target) {
     const bool same_endpoint = target.guid == target_.guid && target.backend == target_.backend;
     target_ = target;
@@ -98,13 +100,13 @@ bool DeviceLink::ensure_region() {
     return true;
 }
 
-DWORD DeviceLink::write_region(const EqState& engine_state) {
+LinkError DeviceLink::write_region(const EqState& engine_state) {
     if (!ensure_region()) return ERROR_FILE_NOT_FOUND;
     param_block_write(mapping_.params(), [&](ParamBlock* b) { to_param_block(engine_state, b); });
     return ERROR_SUCCESS;
 }
 
-DWORD DeviceLink::apply(const EqState& state) {
+LinkError DeviceLink::apply(const EqState& state) {
     switch (target_.backend) {
         case Backend::native: return write_region(state);
         case Backend::equalizer_apo: {
@@ -122,7 +124,7 @@ DWORD DeviceLink::apply(const EqState& state) {
     return ERROR_NOT_READY;
 }
 
-DWORD DeviceLink::commit(const EqState& state) {
+LinkError DeviceLink::commit(const EqState& state) {
     if (target_.backend != Backend::equalizer_apo) return apply(state);
     {
         std::lock_guard<std::mutex> lock(compat_mutex_);
@@ -132,7 +134,7 @@ DWORD DeviceLink::commit(const EqState& state) {
     return ERROR_SUCCESS;
 }
 
-DWORD DeviceLink::save(const EqState& state, const EqState& engine_state) {
+LinkError DeviceLink::save(const EqState& state, const EqState& engine_state) {
     if (target_.backend != Backend::native) return ERROR_NOT_SUPPORTED;
     ParamBlock block{};
     to_param_block(state, &block);
@@ -147,7 +149,7 @@ DWORD DeviceLink::save(const EqState& state, const EqState& engine_state) {
     return ERROR_SUCCESS;
 }
 
-std::wstring DeviceLink::saved_state_path() const {
+std::filesystem::path DeviceLink::saved_state_path() const {
     return isotone::ui::saved_state_path(namespace_, widen_id(target_.guid));
 }
 
@@ -254,7 +256,7 @@ void DeviceLink::stop_compat() {
     compat_pending_.reset();
 }
 
-DWORD DeviceLink::last_compat_error() const {
+LinkError DeviceLink::last_compat_error() const {
     std::lock_guard<std::mutex> lock(compat_mutex_);
     return compat_error_;
 }

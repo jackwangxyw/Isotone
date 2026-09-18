@@ -3578,6 +3578,47 @@ the `Backend` enum's `equalizer_apo`, and the region namespace and compat
 directory the constructor takes. Those are the next seam, and they only matter
 when the Linux backend is written.
 
+
+## 2026-09-18: Where a Linux output's edits go
+
+`ui/backend/devicelink_posix.cpp`: the Linux half of `DeviceLink`. It is a third
+the length of the Windows one, because there is one engine rather than two. The
+daemon owns the sink's region, every edit is a seqlock write into it, and the
+daemon already writes the post-EQ audio into the region's ring, so there is no
+Equalizer APO worker thread and no loopback capture to have a counterpart.
+
+`DeviceLink`'s public API is platform-neutral now. `DWORD` became `LinkError`, a
+`uint32_t` that is 0 for success, a Win32 code on Windows and an errno on Linux;
+that was nearly free, because `apply` and `commit` had their results ignored at
+every call site and only `last_compat_error` is ever shown. `saved_state_path`
+returns a `std::filesystem::path`. `Backend` gains `pipewire`. The constructor and
+the private members are what stay per platform, because the two sides share
+almost nothing below the surface: `#if defined(_WIN32)` around them, and two
+translation units.
+
+The behaviour the tests hold it to, with the test playing the daemon rather than
+running one: a commit reaches the region a daemon would read and leaves the
+daemon's header alone, so the format it published survives an edit; no daemon
+means no region and an edit says so; `save` writes the file and treats "no daemon
+to tell" as success, because the file is what the sink will start from;
+`load_current` prefers the region and falls back to the file; `read_audio` drains
+the ring the daemon writes, at the rate the daemon published; and only a
+`pipewire` output gets a region at all. Six cases, 32 assertions, and four
+mutations each fail exactly the test that covers them.
+
+CI's linux-host job now installs Qt and configures with `-DISOTONE_BUILD_UI=ON`,
+so this runs there too, and asserts the backend was built for the same reason it
+asserts the daemon was: without Qt the whole `ui` directory is skipped and every
+other step still passes.
+
+Two things worth keeping. `region_open()` was defined inline in the header against
+`mapping_`, which does not exist on Linux; it is a declaration now, defined on
+each side. And a comment line ending in a backslash continues onto the next one:
+the line describing the `Global\` namespace swallowed the one under it, which MSVC
+never minded and GCC treats as an error under `-Werror`.
+
+Windows unchanged: 45943, 2002, 290.
+
 ---
 
 # Where things stand (2026-09-16)

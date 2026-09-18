@@ -75,9 +75,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build libpipewire-0.3-dev pipewire pipewire-bin wireplumber dbus-x11 python3-numpy
+          # Qt for the UI's backend half, which builds on Linux and carries its
+          # own tests. find_package asks for every component the Windows UI uses,
+          # so they all have to be here even though only the backend is built.
+          sudo apt-get install -y -qq qt6-base-dev qt6-declarative-dev qt6-base-dev-tools
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DISOTONE_WARNINGS_AS_ERRORS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DISOTONE_WARNINGS_AS_ERRORS=ON -DISOTONE_BUILD_UI=ON
 
       - name: Build
         run: cmake --build build
@@ -91,6 +95,7 @@ jobs:
           test -x build/linux/daemon/isotone-daemon || { echo "the daemon was not built"; exit 1; }
           test -x build/linux/spike/isotone-pw-spike || { echo "the spike was not built"; exit 1; }
           test -x build/linux/daemon/isotone-state || { echo "isotone-state was not built"; exit 1; }
+          test -x build/ui/ui_backend_posix_tests || { echo "the UI backend was not built"; exit 1; }
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

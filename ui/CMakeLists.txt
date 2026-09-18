@@ -43,10 +43,14 @@ if(WIN32)
     )
     set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport isotone_compat isotone_devices)
 else()
-    # The Linux halves are still to be written: the daemon's region in place of
-    # the APO's, PipeWire in place of the device APIs, XDG autostart in place of
-    # the Run key.
-    set(ISOTONE_UI_BACKEND_PLATFORM)
+    # devicelink_posix is where edits go on Linux: the daemon's region in place of
+    # the APO's mapping, and the daemon's ring in place of the loopback capture.
+    # Still to be written: PipeWire in place of the device APIs, XDG autostart in
+    # place of the Run key, and the tones.
+    set(ISOTONE_UI_BACKEND_PLATFORM
+        backend/devicelink.h
+        backend/devicelink_posix.cpp
+    )
     set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport_posix)
 endif()
 
@@ -79,6 +83,15 @@ endif()
 # devicetool and the compat writer directly. The backend above is what builds on
 # both today; porting these is the next step.
 if(NOT WIN32)
+    # What the Linux backend can be held to without a Qt layer or a daemon: the
+    # test creates the sink's region and writes its ring the way a daemon does.
+    if(ISOTONE_BUILD_TESTS)
+        add_executable(ui_backend_posix_tests tests/test_main.cpp tests/test_devicelink_posix.cpp)
+        target_link_libraries(ui_backend_posix_tests PRIVATE isotone_ui_backend)
+        target_include_directories(ui_backend_posix_tests PRIVATE
+                                   ${PROJECT_SOURCE_DIR}/core/tests/third_party)
+        add_test(NAME ui_backend_posix_tests COMMAND ui_backend_posix_tests)
+    endif()
     return()
 endif()
 
