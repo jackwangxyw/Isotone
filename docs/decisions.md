@@ -3619,6 +3619,48 @@ never minded and GCC treats as an error under `-Werror`.
 
 Windows unchanged: 45943, 2002, 290.
 
+
+## 2026-09-18: The outputs a Linux machine has
+
+`ui/backend/pipewire_outputs.{h,cpp}`: what `isotone::devices` does with
+`IMMDeviceEnumerator` on Windows, done with PipeWire's registry. No Qt, so it can
+be tested without one, and it is what `Outputs` will sit on when the Qt layer is
+ported.
+
+It reports each `Audio/Sink` by `node.name` (the identity an `OutputTarget`
+carries and the region is named for, stable across restarts unlike the object id)
+and `node.description` (what a person is shown, falling back to the name), marks
+Isotone's own virtual sink so nothing offers it as something to feed, and follows
+`default.audio.sink` from the same WirePlumber metadata the daemon follows.
+
+A `pw_thread_loop` of its own, because the UI thread must not block on PipeWire
+and PipeWire's loop wants to own its thread. Everything a caller reads is a
+snapshot taken under a lock. The change callback runs on the PipeWire thread, so
+a UI hands it to its own loop rather than touching widgets from it.
+
+`wait_ready()` waits for a `pw_core_sync` to be answered, not merely for the
+registry to start reporting: there is no other way to know that everything
+already there has arrived. A caller listing outputs once therefore does not poll.
+
+**The test found a real bug in it.** Stopping and starting again left `ready`
+true from the first run, so `wait_ready()` returned at once and the caller read an
+empty list. `start()` clears it now. That is the case that would have shown up as
+"the outputs list is empty after the audio server restarts", which is exactly the
+kind of thing that is hard to find later.
+
+Nine cases, 51 assertions, each skipped rather than failed where there is no
+PipeWire or the rig's sinks are not declared, so the suite still passes on a
+machine without a sound server.
+
+Windows unchanged: 45943, 2002, 290. Linux: three test binaries green from a clean
+build, and both measurements still pass.
+
+**What still needs a desktop, and so a VM:** the tray, the GlobalShortcuts portal,
+and window behaviour (an app cannot keep itself on top under Wayland, which the
+owner has accepted). Everything before that is compiler work: the Devices view
+with no install concept, the tones into the virtual sink, XDG autostart in place
+of the Run key, and then the Qt layer itself.
+
 ---
 
 # Where things stand (2026-09-16)

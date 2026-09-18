@@ -52,6 +52,15 @@ else()
         backend/devicelink_posix.cpp
     )
     set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport_posix)
+    # Enumerating outputs needs PipeWire itself, which the top-level list file
+    # has already looked for. Without it the backend still builds, just without
+    # a way to see the machine's sinks.
+    if(PIPEWIRE_FOUND)
+        list(APPEND ISOTONE_UI_BACKEND_PLATFORM
+             backend/pipewire_outputs.h
+             backend/pipewire_outputs.cpp)
+        list(APPEND ISOTONE_UI_BACKEND_PLATFORM_LIBS PkgConfig::PIPEWIRE)
+    endif()
 endif()
 
 # Without Qt: spectrum analysis, the state an output gets, and where edits go.
@@ -86,7 +95,11 @@ if(NOT WIN32)
     # What the Linux backend can be held to without a Qt layer or a daemon: the
     # test creates the sink's region and writes its ring the way a daemon does.
     if(ISOTONE_BUILD_TESTS)
-        add_executable(ui_backend_posix_tests tests/test_main.cpp tests/test_devicelink_posix.cpp)
+        set(ISOTONE_UI_POSIX_TESTS tests/test_main.cpp tests/test_devicelink_posix.cpp)
+        if(PIPEWIRE_FOUND)
+            list(APPEND ISOTONE_UI_POSIX_TESTS tests/test_pipewire_outputs.cpp)
+        endif()
+        add_executable(ui_backend_posix_tests ${ISOTONE_UI_POSIX_TESTS})
         target_link_libraries(ui_backend_posix_tests PRIVATE isotone_ui_backend)
         target_include_directories(ui_backend_posix_tests PRIVATE
                                    ${PROJECT_SOURCE_DIR}/core/tests/third_party)
