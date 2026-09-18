@@ -3661,6 +3661,35 @@ owner has accepted). Everything before that is compiler work: the Devices view
 with no install concept, the tones into the virtual sink, XDG autostart in place
 of the Run key, and then the Qt layer itself.
 
+
+## 2026-09-18: Launch at sign-in on Linux
+
+`ui/backend/autostart_xdg.{h,cpp}`: a `.desktop` file under
+`$XDG_CONFIG_HOME/autostart`, which GNOME, KDE and Cinnamon all read. The
+counterpart of the value under HKCU's Run key.
+
+The file is the whole of the state: present means on, absent means off. There is
+no equivalent of Windows' StartupApproved, so a desktop that lets a person switch
+an entry off writes `Hidden=true` or `X-GNOME-Autostart-enabled=false` into the
+file rather than deleting it, and both are read back as off. Neither `OnlyShowIn`
+nor `NotShowIn` is written, so the entry is not pinned to one desktop.
+
+`Exec` is refused rather than written when the command holds a newline: a desktop
+entry value ends at the newline, so one in the path would not make a longer
+command, it would write a second key. The file is written whole and renamed, so a
+desktop reading the directory at the wrong moment never sees half an entry.
+
+Fifteen cases across the Linux backend now, 75 assertions. Four mutations of this
+file each fail the test that covers them: accepting a newline in the command,
+ignoring `Hidden=true`, accepting a relative `XDG_CONFIG_HOME`, and pinning the
+entry to one desktop.
+
+One note on the mutation checks themselves. The newline mutation first reported
+"still passes", which would have meant the test was worthless. It was the `sed`
+that failed to match, not the test: applied by line number instead, it fails two
+assertions. A mutation that does not change the binary proves nothing, so a
+mutation check has to show the mutation actually landed.
+
 ---
 
 # Where things stand (2026-09-16)

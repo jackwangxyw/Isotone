@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 The Isotone authors
+//
+// Launch at sign-in on Linux: the .desktop file under XDG's autostart directory.
+
+#include <unistd.h>
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+#include "autostart_xdg.h"
+#include "doctest.h"
+
+using namespace isotone::ui;
+
+namespace {
+
+std::string scratch() {
+    return "/tmp/isotone-autostart-" + std::to_string(::getpid());
+}
+
+std::string write_file(const std::string& path, const std::string& text) {
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream(path, std::ios::trunc) << text;
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("the directory follows the XDG base directory specification") {
+    const char* saved = std::getenv("XDG_CONFIG_HOME");
+    const std::string keep = saved != nullptr ? saved : "";
+
+    ::setenv("XDG_CONFIG_HOME", "/somewhere/config", 1);
+    CHECK(autostart_dir() == "/somewhere/config/autostart");
+
+    // A relative XDG_CONFIG_HOME is invalid and must be ignored, not resolved.
+    ::setenv("XDG_CONFIG_HOME", "relative/path", 1);
+    ::setenv("HOME", "/home/someone", 1);
+    CHECK(autostart_dir() == "/home/someone/.config/autostart");
+
+    ::unsetenv("XDG_CONFIG_HOME");
+    CHECK(autostart_dir() == "/home/someone/.config/autostart");
+
+    if (saved != nullptr) ::setenv("XDG_CONFIG_HOME", keep.c_str(), 1);
+}
+
+TEST_CASE("the file is a desktop entry, and --tray is part of the command") {
+    const std::string plain = autostart_contents("/usr/bin/isotone", false);
+    CHECK(plain.find("[Desktop Entry]") == 0);
+    CHECK(plain.find("Type=Application") != std::string::npos);
+    CHECK(plain.find("Exec=/usr/bin/isotone\n") != std::string::npos);
+    // Not pinned to one desktop: the entry is for GNOME, KDE and Cinnamon alike.
+    CHECK(plain.find("OnlyShowIn") == std::string::npos);
+    CHECK(plain.find("NotShowIn") == std::string::npos);
+
+    const std::string tray = autostart_contents("/usr/bin/isotone", true);
+    CHECK(tray.find("Exec=/usr/bin/isotone --tray\n") != std::string::npos);
+}
+
+TEST_CASE("writing then removing is on then off") {
+    const std::string path = autostart_path(scratch());
+    std::filesystem::remove_all(scratch());
+
+    CHECK_FALSE(autostart_enabled(path));
+    REQUIRE(write_autostart(path, "/opt/isotone/isotone", true) == 0);
+    CHECK(autostart_enabled(path));
+    CHECK(autostart_command(path) == "/opt/isotone/isotone --tray");
+
+    REQUIRE(remove_autostart(path) == 0);
+    CHECK_FALSE(autostart_enabled(path));
+    // Turning off what is already off is not a failure.
+    CHECK(remove_autostart(path) == 0);
+
+    std::filesystem::remove_all(scratch());
+}
+
+TEST_CASE("an entry a desktop switched off reads as off") {
+    const std::string dir = scratch();
+    std::filesystem::remove_all(dir);
+    const std::string path = autostart_path(dir);
+
+    write_file(path, "[Desktop Entry]\nType=Application\nExec=/usr/bin/isotone\nHidden=true\n");
+    CHECK_FALSE(autostart_enabled(path));
+
+    write_file(path,
+               "[Desktop Entry]\nType=Application\nExec=/usr/bin/isotone\n"
+               "X-GNOME-Autostart-enabled=false\n");
+    CHECK_FALSE(autostart_enabled(path));
+
+    write_file(path, "[Desktop Entry]\nType=Application\nExec=/usr/bin/isotone\nHidden=false\n");
+    CHECK(autostart_enabled(path));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("a command with a newline is refused, not written") {
+    const std::string path = autostart_path(scratch());
+    std::filesystem::remove_all(scratch());
+
+    // It would end the Exec value and write a second key.
+    CHECK(write_autostart(path, "/usr/bin/isotone\nX-Evil=1", false) != 0);
+    CHECK_FALSE(std::filesystem::exists(path));
+
+    std::filesystem::remove_all(scratch());
+}
+
+TEST_CASE("no temporary file is left behind") {
+    const std::string path = autostart_path(scratch());
+    std::filesystem::remove_all(scratch());
+
+    REQUIRE(write_autostart(path, "/usr/bin/isotone", false) == 0);
+    CHECK(std::filesystem::exists(path));
+    CHECK_FALSE(std::filesystem::exists(path + ".tmp"));
+
+    std::filesystem::remove_all(scratch());
+}

@@ -50,6 +50,8 @@ else()
     set(ISOTONE_UI_BACKEND_PLATFORM
         backend/devicelink.h
         backend/devicelink_posix.cpp
+        backend/autostart_xdg.h
+        backend/autostart_xdg.cpp
     )
     set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport_posix)
     # Enumerating outputs needs PipeWire itself, which the top-level list file
@@ -95,7 +97,8 @@ if(NOT WIN32)
     # What the Linux backend can be held to without a Qt layer or a daemon: the
     # test creates the sink's region and writes its ring the way a daemon does.
     if(ISOTONE_BUILD_TESTS)
-        set(ISOTONE_UI_POSIX_TESTS tests/test_main.cpp tests/test_devicelink_posix.cpp)
+        set(ISOTONE_UI_POSIX_TESTS tests/test_main.cpp tests/test_devicelink_posix.cpp
+                                   tests/test_autostart_xdg.cpp)
         if(PIPEWIRE_FOUND)
             list(APPEND ISOTONE_UI_POSIX_TESTS tests/test_pipewire_outputs.cpp)
         endif()
