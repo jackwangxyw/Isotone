@@ -19,7 +19,10 @@ set -euo pipefail
 # WirePlumber needs a session bus. Re-exec under one rather than require the
 # caller to have provided it.
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-    exec dbus-run-session -- "$0" "$@"
+    # Through bash, not "$0" on its own: this is run as `bash linux/ci-audio.sh`
+    # and carries no executable bit, so dbus-run-session cannot exec it directly
+    # and fails with Permission denied.
+    exec dbus-run-session -- bash "$0" "$@"
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
