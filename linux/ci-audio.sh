@@ -60,7 +60,10 @@ if ! pw-link -i 2>/dev/null | grep -q '^isotone_hw:'; then
     pw-cli ls Node 2>&1 | head -40 >&2
     exit 1
 fi
-pw-cli info 0 2>/dev/null | grep -E 'version|name' | head -3
+# Informational only, and under `set -euo pipefail` a grep that matches
+# nothing, or one killed by SIGPIPE from head, would end the run here with
+# the sinks already up and no measurement attempted.
+pw-cli info 0 2>/dev/null | grep -E 'version|name' | head -3 || true
 
 echo
 echo "=== stage 1c: the topology spike ==="

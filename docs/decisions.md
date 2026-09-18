@@ -3481,6 +3481,65 @@ The other 6.4 difference found while probing: `qt_add_qml_module` requires a
 `VERSION` there and 6.11 made it optional. Not needed yet, since the Qt layer does
 not build on Linux, but it is one line when it does.
 
+
+## 2026-09-18: The Linux host reviewed, and what the review found
+
+A review of everything added this session. Fifteen findings, four of them serious,
+and the ones checked by hand against the code were all real. Worth recording that
+the measurements did not catch any of them: every figure was green throughout,
+because measurement proves the path where nothing goes wrong and says nothing
+about shutdown, retargeting, or a device going away.
+
+**The ring was claimed once and never again.** `audio_ring.h` says plainly of
+`claim`: "Call it again on later process calls while it fails", because a ring
+another instance holds is only taken over after its write index has stood still.
+`IsoApo::APOProcess` retries from its process loop; the daemon claimed once in
+`do_initialize` and gave up. A daemon that is killed leaves a live-looking claim,
+so the next run's spectrum was dead for its whole life. `host_publish_format` was
+nested inside the successful claim as well, so the UI would not have learned the
+rate or channel count either. The claim is now retried from the audio thread and
+the format is published regardless.
+
+Verified: kill a daemon mid-stream with `--keep-region`, start another, and read
+the ring. -18.021 dBFS with the fix, "no audio in the ring" with it reverted.
+`linux/daemon/measure.py` has it as the `stale` case.
+
+**The region was unmapped from under the audio thread.** `close_region` did
+`munmap` with no handshake, and `on_process` reads that memory. Both callers hit
+it: `set_target` closed the region before clearing `ready`, and teardown closed it
+four lines before destroying the filter, which is still scheduled. Switching the
+default sink while audio played, or SIGTERM, was a read of freed memory on the
+data thread. There is now a `quiesce()`: clear `ready`, then wait for the flag
+`on_process` holds across its body, the two ordered against each other so a call
+that starts late returns before touching the region and one already inside is
+waited for. Teardown destroys the filter first.
+
+**The service unit could not start.** `ExecStart=... --sink ${ISOTONE_SINK}` with
+the variable set only by an optional drop-in: systemd expands an unset variable to
+nothing, leaving `--sink` with no value, which exits 2, which `Restart=on-failure`
+turns into a restart loop. It now takes no arguments and follows the default sink,
+and the drop-in replaces the command instead.
+
+**A fixed target was terminal.** `on_global_remove` cleared `target` when the fed
+node went away, but only the metadata listener ever sets one and that is bound
+only when following. With `--sink`, one unplug left the daemon silent for good.
+The name is now kept when it was given explicitly.
+
+The rest, in short: links are made per channel and retried, so a port that has not
+reached the registry yet no longer leaves that channel silent for the run, and a
+failure part way through no longer double-links a channel on the next event (which
+would have been about 6 dB hot); link proxies are destroyed rather than dropped;
+the metadata proxy is released so a WirePlumber restart does not end default
+following; a refused `pw_loop_invoke` no longer wedges the daemon into permanent
+passthrough; the shm create/open race that `systemctl --user restart` walks into
+retries instead of failing the start; a failed start no longer leaves its region
+behind; `write_persisted_state` no longer reports a save that happened as a
+failure when the directory cannot be fsynced, nor success when the write was
+short; and an informational pipeline in `ci-audio.sh` can no longer end the run
+under `pipefail` before any measurement.
+
+All measurements still pass, including the new `stale` case, from a clean build.
+
 ---
 
 # Where things stand (2026-09-16)

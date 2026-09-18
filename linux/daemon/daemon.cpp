@@ -92,12 +92,17 @@ struct Daemon {
     spa_hook      registry_hook{};
 
     pw_metadata* metadata = nullptr;
+    uint32_t     metadata_id = SPA_ID_INVALID;
     spa_hook     metadata_hook{};
 
     pw_proxy*              virtual_sink = nullptr;
     std::vector<pw_proxy*> input_links;    // our sink's monitor into the core
     std::vector<pw_proxy*> output_links;   // the core into the sink being fed
-    bool                   input_linked = false;
+    // Per channel, so a link the registry could not satisfy yet is made when its
+    // port arrives instead of leaving that channel silent for the run, and so a
+    // retry never links a channel twice.
+    std::vector<bool> input_linked;
+    std::vector<bool> output_linked;
 
     pw_filter* filter = nullptr;
     void*      in_port[kMaxChannels]  = {};
@@ -135,6 +140,9 @@ struct Daemon {
     uint32_t          proc_rate = 0;
     uint32_t          proc_max_frames = 0;
     std::atomic<bool> init_pending{false};
+    // Held across the body of on_process, so the main loop can tell when the
+    // audio thread is no longer reading the region it is about to unmap.
+    std::atomic<bool> in_process{false};
 
     std::atomic<uint64_t> blocks_processed{0};
 };
@@ -173,10 +181,12 @@ int do_initialize(spa_loop*, bool, uint32_t, const void* data, size_t, void* use
         // Here rather than on the audio thread, whose first lap through the ring
         // would otherwise fault every page in.
         d->ring.prefault();
-        if (d->ring.claim(d->ring_token) && d->ring.owns()) {
-            host_publish_format(shared, request->rate, d->channels, d->speaker_mask,
-                                HostState::Running);
-        }
+        d->ring.claim(d->ring_token);
+        // Published whether or not the ring was won: the rate, the channel count
+        // and the host's state are the format, and a UI needs them even while
+        // another instance still owns the ring.
+        host_publish_format(shared, request->rate, d->channels, d->speaker_mask,
+                            HostState::Running);
     }
     d->ready.store(true, std::memory_order_release);
     d->init_pending.store(false, std::memory_order_release);
@@ -184,8 +194,19 @@ int do_initialize(spa_loop*, bool, uint32_t, const void* data, size_t, void* use
 }
 
 // Audio thread (PW_FILTER_FLAG_RT_PROCESS).
+// Sets a flag for the whole of on_process. quiesce() clears `ready` and then
+// waits for this, which is what makes unmapping the region safe.
+struct InProcessGuard {
+    std::atomic<bool>& flag;
+    explicit InProcessGuard(std::atomic<bool>& f) : flag(f) { flag.store(true); }
+    ~InProcessGuard() { flag.store(false); }
+    InProcessGuard(const InProcessGuard&) = delete;
+    InProcessGuard& operator=(const InProcessGuard&) = delete;
+};
+
 void on_process(void* userdata, spa_io_position* position) {
     auto* d = static_cast<Daemon*>(userdata);
+    const InProcessGuard guard(d->in_process);
 
     const uint32_t frames = position->clock.duration;
     const uint32_t rate   = position->clock.rate.denom != 0 ? position->clock.rate.denom : 48000;
@@ -205,23 +226,38 @@ void on_process(void* userdata, spa_io_position* position) {
         }
     }
 
-    const bool fits = d->ready.load(std::memory_order_acquire) && rate == d->proc_rate &&
-                      frames <= d->proc_max_frames;
+    // Sequentially consistent against quiesce(): either this call sees `ready`
+    // already false and touches no region, or quiesce sees in_process and waits.
+    const bool fits = d->ready.load() && rate == d->proc_rate && frames <= d->proc_max_frames;
     if (!fits) {
         // Pass the audio through untouched and ask the main loop to resize. One
         // request at a time, or a stalled main loop would queue thousands.
         bool expected = false;
         if (d->init_pending.compare_exchange_strong(expected, true)) {
-            d->ready.store(false, std::memory_order_release);
+            d->ready.store(false);
             const InitRequest request{rate, frames};
-            pw_loop_invoke(pw_main_loop_get_loop(d->loop), do_initialize, 0, &request,
-                           sizeof(request), false, d);
+            const int queued = pw_loop_invoke(pw_main_loop_get_loop(d->loop), do_initialize, 0,
+                                              &request, sizeof(request), false, d);
+            // A refused invoke would otherwise leave init_pending set for good,
+            // and every later cycle would fail the exchange and pass the audio
+            // through untouched with nothing asking for a resize again.
+            if (queued < 0) d->init_pending.store(false);
         }
         return;
     }
 
     ParamBlock* shared = d->region.params();
     if (shared != nullptr) {
+        // A ring another instance still holds is taken over only after its write
+        // index has stood still for a while, so the claim has to be retried from
+        // here rather than made once at startup; audio_ring.h says as much, and
+        // IsoApo::APOProcess does the same. A daemon that was killed leaves its
+        // claim behind, and without this the spectrum would be dead for the whole
+        // of the next run, and the format never published.
+        if (!d->ring.owns() && d->ring.claim(d->ring_token) && d->ring.owns()) {
+            host_publish_format(shared, d->proc_rate, d->channels, d->speaker_mask,
+                                HostState::Running);
+        }
         host_heartbeat(shared);
         // Copy only when something has been written since the last apply. A
         // failed read keeps the current parameters and retries next cycle.
@@ -305,79 +341,76 @@ std::string port_name(const char* prefix, const Position& position) {
 
 // Our own sink's monitor into the core. Done once: the virtual sink is ours and
 // does not change.
+// Channel by channel, and only the ones not linked yet. Linking the whole set or
+// nothing meant that a failure part way through left links behind while the
+// "done" flag stayed clear, so the next registry event linked those channels a
+// second time and they came out about 6 dB hot.
 void link_input(Daemon& d) {
-    if (d.input_linked || d.filter == nullptr) return;
+    if (d.filter == nullptr) return;
     const uint32_t filter_node = pw_filter_get_node_id(d.filter);
     if (filter_node == SPA_ID_INVALID) return;
 
-    uint32_t monitor[kMaxChannels], filter_in[kMaxChannels];
     for (uint32_t c = 0; c < d.channels; ++c) {
+        if (d.input_linked[c]) continue;
         const Position& p = d.layout->positions[c];
-        if (!find_port(d, d.options.sink_name, port_name("monitor_", p), true, &monitor[c])) return;
-        if (!find_port_by_node_id(d, filter_node, port_name("in_", p), false, &filter_in[c])) return;
-    }
-    for (uint32_t c = 0; c < d.channels; ++c) {
-        pw_proxy* link = make_link(d, monitor[c], filter_in[c]);
+        uint32_t monitor = 0, filter_in = 0;
+        if (!find_port(d, d.options.sink_name, port_name("monitor_", p), true, &monitor)) continue;
+        if (!find_port_by_node_id(d, filter_node, port_name("in_", p), false, &filter_in)) continue;
+        pw_proxy* link = make_link(d, monitor, filter_in);
         if (link == nullptr) {
-            std::fprintf(stderr, "isotone-daemon: could not link the monitor into the core\n");
-            return;
+            std::fprintf(stderr, "isotone-daemon: could not link %s into the core\n", p.name);
+            continue;
         }
         d.input_links.push_back(link);
+        d.input_linked[c] = true;
     }
-    d.input_linked = true;
 }
 
 void unlink_output(Daemon& d) {
     for (pw_proxy* link : d.output_links) pw_proxy_destroy(link);
     d.output_links.clear();
+    d.output_linked.assign(d.channels, false);
 }
 
-// The core into the sink being fed. Redone whenever the target changes, and all
-// or nothing: a half-linked graph would play one channel.
+// The core into the sink being fed, one channel at a time and only those not
+// linked yet, so a port that had not reached the registry when the target
+// changed is picked up when it arrives instead of leaving that channel silent
+// for the run. A target that genuinely lacks a position simply never gets it.
 bool link_output(Daemon& d) {
-    if (!d.output_links.empty() || d.filter == nullptr || d.target.empty()) return false;
+    if (d.filter == nullptr || d.target.empty()) return false;
     const uint32_t filter_node = pw_filter_get_node_id(d.filter);
     if (filter_node == SPA_ID_INVALID) return false;
 
-    // A target that does not carry one of our positions simply does not get that
-    // channel: a 5.1 core feeding a stereo sink still plays its front pair
-    // rather than nothing at all. The front left has to land somewhere, though,
-    // or there is no path worth making and the graph is better left alone.
-    uint32_t filter_out[kMaxChannels], playback[kMaxChannels];
-    bool     matched[kMaxChannels] = {};
-    uint32_t matches = 0;
+    uint32_t made = 0;
     for (uint32_t c = 0; c < d.channels; ++c) {
+        if (d.output_linked[c]) continue;
         const Position& p = d.layout->positions[c];
-        if (!find_port_by_node_id(d, filter_node, port_name("out_", p), true, &filter_out[c]))
-            return false;
-        matched[c] = find_port(d, d.target, port_name("playback_", p), false, &playback[c]);
-        if (matched[c]) ++matches;
-    }
-    if (matches == 0 || !matched[0]) return false;
-
-    for (uint32_t c = 0; c < d.channels; ++c) {
-        if (!matched[c]) continue;
-        pw_proxy* link = make_link(d, filter_out[c], playback[c]);
+        uint32_t filter_out = 0, playback = 0;
+        if (!find_port_by_node_id(d, filter_node, port_name("out_", p), true, &filter_out)) continue;
+        if (!find_port(d, d.target, port_name("playback_", p), false, &playback)) continue;
+        pw_proxy* link = make_link(d, filter_out, playback);
         if (link == nullptr) {
-            unlink_output(d);
-            std::fprintf(stderr, "isotone-daemon: could not link the core into %s\n", d.target.c_str());
-            return false;
+            std::fprintf(stderr, "isotone-daemon: could not link %s into %s\n", p.name,
+                         d.target.c_str());
+            continue;
         }
         d.output_links.push_back(link);
+        d.output_linked[c] = true;
+        ++made;
     }
-    if (matches != d.channels) {
-        std::fprintf(stderr, "isotone-daemon: %s carries %u of our %u channels\n", d.target.c_str(),
-                     matches, d.channels);
+    if (made > 0) {
+        uint32_t total = 0;
+        for (uint32_t c = 0; c < d.channels; ++c) total += d.output_linked[c] ? 1u : 0u;
+        std::fprintf(stderr, "isotone-daemon: %s -> core -> %s (%u of %u channels)\n",
+                     d.options.sink_name.c_str(), d.target.c_str(), total, d.channels);
+        std::fflush(stderr);
     }
-    std::fprintf(stderr, "isotone-daemon: %s -> core -> %s\n", d.options.sink_name.c_str(),
-                 d.target.c_str());
-    std::fflush(stderr);
-    return true;
+    return made > 0;
 }
 
 void try_link(Daemon& d) {
     link_input(d);
-    if (d.output_links.empty()) link_output(d);
+    link_output(d);
 }
 
 // -------------------------------------------------------- region and target
@@ -392,8 +425,21 @@ void seed_from_saved(ParamBlock* block, void* context) {
     block->hdr = header;   // the live region's header is the host's, not the file's
 }
 
+// Waits for the audio thread to leave on_process, so what it reads can be
+// unmapped from under it. `ready` is cleared first and the two flags are
+// sequentially consistent, so a call starting after this returns before it
+// touches the region; one already past that point is waited for.
+void quiesce(Daemon& d) {
+    d.ready.store(false);
+    for (int i = 0; i < 400 && d.in_process.load(); ++i) {
+        timespec nap{0, 500000};   // 0.5 ms, so at most 200
+        ::nanosleep(&nap, nullptr);
+    }
+}
+
 void close_region(Daemon& d) {
     if (!d.region.is_open()) return;
+    quiesce(d);
     if (ParamBlock* shared = d.region.params(); shared != nullptr) {
         host_publish_format(shared, d.proc_rate, d.channels, d.speaker_mask,
                             HostState::NotLoaded);
@@ -530,19 +576,37 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
         if (name == nullptr || std::strcmp(name, "default") != 0) return;
         d->metadata =
             static_cast<pw_metadata*>(pw_registry_bind(d->registry, id, type, PW_VERSION_METADATA, 0));
-        if (d->metadata != nullptr)
+        if (d->metadata != nullptr) {
+            d->metadata_id = id;
             pw_metadata_add_listener(d->metadata, &d->metadata_hook, &kMetadataEvents, d);
+        }
     }
 }
 
 void on_global_remove(void* data, uint32_t id) {
     auto* d = static_cast<Daemon*>(data);
-    // The sink being fed going away takes its links with it, so they are dropped
-    // rather than destroyed; the next default says where to go instead.
+
+    // WirePlumber restarting takes the default metadata with it. Forgetting the
+    // proxy is what lets the replacement be bound: keeping it left a zombie that
+    // emitted nothing and a guard that refused to bind the new one, so the
+    // daemon silently stopped following the default from then on.
+    if (d->metadata != nullptr && d->metadata_id == id) {
+        spa_hook_remove(&d->metadata_hook);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy*>(d->metadata));
+        d->metadata = nullptr;
+        d->metadata_id = SPA_ID_INVALID;
+    }
+
     const auto node = d->nodes.find(id);
     if (node != d->nodes.end() && !d->target.empty() && node->second.name == d->target) {
-        d->output_links.clear();
-        d->target.clear();
+        // The server has already destroyed the links; the client-side proxies
+        // still have to go, or every replug leaks one per channel.
+        unlink_output(*d);
+        // Only when following. With --sink the name is the owner's choice and
+        // the same device coming back must be picked up again; clearing it left
+        // the daemon permanently silent after one unplug, because nothing but
+        // the metadata listener ever sets a target and that is not bound.
+        if (d->options.target_sink.empty()) d->target.clear();
     }
     d->nodes.erase(id);
     d->ports.erase(id);
@@ -625,6 +689,8 @@ int run(const Options& options) {
     }
     d.channels = options.channels;
     for (uint32_t c = 0; c < d.channels; ++c) d.speaker_mask |= d.layout->positions[c].speaker;
+    d.input_linked.assign(d.channels, false);
+    d.output_linked.assign(d.channels, false);
 
     // Names this run, not this process: a pid is reused, and a stale claim left
     // by a killed daemon must not be mistaken for a live one.
@@ -637,7 +703,10 @@ int run(const Options& options) {
     } else {
         std::fprintf(stderr, "isotone-daemon: following the default sink\n");
     }
-    if (!create_virtual_sink(d)) return 1;
+    if (!create_virtual_sink(d)) {
+        close_region(d);
+        return 1;
+    }
 
     d.filter = pw_filter_new_simple(
         pw_main_loop_get_loop(d.loop), "isotone",
@@ -648,6 +717,7 @@ int run(const Options& options) {
         &kFilterEvents, &d);
     if (d.filter == nullptr) {
         std::fprintf(stderr, "isotone-daemon: pw_filter_new_simple failed\n");
+        close_region(d);
         return 1;
     }
 
@@ -657,11 +727,13 @@ int run(const Options& options) {
         d.out_port[c] = add_dsp_port(d.filter, PW_DIRECTION_OUTPUT, port_name("out_", p).c_str());
         if (d.in_port[c] == nullptr || d.out_port[c] == nullptr) {
             std::fprintf(stderr, "isotone-daemon: pw_filter_add_port failed\n");
+            close_region(d);
             return 1;
         }
     }
     if (pw_filter_connect(d.filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0) {
         std::fprintf(stderr, "isotone-daemon: pw_filter_connect failed\n");
+        close_region(d);
         return 1;
     }
 
@@ -670,14 +742,21 @@ int run(const Options& options) {
 
     pw_main_loop_run(d.loop);
 
-    // Teardown. The links and the sink carry object.linger=false, so they go
-    // with the connection, but the region's name outlives the process and has to
-    // be taken down by hand.
-    close_region(d);
+    // Teardown. The filter goes first: while it is connected the audio thread is
+    // still being scheduled, and unmapping the region before that is a read of
+    // freed memory on the data thread rather than an error anything reports.
+    // The links and the sink carry object.linger=false, so they go with the
+    // connection, but the region's name outlives the process and has to be taken
+    // down by hand.
+    if (d.filter != nullptr) {
+        quiesce(d);
+        pw_filter_destroy(d.filter);
+        d.filter = nullptr;
+    }
     unlink_output(d);
     for (pw_proxy* link : d.input_links) pw_proxy_destroy(link);
     if (d.virtual_sink != nullptr) pw_proxy_destroy(d.virtual_sink);
-    if (d.filter != nullptr) pw_filter_destroy(d.filter);
+    close_region(d);
     if (d.metadata != nullptr) pw_proxy_destroy(reinterpret_cast<pw_proxy*>(d.metadata));
     if (d.registry != nullptr) pw_proxy_destroy(reinterpret_cast<pw_proxy*>(d.registry));
     if (d.core != nullptr) pw_core_disconnect(d.core);

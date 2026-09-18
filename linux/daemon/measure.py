@@ -15,6 +15,9 @@
 #   44100     the same, with the graph forced to another rate, which makes the
 #             daemon re-size its processor off the audio thread mid-stream
 #   5.1       a six-channel core into a six-channel sink
+#   stale     a daemon killed outright leaves its region and its ring claim
+#             behind; the next one has to adopt the region and take the ring
+#             over, or the UI's spectrum is dead for the whole of that run
 #
 # Each figure is the difference from the same daemon with nothing written, so a
 # fixed gain anywhere in the chain cancels and what is left is the filter.
@@ -56,10 +59,11 @@ def band_arg():
     return f"{BAND[0]},{BAND[1]},{BAND[2]}"
 
 
-def start_daemon(sink=HW, channels=2):
-    proc = subprocess.Popen(
-        [DAEMON, "--sink", sink, "--channels", str(channels), "--state-dir", STATE_DIR],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def start_daemon(sink=HW, channels=2, keep_region=False):
+    args = [DAEMON, "--sink", sink, "--channels", str(channels), "--state-dir", STATE_DIR]
+    if keep_region:
+        args.append("--keep-region")
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     m.wait_for_ports(VIRT, "-o", channels)
     m.wait_for_ports("isotone-core", "-o", channels)
     deadline = time.time() + 15
@@ -142,6 +146,31 @@ def case(freq, sink=HW, channels=2, band=False, cold=False, with_ring=False):
         stop_daemon(proc)
 
 
+def leave_stale_region(freq):
+    """Kill a daemon mid-stream so its region and ring claim survive it.
+
+    A ring another instance holds is only taken over once its write index has
+    stood still for a while, so the claim has to be retried from the audio
+    thread. Claiming once at startup left the ring dead for the whole run, and
+    with it the UI's spectrum.
+    """
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
+    proc = start_daemon(keep_region=True)
+    tone = os.path.join(m.WORK, "stale.wav")
+    os.makedirs(m.WORK, exist_ok=True)
+    m.make_tone(tone, freq)
+    play = subprocess.Popen(["pw-play", "--target", VIRT, tone],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Long enough that the dying instance has written to the ring.
+        time.sleep(2.0)
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+        play.kill()
+        play.wait(timeout=10)
+
+
 def main():
     for path in (DAEMON, STATE_TOOL):
         if not os.path.exists(path):
@@ -194,6 +223,20 @@ def main():
     flat, _ = case(1000.0, sink=HW51, channels=6)
     got, _ = case(1000.0, sink=HW51, channels=6, band=True)
     report("5.1", 1000.0, flat, got)
+
+    # A region and a ring claim left behind by a daemon that was killed.
+    leave_stale_region(1000.0)
+    flat, _ = case(1000.0)
+    got, ring = case(1000.0, band=True, with_ring=True)
+    report("stale", 1000.0, flat, got)
+    if ring is None or abs(ring - got) > 0.05:
+        failures += 1
+        print(f"{'stale ring':>10}  {1000.0:6.0f}  {'':>9}  "
+              f"{(ring if ring is not None else float('nan')):10.3f}  {'':>9}  "
+              f"{'vs sink':>9}  {'dead' if ring is None else f'{ring - got:+.3f}'}")
+    else:
+        print(f"{'stale ring':>10}  {1000.0:6.0f}  {'':>9}  {ring:10.3f}  "
+              f"{'':>9}  {'vs sink':>9}  {ring - got:+8.3f}")
 
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     print()

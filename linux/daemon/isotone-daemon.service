@@ -11,11 +11,16 @@
 #
 #   systemctl --user enable --now isotone-daemon
 #
-# --sink is left to a drop-in until the daemon follows the default sink itself:
+# With no arguments the daemon follows the default sink. To pin it to one
+# instead, replace the command in a drop-in:
 #
 #   systemctl --user edit isotone-daemon
 #   [Service]
-#   Environment=ISOTONE_SINK=alsa_output.pci-0000_00_1f.3.analog-stereo
+#   ExecStart=
+#   ExecStart=/usr/bin/isotone-daemon --sink alsa_output.pci-0000_00_1f.3.analog-stereo
+#
+# The empty ExecStart= first is how systemd is told to forget the original
+# rather than run both.
 
 [Unit]
 Description=Isotone system-wide equalizer
@@ -27,7 +32,11 @@ Requisite=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/isotone-daemon --sink ${ISOTONE_SINK}
+# No arguments: follow the default sink. It used to pass --sink ${ISOTONE_SINK},
+# which systemd expands to nothing when the variable is unset, leaving --sink
+# with no value; the daemon then exits 2 and Restart=on-failure turns that into a
+# restart loop until the start limit trips.
+ExecStart=/usr/bin/isotone-daemon
 Restart=on-failure
 RestartSec=2
 # The audio thread needs to keep its deadline. rtkit grants this at runtime when
@@ -39,7 +48,12 @@ NoNewPrivileges=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.config/isotone
+# The leading dash: the namespace is built before ExecStart runs, so on a fresh
+# install this directory does not exist yet and a hard path would fail the unit
+# instead of starting it. The daemon creates it when it first saves.
+# $XDG_CONFIG_HOME is not consulted here, so a session that moves it needs this
+# line changed in a drop-in as well.
+ReadWritePaths=-%h/.config/isotone
 
 [Install]
 WantedBy=default.target

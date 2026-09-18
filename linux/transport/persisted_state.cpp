@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -126,7 +127,10 @@ int write_persisted_state(const std::string& path, const ParamBlock& block) {
     if (fd < 0) return errno;
     bool ok = write_exactly(fd, &copy, sizeof(copy));
     if (ok) ok = ::fsync(fd) == 0;
-    const int write_error = ok ? 0 : errno;
+    // A short write leaves errno untouched, and it may be 0: reporting that
+    // would be success with no file written.
+    int write_error = 0;
+    if (!ok) write_error = errno != 0 ? errno : EIO;
     ::close(fd);
     if (!ok) {
         ::unlink(temp.c_str());
@@ -138,8 +142,15 @@ int write_persisted_state(const std::string& path, const ParamBlock& block) {
         ::unlink(temp.c_str());
         return error;
     }
-    // Without this the rename itself can be lost, leaving neither file.
-    return fsync_path(dir, O_RDONLY | O_DIRECTORY);
+    // The directory's fsync is what keeps the rename itself from being lost, but
+    // the state is already written, fsynced and in place by now. Some
+    // filesystems refuse fsync on a directory, and failing the call there would
+    // report a save that did happen as a failure.
+    if (const int error = fsync_path(dir, O_RDONLY | O_DIRECTORY); error != 0) {
+        std::fprintf(stderr, "isotone: %s saved, but its directory could not be synced: %s" "\n",
+                     path.c_str(), std::strerror(error));
+    }
+    return 0;
 }
 
 }  // namespace isotone::posix

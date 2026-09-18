@@ -79,12 +79,22 @@ int SharedRegion::create_or_open(const std::string& name, void (*seed)(ParamBloc
     close();
     if (name.empty()) return EINVAL;
 
+    // Create, or open what is already there. Both can lose: another daemon can
+    // create between the two calls (EEXIST), and the outgoing one can unlink in
+    // the same window (ENOENT), which is exactly what `systemctl --user restart`
+    // does. Either way the other outcome is now available, so try again rather
+    // than fail the start.
     bool fresh = false;
-    int fd = ::shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0) {
-        fresh = true;
-    } else if (errno == EEXIST) {
+    int  fd = -1;
+    for (int attempt = 0; attempt < 8 && fd < 0; ++attempt) {
+        fd = ::shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            fresh = true;
+            break;
+        }
+        if (errno != EEXIST) return errno;
         fd = ::shm_open(name.c_str(), O_RDWR, 0600);
+        if (fd < 0 && errno != ENOENT) return errno;
     }
     if (fd < 0) return errno;
 
