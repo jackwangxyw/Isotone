@@ -3,13 +3,55 @@
 #
 # The QML module is a static library, so the app and the QML tests load the same
 # module.
-find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Network Qml Quick QuickTest Test Widgets)
-qt_standard_project_setup(REQUIRES 6.11)
+# 6.4 is the floor because that is what Ubuntu 24.04 ships, and Linux Mint 22 is
+# built on it: holding out for 6.11 would mean a .deb that cannot use the
+# distribution's Qt. Windows still builds against 6.11. Provisional until the Qt
+# layer actually compiles on Linux and says whether it needs anything newer; all
+# eight components the UI asks for do exist in 6.4.2.
+find_package(Qt6 6.4 REQUIRED COMPONENTS Gui Network Qml Quick QuickTest Test Widgets)
+# The policy level is the Qt in use, not the floor. Passing a version lower than
+# the installed Qt quietly changes what qt_add_qml_module does: with 6.11 present
+# and REQUIRES 6.4, the module's types stop registering and every QML test fails
+# with "DefaultOutputFollower is not a type" while the app exits at startup.
+qt_standard_project_setup(REQUIRES ${Qt6_VERSION})
+
+# The backend's platform half. Classified by compiling each file against Linux
+# rather than by reading the includes: these six are the ones that do not build,
+# and the five below do.
+#
+# speaker_setup is the near miss and says where the real work is. Nothing in it
+# touches Win32 except one function, save_speaker_setup, whose path is a
+# std::wstring going into windows/transport's persisted_state.h. The wide-string
+# identity leaks into otherwise portable code; that seam, not windows.h, is what
+# stage 4 costs.
+if(WIN32)
+    set(ISOTONE_UI_BACKEND_PLATFORM
+        backend/devicelink.cpp
+        backend/devicelink.h
+        backend/speaker_setup.cpp
+        backend/speaker_setup.h
+        backend/test_tone.cpp
+        backend/test_tone.h
+        # Devices work package.
+        backend/config_attach.cpp
+        backend/config_attach.h
+        # Settings
+        backend/diagnostics.cpp
+        backend/diagnostics.h
+        backend/startup_registration.cpp
+        backend/startup_registration.h
+    )
+    set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport isotone_compat isotone_devices)
+else()
+    # The Linux halves are still to be written: the daemon's region in place of
+    # the APO's, PipeWire in place of the device APIs, XDG autostart in place of
+    # the Run key.
+    set(ISOTONE_UI_BACKEND_PLATFORM)
+    set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport_posix)
+endif()
 
 # Without Qt: spectrum analysis, the state an output gets, and where edits go.
 add_library(isotone_ui_backend STATIC
-    backend/devicelink.cpp
-    backend/devicelink.h
     backend/output_state.cpp
     backend/output_state.h
     backend/spectrum.cpp
@@ -19,28 +61,26 @@ add_library(isotone_ui_backend STATIC
     # Surround
     backend/pink_noise.cpp
     backend/pink_noise.h
-    backend/speaker_setup.cpp
-    backend/speaker_setup.h
-    backend/test_tone.cpp
-    backend/test_tone.h
     # EQ by ear
     backend/sine_tone.cpp
     backend/sine_tone.h
-    # Devices work package.
-    backend/config_attach.cpp
-    backend/config_attach.h
-    # Settings
-    backend/diagnostics.cpp
-    backend/diagnostics.h
-    backend/startup_registration.cpp
-    backend/startup_registration.h
+    ${ISOTONE_UI_BACKEND_PLATFORM}
 )
 target_include_directories(isotone_ui_backend PUBLIC backend)
-# windows.h without the min and max macros, which break std::min and std::max.
-target_compile_definitions(isotone_ui_backend PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(isotone_ui_backend PUBLIC isotone_core isotone_transport isotone_compat isotone_devices)
-# Settings: file versions for About.
-target_link_libraries(isotone_ui_backend PRIVATE version)
+target_link_libraries(isotone_ui_backend PUBLIC isotone_core ${ISOTONE_UI_BACKEND_PLATFORM_LIBS})
+if(WIN32)
+    # windows.h without the min and max macros, which break std::min and std::max.
+    target_compile_definitions(isotone_ui_backend PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    # Settings: file versions for About.
+    target_link_libraries(isotone_ui_backend PRIVATE version)
+endif()
+
+# The Qt layer is still Windows-only: its models reach the device APIs, the
+# devicetool and the compat writer directly. The backend above is what builds on
+# both today; porting these is the next step.
+if(NOT WIN32)
+    return()
+endif()
 
 qt_add_library(isotone_ui STATIC
     src/apppaths.cpp

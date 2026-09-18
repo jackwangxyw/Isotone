@@ -95,6 +95,9 @@ endif()
 # The UI needs Qt 6.11 with its MSVC kit: pass
 # -DISOTONE_BUILD_UI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.11.2/msvc2022_64.
 option(ISOTONE_BUILD_UI "Build the Qt Quick UI" OFF)
-if(ISOTONE_BUILD_UI AND WIN32 AND MSVC)
+if(ISOTONE_BUILD_UI)
+    if(WIN32 AND NOT MSVC)
+        message(FATAL_ERROR "the UI needs the MSVC toolchain on Windows")
+    endif()
     add_subdirectory(ui)
 endif()

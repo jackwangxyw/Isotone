@@ -3437,6 +3437,50 @@ So the order for stage 4 is: the platform seam in `ui/CMakeLists.txt` first, the
 source files that include `windows.h` are the last and most mechanical part, not
 the first.
 
+
+## 2026-09-18: Stage 4 begins, the platform seam in the UI's build
+
+The first piece of the UI builds on Linux: `isotone_ui_backend`, with GCC 13.3 and
+`-DISOTONE_WARNINGS_AS_ERRORS=ON`.
+
+**Which files are portable was settled by compiling them, not by reading their
+includes.** Each `ui/backend/*.cpp` was compiled on its own against Linux. Five
+build (`output_state`, `spectrum`, `typed_value`, `pink_noise`, `sine_tone`) and
+six do not (`devicelink`, `speaker_setup`, `test_tone`, `config_attach`,
+`diagnostics`, `startup_registration`). The six are now a platform list in
+`ui/CMakeLists.txt`, and Linux takes `isotone_transport_posix` where Windows takes
+`isotone_transport`, `isotone_compat` and `isotone_devices`.
+
+`speaker_setup` is the near miss, and it says where the work is. Nothing in it
+touches Win32 except `save_speaker_setup`, whose path is a `std::wstring` going
+into `windows/transport`'s `persisted_state.h`. The wide-string identity leaks
+into code that is otherwise portable. That seam, not `windows.h`, is what stage 4
+costs.
+
+The Qt layer, `isotone_ui`, stays Windows-only for now: its models reach the
+device APIs, the devicetool and the compat writer directly, and the file returns
+early on other platforms rather than pretending.
+
+**The Qt floor is 6.4, not 6.11**, because Ubuntu 24.04 ships 6.4.2 and Mint 22 is
+built on it. Holding out for 6.11 would mean a .deb that cannot use the
+distribution's Qt. All eight components the UI asks for exist in 6.4.2. Whether
+the Qt layer's *code* needs anything newer is still unknown; Windows continues to
+build against 6.11.
+
+**A trap that cost a red suite.** Lowering the floor, `qt_standard_project_setup`
+was lowered with it, to `REQUIRES 6.4`. That is not a floor: it is the policy
+level, and setting it below the Qt actually in use changes what
+`qt_add_qml_module` does. On Windows with Qt 6.11 present, the module's types
+stopped registering: all 290 QML tests failed with "DefaultOutputFollower is not a
+type" and the app exited at startup, while `ui_tests` and `ui_model_tests` stayed
+green, so nothing in C++ pointed at it. It is now
+`qt_standard_project_setup(REQUIRES ${Qt6_VERSION})`: the newest policies the
+installed Qt knows. Windows is back to 45943, 2002 and 290.
+
+The other 6.4 difference found while probing: `qt_add_qml_module` requires a
+`VERSION` there and 6.11 made it optional. Not needed yet, since the Qt layer does
+not build on Linux, but it is one line when it does.
+
 ---
 
 # Where things stand (2026-09-16)
