@@ -3367,6 +3367,76 @@ Nothing was wrong with the ring.
 packaging, and a daemon that is told its target by the UI rather than by a flag
 or the session manager.
 
+
+## 2026-09-18: CI on a real runner, and what stage 4 actually costs
+
+**The linux-host job is green on a GitHub runner**, which was the last thing
+claimed but unverified. PipeWire 1.0.5 on `ubuntu24`, and the same figures as
+this machine to three decimals:
+
+```
+=== stage 1c: the topology spike ===
+    1000     -6.021    -18.021    -12.000    -12.000    -0.000
+     100     -6.021     -6.181     -0.161     -0.161    +0.001
+=== stage 3: the daemon ===
+      live    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+      cold    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+      ring    1000                -18.021               vs sink    +0.000
+     44100    1000     -6.021     -18.021    -12.000    -12.000    +0.000
+       5.1    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+```
+
+It took one fix. The job runs `bash linux/ci-audio.sh`, and the script re-execs
+itself under a private session bus as `"$0"`; a checkout carries no executable
+bit, so `dbus-run-session` could not exec it and stopped with "Permission
+denied". It goes through `bash` now. Everything before that step had already
+passed on the runner.
+
+**A pre-existing flake, surfaced not fixed.** The same push showed
+`core (windows-latest)` failing `compat_tests` with ERROR_SHARING_VIOLATION (32),
+"cannot write Isotone.txt: the process cannot access the file because it is being
+used by another process", in the two tests that run writers concurrently. It
+passed on the next run with the same code, and the three runs before it were
+green, so it is intermittent. Nothing in the Linux work touches `windows/compat`.
+
+`CompatWriter::write` takes a lock file with a 1000 ms wait and then calls
+`write_file_atomically`, whose retry is 200 ms by default. Two threads at 300
+rounds each, plus a separate `isotone-compat` process, is enough to exceed one of
+those on a slow contended runner. Whether the answer is a longer retry in the
+product, a gentler test, or leaving it, is a decision about how Isotone should
+behave when something else holds Equalizer APO's config, so it is the owner's.
+
+**Wayland: an app cannot keep itself on top, and that is accepted** (owner,
+2026-09-18). He can only test X11 on real hardware for now; Wayland desktops get
+tested in VMs.
+
+**Stage 4, surveyed by building rather than by guessing.** The UI was configured
+against Ubuntu 24.04's Qt on the WSL box, with the `WIN32 AND MSVC` gate and the
+version floor relaxed, purely to see what breaks. What it found, in the order it
+found it:
+
+1. **Qt 6.4.2 has every module the UI asks for.** `find_package(Qt6 COMPONENTS
+   Gui Network Qml Quick QuickTest Test Widgets)` succeeds. The project pins 6.11
+   on Windows, and the 7-version gap had looked like the first problem; it is not.
+   That matters for packaging too, because Mint 22 is Ubuntu 24.04: a .deb may be
+   able to use the distribution's Qt rather than bundling one. Whether the UI's
+   *code* needs anything past 6.4 is still unknown, because the build does not get
+   that far yet.
+2. **One CMake incompatibility, trivial.** 6.4's `qt_add_qml_module` requires a
+   `VERSION`; 6.11 made it optional. Adding `VERSION 1.0` is accepted by both.
+3. **The real coupling is four Windows libraries, not the Windows headers.**
+   `isotone_ui_backend` links `isotone_transport`, `isotone_compat` and
+   `isotone_devices`; `isotone_ui` links `isotone_devicetool_session` and compiles
+   in `$<TARGET_FILE:isotone-devicetool>` as a path. Configure fails on that
+   generator expression long before a single source file is compiled. Those either
+   gain Linux counterparts (the transport already has one) or are compiled out
+   behind the platform seam.
+
+So the order for stage 4 is: the platform seam in `ui/CMakeLists.txt` first, then
+`DeviceLink`'s `std::wstring` identity, then the backends themselves. The 18
+source files that include `windows.h` are the last and most mechanical part, not
+the first.
+
 ---
 
 # Where things stand (2026-09-16)
