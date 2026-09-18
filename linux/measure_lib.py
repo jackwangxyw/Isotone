@@ -46,6 +46,23 @@ def wait_for_ports(prefix, direction, count, timeout=10.0):
     sys.exit(f"ports {prefix} ({direction}) never appeared; saw {ports(direction)}")
 
 
+def wait_for_named(node, direction, names, timeout=10.0):
+    """The node's ports with these exact suffixes, in the order given.
+
+    Not sorted order: a 5.1 sink sorts playback_FC before playback_FL, so taking
+    the first two would send the left channel to the centre speaker.
+    """
+    wanted = [f"{node}:{name}" for name in names]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        have = set(ports(direction))
+        if all(w in have for w in wanted):
+            return wanted
+        time.sleep(0.1)
+    sys.exit(f"{node} never showed {names} ({direction}); saw "
+             f"{[p for p in ports(direction) if p.startswith(node + ':')]}")
+
+
 def install_conf(conf_path):
     """Declare the rig's null sinks in a PipeWire drop-in.
 
@@ -111,7 +128,7 @@ def level_dbfs(path, freq):
     return 20.0 * math.log10(amp) if amp > 0 else -999.0
 
 
-def play_and_capture(play_into, capture_from, freq, work=None):
+def play_and_capture(play_into, capture_from, freq, work=None, positions=("FL", "FR")):
     """Play a tone into `play_into` and capture `capture_from`'s monitor.
 
     Every link is explicit. Passing "<sink>.monitor" to pw-record is a Pulse-ism:
@@ -131,8 +148,8 @@ def play_and_capture(play_into, capture_from, freq, work=None):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     play = None
     try:
-        rec_in = wait_for_ports("isotone-rec", "-i", 2)
-        monitor = wait_for_ports(capture_from, "-o", 2)
+        rec_in = wait_for_named("isotone-rec", "-i", ["input_FL", "input_FR"])
+        monitor = wait_for_named(capture_from, "-o", [f"monitor_{p}" for p in positions])
         for src, dst in zip(monitor, rec_in):
             sh(f"pw-link '{src}' '{dst}'")
         time.sleep(0.6)
@@ -144,8 +161,8 @@ def play_and_capture(play_into, capture_from, freq, work=None):
         play = subprocess.Popen(
             ["pw-play", "--target", "0", "-P", "{ node.name = isotone-play }", tone],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        play_out = wait_for_ports("isotone-play", "-o", 2)
-        sink_in = wait_for_ports(play_into, "-i", 2)
+        play_out = wait_for_named("isotone-play", "-o", ["output_FL", "output_FR"])
+        sink_in = wait_for_named(play_into, "-i", [f"playback_{p}" for p in positions])
         for src, dst in zip(play_out, sink_in):
             sh(f"pw-link '{src}' '{dst}'")
 

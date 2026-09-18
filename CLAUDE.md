@@ -74,7 +74,9 @@ windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a regi
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
 linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG
 linux/daemon/         isotone-daemon: the virtual sink, the core in a PipeWire filter node,
-                      links to the hardware sink, systemd user unit; isotone-state (show/set/save)
+                      links to the sink being fed, the post-EQ ring, following the default sink
+                      through WirePlumber metadata, layouts to 7.1, systemd user unit;
+                      isotone-state (show/set/save/capture)
 linux/spike/          stage 1c: the topology spike and the null sinks the rig declares
 linux/measure_lib.py  the shared measurement rig; linux/ci-audio.sh runs it under its own PipeWire
 ui/backend/           the UI without Qt: DeviceLink (where edits go), spectrum, typed values, speaker setup,

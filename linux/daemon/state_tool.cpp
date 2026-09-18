@@ -2,24 +2,31 @@
 // Copyright (C) 2026 The Isotone authors
 //
 // isotone-state: what windows/shmtool's isotone-shm is on Windows. It puts a
-// state into a sink's live shared region or into its saved-state file, and
-// prints what is there, so the daemon can be driven and inspected without a UI.
+// state into a sink's live shared region or into its saved-state file, prints
+// what is there, and drains the post-EQ ring, so the daemon can be driven and
+// inspected without a UI.
 //
-//   isotone-state show --sink <name>
-//   isotone-state set  --sink <name> [--band f,gain,q] [--preamp dB] [--bypass]
-//   isotone-state save --sink <name> [--dir D] [--band f,gain,q] ...
+//   isotone-state show    --sink <name>
+//   isotone-state set     --sink <name> [--band f,gain,q] [--preamp dB] [--bypass]
+//   isotone-state save    --sink <name> [--dir D] [--band f,gain,q] ...
+//   isotone-state capture --sink <name> [--seconds s]
 //
 // set writes the live region, which is the path the UI takes for every edit.
 // save writes the file the daemon seeds a fresh region from, which is the path a
-// sink takes when it comes up before any UI runs.
+// sink takes when it comes up before any UI runs. capture reads the ring the
+// UI's spectrum reads.
 
 #include <cerrno>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "isotone/audio_ring.h"
 #include "isotone/param_block.h"
 #include "isotone/types.h"
 #include "persisted_state.h"
@@ -31,12 +38,16 @@ namespace {
 
 void usage() {
     std::printf(
-        "isotone-state <show|set|save> --sink <node.name> [options]\n"
+        "isotone-state <show|set|save|capture> --sink <node.name> [options]\n"
         "\n"
         "  --band <fc,gain_db,q>   a peaking band; repeatable\n"
         "  --preamp <dB>           preamp\n"
         "  --bypass                bypass the bands\n"
-        "  --dir <dir>             saved-state directory (save and show)\n");
+        "  --dir <dir>             saved-state directory (save and show)\n"
+        "  --seconds <s>           how long capture drains the ring (default 2)\n"
+        "\n"
+        "ISOTONE_CAPTURE_RAW=<path> writes capture's left channel there as raw\n"
+        "float32, for a measurement to pick the tone out of.\n");
 }
 
 bool parse_band(const char* text, Band* out) {
@@ -104,6 +115,65 @@ int show(const std::string& sink, const std::string& dir) {
     return 0;
 }
 
+// Drains the region's post-EQ ring, the audio the UI's spectrum reads, and
+// reports what arrived. The counterpart of isotone-shm capture on Windows.
+int capture(const std::string& sink, double seconds) {
+    const std::string name = posix::region_name(sink);
+    posix::SharedRegion region;
+    const int error = region.open(name);
+    if (error != 0) {
+        std::fprintf(stderr, "isotone-state: region %s: %s\n", name.c_str(), std::strerror(error));
+        return 1;
+    }
+
+    constexpr uint32_t kChunk = 4096;
+    AudioRingCursor cursor;
+    std::vector<float> buffer(static_cast<size_t>(kChunk) * kMaxChannels);
+    std::vector<float> left;
+    uint32_t channels = 0;
+    uint64_t frames = 0;
+    double peak = 0.0, sum_squares = 0.0;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < deadline) {
+        uint32_t got_channels = 0;
+        const uint32_t got =
+            audio_ring_read(region.ring(), kRingCapacityFrames, &cursor, buffer.data(), kChunk, &got_channels);
+        if (got == 0 || got_channels == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        channels = got_channels;
+        frames += got;
+        for (uint32_t i = 0; i < got * got_channels; ++i) {
+            const double v = buffer[i];
+            peak = std::max(peak, std::abs(v));
+            sum_squares += v * v;
+        }
+        for (uint32_t i = 0; i < got; ++i) left.push_back(buffer[i * got_channels]);
+    }
+
+    if (frames == 0) {
+        std::printf("no audio in the ring\n");
+        return 1;
+    }
+    const double rms = std::sqrt(sum_squares / static_cast<double>(frames * channels));
+    std::printf("frames %llu  channels %u  peak %.6f (%.3f dBFS)  rms %.3f dBFS\n",
+                static_cast<unsigned long long>(frames), channels, peak,
+                20.0 * std::log10(peak > 0 ? peak : 1e-12), 20.0 * std::log10(rms > 0 ? rms : 1e-12));
+
+    if (const char* path = std::getenv("ISOTONE_CAPTURE_RAW")) {
+        FILE* f = std::fopen(path, "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "isotone-state: %s: %s\n", path, std::strerror(errno));
+            return 1;
+        }
+        std::fwrite(left.data(), sizeof(float), left.size(), f);
+        std::fclose(f);
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -114,6 +184,7 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
 
     std::string sink, dir;
+    double seconds = 2.0;
     EqState state;
     uint32_t next_id = 1;
 
@@ -124,6 +195,8 @@ int main(int argc, char** argv) {
             sink = argv[++i];
         } else if (arg == "--dir" && has_value) {
             dir = argv[++i];
+        } else if (arg == "--seconds" && has_value) {
+            seconds = std::strtod(argv[++i], nullptr);
         } else if (arg == "--preamp" && has_value) {
             state.preamp_db = std::strtod(argv[++i], nullptr);
         } else if (arg == "--bypass") {
@@ -151,6 +224,7 @@ int main(int argc, char** argv) {
     }
 
     if (command == "show") return show(sink, dir);
+    if (command == "capture") return capture(sink, seconds);
 
     ParamBlock wanted{};
     init_param_block(&wanted);
@@ -164,8 +238,7 @@ int main(int argc, char** argv) {
         posix::SharedRegion region;
         const int error = region.open(name);
         if (error != 0) {
-            std::fprintf(stderr, "isotone-state: region %s: %s\n", name.c_str(),
-                         std::strerror(error));
+            std::fprintf(stderr, "isotone-state: region %s: %s\n", name.c_str(), std::strerror(error));
             return 1;
         }
         // The parameters only: the header belongs to the daemon.

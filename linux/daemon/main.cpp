@@ -21,6 +21,7 @@ void usage() {
         "  --description <text>   how the virtual sink is shown (default Isotone)\n"
         "  --state-dir <dir>      saved state directory; default is\n"
         "                         $XDG_CONFIG_HOME/isotone/devices\n"
+        "  --channels <n>         channels of the virtual sink: 1, 2, 4, 6, 8 (default 2)\n"
         "  --max-frames <n>       frames the processor is sized for (default 8192)\n"
         "  --keep-region          leave the shared region's name behind on exit\n"
         "  --exit-when-linked     process a few blocks, then exit (for measurement)\n");
@@ -40,7 +41,7 @@ bool value_for(int argc, char** argv, int* i, const char* flag, std::string* out
 
 int main(int argc, char** argv) {
     isotone::daemon::Options options;
-    std::string max_frames;
+    std::string max_frames, channels;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
         if (value_for(argc, argv, &i, "--description", &options.sink_description)) continue;
         if (value_for(argc, argv, &i, "--state-dir", &options.state_dir)) continue;
         if (value_for(argc, argv, &i, "--max-frames", &max_frames)) continue;
+        if (value_for(argc, argv, &i, "--channels", &channels)) continue;
         if (std::strcmp(argv[i], "--keep-region") == 0) {
             options.unlink_on_exit = false;
             continue;
@@ -64,9 +66,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (options.target_sink.empty()) {
-        usage();
-        return 2;
+    if (!channels.empty()) {
+        options.channels = static_cast<uint32_t>(std::strtoul(channels.c_str(), nullptr, 10));
+        if (options.channels != 1 && options.channels != 2 && options.channels != 4 &&
+            options.channels != 6 && options.channels != 8) {
+            std::fprintf(stderr, "isotone-daemon: --channels must be 1, 2, 4, 6 or 8\n");
+            return 2;
+        }
     }
     if (!max_frames.empty()) {
         options.max_frames = static_cast<uint32_t>(std::strtoul(max_frames.c_str(), nullptr, 10));

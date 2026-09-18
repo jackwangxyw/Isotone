@@ -30,11 +30,26 @@ struct Options {
     // shared region and the saved-state file are named for this sink, because
     // it is the device the state belongs to, exactly as the endpoint GUID names
     // them on Windows.
+    //
+    // Empty follows the default sink through WirePlumber's "default" metadata,
+    // moving the links, the region and the saved state together. The daemon
+    // never targets its own virtual sink, which is what the default becomes once
+    // Isotone is installed, so it keeps feeding whichever real sink it already
+    // had. Starting while Isotone is already the default therefore leaves it
+    // with nothing to feed until a real sink is made default once; --sink is the
+    // way round that until the UI sets the target itself.
     std::string target_sink;
 
     // The virtual sink applications see.
     std::string sink_name = "isotone";
     std::string sink_description = "Isotone";
+
+    // Channels of the virtual sink, and so of the core. 1, 2, 4, 6 or 8, laid
+    // out the way PipeWire names them (FL FR FC LFE RL RR SL SR). The core is
+    // told the matching speaker mask, so bands on a named channel, the routing
+    // and bass management all address the right speaker. A target sink that
+    // lacks one of these positions simply does not get that channel linked.
+    uint32_t channels = 2;
 
     // Empty: persisted_state_dir(). Tests pass a scratch directory.
     std::string state_dir;
