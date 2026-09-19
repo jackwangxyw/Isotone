@@ -544,6 +544,10 @@ std::string default_sink_name(const char* value) {
     return {};
 }
 
+// Defined with the rest of the stream handling below; the metadata listener
+// needs it to take a released stream back.
+void capture_stream(Daemon& d, uint32_t id);
+
 int on_metadata_property(void* data, uint32_t subject, const char* key, const char* /*type*/,
                          const char* value) {
     auto* d = static_cast<Daemon*>(data);
@@ -552,6 +556,18 @@ int on_metadata_property(void* data, uint32_t subject, const char* key, const ch
     if (subject != PW_ID_CORE && std::strcmp(key, "target.object") == 0 &&
         (value == nullptr || d->options.sink_name != value)) {
         std::erase(d->moved_streams, subject);
+        // Cleared: whoever claimed the stream has let go of it, which is what
+        // EasyEffects does when it quits. Take it back. Without this the claim
+        // arriving was the last thing that ever looked at the stream, so it
+        // stayed off the EQ for the rest of the run.
+        //
+        // release_streams clears these same targets on the way out and is not
+        // caught by this: the server does not deliver a metadata change back to
+        // the client that made it, so only another program's clear arrives here.
+        if (value == nullptr) {
+            const auto node = d->nodes.find(subject);
+            if (node != d->nodes.end() && node->second.capture) capture_stream(*d, subject);
+        }
         return 0;
     }
     if (subject != PW_ID_CORE) return 0;

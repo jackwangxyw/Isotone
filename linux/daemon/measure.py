@@ -26,6 +26,9 @@
 #             capture, and nothing else, put the EQ in the path
 #   release   a stream still playing when the daemon exits goes back to the
 #             hardware sink rather than following a sink that is gone
+#   reclaim   another program claims a stream by writing target.object, as
+#             EasyEffects does, and then lets go: the stream comes back to
+#             Isotone instead of being lost for the rest of the run
 #   starts    a hundred daemons started with twice as many busy processes as
 #             CPUs all link their graph; one whose filter was bound after every
 #             port had arrived waited forever for a registry event
@@ -36,6 +39,7 @@
 # The daemon creates its own virtual sink, so the only thing the rig declares is
 # the stand-in for the hardware.
 
+import json
 import math
 import os
 import shutil
@@ -257,8 +261,27 @@ def wait_linked(stream, sink, timeout=10.0):
     return False
 
 
+def metadata_target(stream):
+    """The target.object the metadata holds for `stream`, or None."""
+    try:
+        dump = json.loads(m.sh("pw-dump Metadata").stdout)
+    except json.JSONDecodeError:
+        return None
+    for entry in dump:
+        for item in entry.get("metadata") or []:
+            if item.get("subject") == stream and item.get("key") == "target.object":
+                return item.get("value")
+    return None
+
+
 def released():
-    """A stream playing when the daemon exits goes back to the hardware."""
+    """A stream playing when the daemon exits goes back to the hardware.
+
+    The link is only half of it. The target the run set has to be gone from the
+    metadata as well, or the daemon has left a claim behind naming a sink that
+    no longer exists: the stream still falls back to the default, so the link
+    alone cannot tell the two apart.
+    """
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     os.makedirs(m.WORK, exist_ok=True)
     tone = os.path.join(m.WORK, "long.wav")
@@ -268,12 +291,72 @@ def released():
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         moved = wait_linked("app-play", VIRT)
+        stream = wait_node("app-play")
         stop_daemon(proc)
         back = wait_linked("app-play", HW)
-        return moved, back
+        cleared = stream is not None and metadata_target(stream) is None
+        return moved, back and cleared
     finally:
         if proc.poll() is None:
             stop_daemon(proc)
+        play.kill()
+        play.wait(timeout=10)
+
+
+def node_id(name):
+    """The registry id of the node called `name`, or None."""
+    out = m.sh("pw-dump Node").stdout
+    try:
+        dump = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    for entry in dump:
+        props = (entry.get("info") or {}).get("props") or {}
+        if props.get("node.name") == name:
+            return entry.get("id")
+    return None
+
+
+def wait_node(name, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        found = node_id(name)
+        if found is not None:
+            return found
+        time.sleep(0.1)
+    return None
+
+
+def reclaimed():
+    """A stream another program claims and then lets go comes back to Isotone.
+
+    EasyEffects moves a stream by writing target.object into the default
+    metadata for that node, exactly as this does with pw-metadata, and clears it
+    again when it stops. Until the daemon watched for that clear, the stream was
+    lost for the rest of the run: Isotone erased it from moved_streams when the
+    claim arrived and nothing ever looked at it again.
+    """
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
+    os.makedirs(m.WORK, exist_ok=True)
+    tone = os.path.join(m.WORK, "claimed.wav")
+    m.make_tone(tone, 1000.0, seconds=30.0)
+    proc = start_daemon()
+    play = subprocess.Popen(["pw-play", "-P", "{ node.name = app-play }", tone],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        captured = wait_linked("app-play", VIRT)
+        stream = wait_node("app-play")
+        if stream is None:
+            return captured, False, False
+        # Another program claims it.
+        m.sh(f"pw-metadata {stream} target.object {HW51} Spa:String")
+        claimed = wait_linked("app-play", HW51)
+        # And lets go, as EasyEffects does when it quits.
+        m.sh(f"pw-metadata -d {stream} target.object")
+        back = wait_linked("app-play", VIRT)
+        return captured and claimed, claimed, back
+    finally:
+        stop_daemon(proc)
         play.kill()
         play.wait(timeout=10)
 
@@ -385,6 +468,12 @@ def main():
         failures += 1
     print(f"{'release':>10}  stream into {VIRT}: {'yes' if moved else 'NO'}, "
           f"back to {HW} after exit: {'yes' if back else 'NO'}")
+
+    took, claimed, reclaimed_back = reclaimed()
+    if not (took and claimed and reclaimed_back):
+        failures += 1
+    print(f"{'reclaim':>10}  claimed away to {HW51}: {'yes' if claimed else 'NO'}, "
+          f"back to {VIRT} when released: {'yes' if reclaimed_back else 'NO'}")
 
     unlinked = starts()
     if unlinked:
