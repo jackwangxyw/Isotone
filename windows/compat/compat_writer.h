@@ -22,7 +22,7 @@
 //
 // Several writers can share a directory (the UI and isotone-compat apply, in
 // different processes and possibly for different Windows users). Each write
-// takes a lock (an exclusive open of Isotone.txt.lock), re-reads the file, and
+// takes a lock (DirectoryLock, on Isotone.txt.lock), re-reads the file, and
 // if another writer changed it, puts this writer's devices onto what is there;
 // it replaces the file only if the result differs from what is on disk. So
 // neither writer reverts the other's blocks, and a block another writer changed
@@ -41,6 +41,30 @@
 #include "isotone_file.h"
 
 namespace isotone::compat {
+
+// Held from reading Isotone.txt to replacing it, so no other writer, in this
+// process or another, for this Windows user or another, replaces it in between
+// and loses this writer's blocks or has its own lost. The lock is a byte-range
+// lock on Isotone.txt.lock in the same directory: the directory's ACL decides
+// who may take it, as it decides who may write Isotone.txt, and it is released
+// if the process dies. Waiters queue in the kernel and one is given the lock as
+// it is released; polling an exclusive open instead missed the moments between
+// one writer's release and its next write (CI, 2026-09-19). The file is never
+// written or deleted, so after it is first created, taking the lock changes
+// nothing Equalizer APO watches.
+class DirectoryLock {
+public:
+    DirectoryLock() = default;
+    DirectoryLock(const DirectoryLock&) = delete;
+    DirectoryLock& operator=(const DirectoryLock&) = delete;
+    ~DirectoryLock();
+    // ERROR_SHARING_VIOLATION when another holder still has it after wait_ms.
+    DWORD acquire(const std::filesystem::path& path, DWORD wait_ms);
+
+private:
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+    bool locked_ = false;
+};
 
 class CompatWriter {
 public:

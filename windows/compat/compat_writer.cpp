@@ -24,39 +24,43 @@ std::string device_key(const std::string& id) {
     return k;
 }
 
-// Held from reading Isotone.txt to replacing it, so no other writer, in this
-// process or another, for this Windows user or another, replaces it in between
-// and loses this writer's blocks or has its own lost. The lock is an exclusive
-// open of Isotone.txt.lock in the same directory: the directory's ACL decides
-// who may take it, as it decides who may write Isotone.txt, and the handle
-// closes if the process dies. The file is never written or deleted, so after it
-// is first created, taking the lock changes nothing Equalizer APO watches.
-class DirectoryLock {
-public:
-    ~DirectoryLock() {
-        if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
-    }
-    DWORD acquire(const std::filesystem::path& path, DWORD wait_ms) {
-        const ULONGLONG deadline = GetTickCount64() + wait_ms;
-        for (;;) {
-            h_ = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-            if (h_ != INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
-            const DWORD e = GetLastError();
-            if (e != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) return e;
-            Sleep(1);
-        }
-    }
-
-private:
-    HANDLE h_ = INVALID_HANDLE_VALUE;
-};
-
 // Longer than one write holds the lock, which includes up to 200 ms of
 // write_file_atomically waiting out a reader.
 constexpr DWORD kLockWaitMs = 1000;
 
 }  // namespace
+
+DirectoryLock::~DirectoryLock() {
+    if (h_ == INVALID_HANDLE_VALUE) return;
+    if (locked_) {
+        OVERLAPPED ov{};
+        UnlockFileEx(h_, 0, 1, 0, &ov);
+    }
+    CloseHandle(h_);
+}
+
+DWORD DirectoryLock::acquire(const std::filesystem::path& path, DWORD wait_ms) {
+    h_ = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED, nullptr);
+    if (h_ == INVALID_HANDLE_VALUE) return GetLastError();
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (ov.hEvent == nullptr) return GetLastError();
+    DWORD e = ERROR_SUCCESS;
+    if (!LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov)) {
+        e = GetLastError();
+        if (e == ERROR_IO_PENDING) {
+            if (WaitForSingleObject(ov.hEvent, wait_ms) != WAIT_OBJECT_0) CancelIoEx(h_, &ov);
+            // Granted as the wait ran out counts as granted.
+            DWORD unused = 0;
+            e = GetOverlappedResult(h_, &ov, &unused, TRUE) ? ERROR_SUCCESS : GetLastError();
+            if (e == ERROR_OPERATION_ABORTED) e = ERROR_SHARING_VIOLATION;
+        }
+    }
+    CloseHandle(ov.hEvent);
+    locked_ = e == ERROR_SUCCESS;
+    return e;
+}
 
 CompatWriter::CompatWriter(std::filesystem::path config_dir)
     : dir_(std::move(config_dir)), path_(dir_ / kIsotoneFileName) {}

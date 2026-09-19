@@ -28,6 +28,9 @@
 #             capture, and nothing else, put the EQ in the path
 #   release   a stream still playing when the daemon exits goes back to the
 #             hardware sink rather than following a sink that is gone
+#   starts    a hundred daemons started with twice as many busy processes as
+#             CPUs all link their graph; one whose filter was bound after every
+#             port had arrived waited forever for a registry event
 #
 # Each figure is the difference from the same daemon with nothing written, so a
 # fixed gain anywhere in the chain cancels and what is left is the filter.
@@ -200,6 +203,7 @@ def set_default_sink(name):
     sys.exit(f"{name} never became the default sink")
 
 
+@m.measured
 def app_level(freq):
     """Plays as an application does, to the default sink, and captures the hardware.
 
@@ -281,6 +285,30 @@ def released():
             stop_daemon(proc)
         play.kill()
         play.wait(timeout=10)
+
+
+def starts(runs=100):
+    """How many of `runs` daemons, started and stopped with twice as many busy
+    processes as CPUs, never linked their graph."""
+    busy = [subprocess.Popen(["sh", "-c", "while :; do :; done"])
+            for _ in range(2 * (os.cpu_count() or 4))]
+    unlinked = 0
+    try:
+        for _ in range(runs):
+            proc = subprocess.Popen([DAEMON, "--sink", HW, "--state-dir", STATE_DIR, "--channels", "2"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 10
+            while "isotone-core:out_FL" not in m.sh("pw-link -l").stdout:
+                if time.time() > deadline:
+                    unlinked += 1
+                    break
+                time.sleep(0.1)
+            stop_daemon(proc)
+    finally:
+        for p in busy:
+            p.kill()
+            p.wait()
+    return unlinked
 
 
 def main():
@@ -378,6 +406,11 @@ def main():
         failures += 1
     print(f"{'release':>10}  stream into {VIRT}: {'yes' if moved else 'NO'}, "
           f"back to {HW} after exit: {'yes' if back else 'NO'}")
+
+    unlinked = starts()
+    if unlinked:
+        failures += 1
+    print(f"{'starts':>10}  never linked: {unlinked} of 100")
 
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     print()

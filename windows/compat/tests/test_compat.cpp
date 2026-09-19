@@ -2593,6 +2593,109 @@ TEST_CASE("attach closes each If and undoes each Stage only for the devices a De
     }
 }
 
+TEST_CASE("a writer waiting for the lock gets it from one that takes it again at once") {
+    // A writer persisting back to back leaves the lock free only between
+    // releasing it and taking it again. Polling for it missed those gaps for a
+    // whole second on a CI runner, and the waiting write failed. A waiter gets
+    // it at the first release.
+    Sandbox s;
+    const fs::path path = s.dir / "Isotone.txt.lock";
+    std::atomic<bool> done{false};
+    std::atomic<int> held{0};
+    std::thread busy([&] {
+        while (!done) {
+            DirectoryLock lock;
+            if (lock.acquire(path, 5000) != ERROR_SUCCESS) return;
+            held++;
+            Sleep(200);
+        }
+    });
+    while (held == 0) Sleep(1);
+    int failures = 0;
+    DWORD first_error = ERROR_SUCCESS;
+    ULONGLONG longest = 0;
+    for (int k = 0; k < 10; ++k) {
+        const ULONGLONG start = GetTickCount64();
+        DirectoryLock lock;
+        const DWORD e = lock.acquire(path, 1000);
+        longest = std::max(longest, GetTickCount64() - start);
+        if (e != ERROR_SUCCESS && failures++ == 0) first_error = e;
+    }
+    done = true;
+    busy.join();
+    CAPTURE(first_error);
+    CAPTURE(longest);
+    CHECK(failures == 0);
+    CHECK(longest < 350);   // one hold of 200 ms, and time to be scheduled
+}
+
+TEST_CASE("the writers' lock is released when its holder goes") {
+    Sandbox s;
+    const fs::path path = s.dir / "Isotone.txt.lock";
+    {
+        DirectoryLock first;
+        REQUIRE(first.acquire(path, 1000) == ERROR_SUCCESS);
+        DirectoryLock second;
+        CHECK(second.acquire(path, 100) == ERROR_SHARING_VIOLATION);
+    }
+    DirectoryLock third;
+    CHECK(third.acquire(path, 0) == ERROR_SUCCESS);
+}
+
+// Run as a child by the next test: holds the lock named in the environment
+// until it is killed. Does nothing in a normal run.
+TEST_CASE("(helper) hold the writers' lock until killed") {
+    wchar_t path[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"ISOTONE_TEST_HOLD_LOCK", path, MAX_PATH) == 0) return;
+    DirectoryLock lock;
+    if (lock.acquire(path, 1000) != ERROR_SUCCESS) return;
+    std::printf("held\n");
+    std::fflush(stdout);
+    Sleep(INFINITE);
+}
+
+TEST_CASE("the writers' lock is released when the process holding it is killed") {
+    Sandbox s;
+    const fs::path path = s.dir / "Isotone.txt.lock";
+    wchar_t exe[MAX_PATH] = {};
+    REQUIRE(GetModuleFileNameW(nullptr, exe, MAX_PATH) > 0);
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" \"-tc=(helper) hold the writers' lock until killed\"";
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE read_end = nullptr, write_end = nullptr;
+    REQUIRE(CreatePipe(&read_end, &write_end, &sa, 0));
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = write_end;
+    si.hStdError = write_end;
+    PROCESS_INFORMATION pi{};
+    SetEnvironmentVariableW(L"ISOTONE_TEST_HOLD_LOCK", path.c_str());
+    const BOOL started = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                        nullptr, &si, &pi);
+    SetEnvironmentVariableW(L"ISOTONE_TEST_HOLD_LOCK", nullptr);
+    CloseHandle(write_end);
+    REQUIRE(started);
+    std::string out;
+    char buf[256];
+    DWORD got = 0;
+    while (out.find("held") == std::string::npos && ReadFile(read_end, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        out.append(buf, got);
+    }
+    CAPTURE(out);
+    {
+        DirectoryLock while_held;
+        CHECK(while_held.acquire(path, 100) == ERROR_SHARING_VIOLATION);
+    }
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(read_end);
+    DirectoryLock after;
+    CHECK(after.acquire(path, 2000) == ERROR_SUCCESS);
+}
+
 TEST_CASE("two writers in two threads never lose each other's blocks") {
     // Each writer re-reads the file after every persist: its own block must be
     // the one it just wrote, whatever the other did in between.

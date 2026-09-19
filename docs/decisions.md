@@ -3970,6 +3970,57 @@ command in the logged-in session) and `~/rig.sh` (the two null sinks).
   capture window rather than a wrong filter, since the ring read correctly while
   the sink read low. Not diagnosed.
 
+
+## 2026-09-19: The intermittents, diagnosed and fixed
+
+The owner asked for them fixed. Three separate causes, one of them a bug in
+the daemon that the loaded runs turned up.
+
+**The compat writers' lock starved a waiter.** A throwaway branch logged which
+call failed on the Windows runner, 25 runs of the two concurrent-writer tests
+on each of four runners: every failure (6 of 100 runs) was the lock timing out
+after 1000 ms, never the replace or a read. The lock was an exclusive open of
+`Isotone.txt.lock`, polled with `Sleep(1)`. A writer persisting back to back
+holds it for a few milliseconds and leaves it free for microseconds, and a
+waiter that wakes on the runner's 15.6 ms timer tick can miss every gap for a
+second. Here `Sleep(1)` is 1.4 ms, which is why it never failed locally.
+
+Now it is a byte-range lock (`LockFileEx`, exclusive, one byte) on the same
+file, waited for with an overlapped wait: a waiter queues in the kernel and is
+handed the lock as it is released. `DirectoryLock` moved to `compat_writer.h`
+so it can be tested alone. Tests: a waiter is served within one 200 ms hold of
+a holder that retakes the lock at once (the polling lock failed 4 of 5 runs,
+waiting 406 to 1000 ms; the new one waits 203 to 204 ms, 10 of 10); a second
+holder is refused and the lock is free after the first goes; a child process
+holding it is killed and the lock is free. On the runner, the same 4 × 25 loop:
+0 of 100 runs failed. An older build's exclusive open and this build's shared
+open still exclude each other, but this build does not wait for an older
+holder; the UI and isotone-compat ship together.
+
+**The daemon could start and never link its graph.** Seen twice in the loaded
+runs below: "the daemon never linked its graph". Logged: every link attempt
+had found the filter's node id still `SPA_ID_INVALID`, after every port,
+including the filter's own, had reached the registry. Linking ran only on
+registry events, so nothing tried again once the filter was bound. It now
+tries again when the filter reaches paused or streaming, which is when its id
+is known. With 24 busy processes on 24 CPUs: 4 of 160 starts never linked
+before, 0 of 300 after. `linux/daemon/measure.py` has a `starts` case, 100
+starts with twice as many busy processes as CPUs; with the new handler made a
+no-op it failed 4 runs of 4 (2 to 5 of 100 unlinked).
+
+**The rig's captures glitch now and then.** A capture of the daemon at 2.1
+read 0.18 dB low. Its tone had one discontinuity 0.3 s in: a permanent step of
+16 samples (mod 48) at 1 kHz, no silence, in a case where nothing is written
+during the capture. The spike, which has no daemon in its path, read 6.2 dB low
+once on a runner, and the daemon's ring read correctly once while the sink read
+low: the drop is in the rig's own streams under load, not in what is measured.
+`level_dbfs` now checks that the tone is continuous (every 100 ms block within
+0.01 rad and 0.05 dB of the others) and raises otherwise; a capture that
+glitched is taken once more with a line saying so, and two in a row fail. That
+does not hide a systematic fault in the path, which would glitch both times.
+The captured WAV that read 0.18 dB low is reported as a phase step of 1.002 rad.
+Clean captures read 0.000 rad.
+
 ---
 
 # Where things stand (2026-09-19)

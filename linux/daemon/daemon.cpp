@@ -292,10 +292,21 @@ void on_process(void* userdata, spa_io_position* position) {
     }
 }
 
+void try_link(Daemon& d);
+
+// The filter's node id is known only once the filter is bound, and every port
+// can reach the registry before that; linking then as well is what stops such a
+// start from waiting forever for a registry event that is not coming.
+void on_filter_state(void* userdata, pw_filter_state /*old*/, pw_filter_state state,
+                     const char* /*error*/) {
+    if (state == PW_FILTER_STATE_PAUSED || state == PW_FILTER_STATE_STREAMING)
+        try_link(*static_cast<Daemon*>(userdata));
+}
+
 const pw_filter_events kFilterEvents = {
     .version = PW_VERSION_FILTER_EVENTS,
     .destroy = nullptr,
-    .state_changed = nullptr,
+    .state_changed = on_filter_state,
     .io_changed = nullptr,
     .param_changed = nullptr,
     .add_buffer = nullptr,

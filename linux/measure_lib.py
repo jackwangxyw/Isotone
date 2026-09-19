@@ -10,6 +10,7 @@
 # Nothing here needs audio hardware. Both ends are null sinks, which is what
 # makes this runnable in a container and on a CI runner.
 
+import functools
 import math
 import os
 import subprocess
@@ -124,10 +125,49 @@ def level_dbfs(path, freq):
     seg = left[loud[0] + rate // 4: loud[-1] - rate // 4]
     k = np.arange(len(seg))
     ref = np.exp(-2j * math.pi * freq * k / rate)
+
+    # A continuous tone has the same amplitude and phase in every 100 ms block.
+    # A block dropped or repeated in the rig's own streams under load shows as a
+    # step in phase, and takes the level down with it (0.18 dB in WSL, 6 dB once
+    # on a CI runner) with nothing under test wrong.
+    step = rate // 10
+    blocks = np.array([np.sum(seg[i:i + step] * ref[i:i + step])
+                       for i in range(0, len(seg) - step + 1, step)])
+    if len(blocks) > 1:
+        phase_steps = np.abs(np.angle(blocks[1:] / blocks[:-1]))
+        levels = 20.0 * np.log10(np.abs(blocks) / np.median(np.abs(blocks)))
+        worst = int(np.argmax(phase_steps))
+        if phase_steps[worst] > 0.01 or np.max(np.abs(levels)) > 0.05:
+            at = (loud[0] + rate // 4 + (worst + 1) * step) / rate
+            raise Glitch(f"{os.path.basename(path)}: the tone is not continuous "
+                         f"(a phase step of {phase_steps[worst]:.3f} rad near {at:.2f} s, "
+                         f"a block {np.max(np.abs(levels)):.3f} dB off)")
+
     amp = 2.0 * np.abs(np.sum(seg * ref)) / len(seg)
     return 20.0 * math.log10(amp) if amp > 0 else -999.0
 
 
+class Glitch(Exception):
+    """A capture whose tone is not continuous, so its level means nothing."""
+
+
+def measured(capture):
+    """For a function that records the rig and returns level_dbfs: a capture
+    that glitched is taken once more, and says so; two in a row fail."""
+    @functools.wraps(capture)
+    def once_more(*args, **kwargs):
+        try:
+            return capture(*args, **kwargs)
+        except Glitch as g:
+            print(f"{g}; captured again", file=sys.stderr, flush=True)
+        try:
+            return capture(*args, **kwargs)
+        except Glitch as g:
+            sys.exit(f"{g}, twice in a row")
+    return once_more
+
+
+@measured
 def play_and_capture(play_into, capture_from, freq, work=None, positions=("FL", "FR")):
     """Play a tone into `play_into` and capture `capture_from`'s monitor.
 

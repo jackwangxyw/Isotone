@@ -81,6 +81,7 @@ def app(*args, seconds=3.0):
     return result
 
 
+@m.measured
 def capture_app_tone(freq, *extra):
     """Captures the sink the daemon feeds while the app plays EQ by ear's tone."""
     os.makedirs(m.WORK, exist_ok=True)
