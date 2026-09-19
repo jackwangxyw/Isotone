@@ -80,8 +80,10 @@ jobs:
           sudo apt-get install -y -qq qt6-base-dev qt6-declarative-dev qt6-base-dev-tools
           # The app runs offscreen in the measurement, so the QML modules it
           # imports have to be there at run time too; the X11 and xcb headers are
-          # the global hotkeys', and Xvfb is the X server their grab test runs against.
-          sudo apt-get install -y -qq libx11-dev libxcb1-dev xvfb qml6-module-qtquick qml6-module-qtquick-window \
+          # the global hotkeys', Xvfb is the X server their grab test runs against,
+          # and python3-dbus and python3-gi run the mock portal their portal test binds with.
+          sudo apt-get install -y -qq libx11-dev libxcb1-dev xvfb python3-dbus python3-gi \
+            qml6-module-qtquick qml6-module-qtquick-window \
             qml6-module-qtquick-shapes qml6-module-qtquick-dialogs qml6-module-qtcore qml6-module-qttest \
             qml6-module-qtqml-workerscript qml6-module-qtquick-templates qml6-module-qtquick-controls qml6-module-qtquick-layouts
 

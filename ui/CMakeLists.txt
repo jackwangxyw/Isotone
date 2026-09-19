@@ -352,6 +352,19 @@ if(ISOTONE_BUILD_TESTS)
                      COMMAND ${XVFB_RUN} -a env QT_QPA_PLATFORM=xcb $<TARGET_FILE:ui_model_tests>
                              "-tc=global hotkeys grab on X11*")
         endif()
+        # And the GlobalShortcuts portal's: a mock portal in a process of its own,
+        # on a session bus of their own, where python3 has the D-Bus bindings.
+        find_program(DBUS_RUN_SESSION dbus-run-session)
+        find_package(Python3 COMPONENTS Interpreter)
+        if(DBUS_RUN_SESSION AND Python3_Interpreter_FOUND)
+            execute_process(COMMAND ${Python3_EXECUTABLE} -c "import dbus, gi" RESULT_VARIABLE ISOTONE_PY_DBUS
+                            OUTPUT_QUIET ERROR_QUIET)
+            if(ISOTONE_PY_DBUS EQUAL 0)
+                add_test(NAME ui_model_tests_portal
+                         COMMAND ${DBUS_RUN_SESSION} -- bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portal_test.sh
+                                 $<TARGET_FILE:ui_model_tests>)
+            endif()
+        endif()
     endif()
 
     # QML tests: Qt Quick Test cases in tests/qml driving the real components.

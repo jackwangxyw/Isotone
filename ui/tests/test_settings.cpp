@@ -12,6 +12,7 @@
 #include <QMenu>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QFile>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -470,6 +471,60 @@ TEST_CASE("global hotkeys grab on X11 for Global actions, report one taken, and 
     XSync(other, 0);
     XSetErrorHandler(before);
     XCloseDisplay(other);
+}
+
+namespace {
+
+// processEvents with a time limit returns at once when nothing is queued, so it
+// cannot be the wait: the sleep is.
+bool wait_until(const std::function<bool()>& done, int ms = 5000) {
+    for (int waited = 0; waited < ms && !done(); waited += 10) {
+        QCoreApplication::processEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return done();
+}
+
+QString read_all(const QString& path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+}
+
+}  // namespace
+
+TEST_CASE("global hotkeys bind through the GlobalShortcuts portal, report one refused, and activate") {
+    // Only against tests/mock_portal.py, a portal in a process of its own on a
+    // session bus of this run's own (ctest runs it so, as ui_model_tests_portal).
+    // It binds all but "mute" and presses "eq" once the bind is answered.
+    const QString log = qEnvironmentVariable("ISOTONE_MOCK_PORTAL_LOG");
+    if (log.isEmpty()) {
+        MESSAGE("no mock portal; skipped");
+        return;
+    }
+    Scratch s;
+    ShortcutRegistry registry(s.settings.get());
+    for (const QString& id : registry.ids(QStringLiteral("app"))) registry.setGlobal(id, false);
+    registry.setGlobal(QStringLiteral("eq"), true);
+    registry.setGlobal(QStringLiteral("mute"), true);
+    QSignalSpy activated(&registry, &ShortcutRegistry::activated);
+
+    auto hotkeys = std::make_unique<GlobalHotkeys>(&registry);
+    REQUIRE(hotkeys->mechanism() == QStringLiteral("portal"));
+    REQUIRE(wait_until([&] { return hotkeys->registered() == QStringList{"eq"}; }));
+    // What the desktop refused is marked; the keys went as the XDG shortcuts specification writes them.
+    CHECK_FALSE(registry.globalFailed(QStringLiteral("eq")));
+    CHECK(registry.globalFailed(QStringLiteral("mute")));
+    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts eq trigger=CTRL+e description=EQ on / off")));
+    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts mute trigger=CTRL+m description=Mute")));
+
+    // The desktop's press arrives as Activated on the session: the action runs once.
+    REQUIRE(wait_until([&] { return activated.count() == 1; }));
+    CHECK(activated.at(0).at(0).toString() == QStringLiteral("eq"));
+
+    // Waiting for keys on the Shortcuts page closes the session.
+    registry.setCapturing(true);
+    CHECK(hotkeys->registered().isEmpty());
+    CHECK(wait_until([&] { return read_all(log).contains(QStringLiteral("Close ")); }));
 }
 #endif
 

@@ -66,8 +66,10 @@ public:
     explicit GlobalShortcutsPortal(QObject* parent = nullptr) : QObject(parent) {
         qDBusRegisterMetaType<PortalShortcut>();
         qDBusRegisterMetaType<QList<PortalShortcut>>();
+        // The whole message: QtDBus refuses the typed slot for this signal
+        // (connect returns false with Qt 6.4).
         bus_.connect(kPortalService, kPortalPath, kShortcutsInterface, QStringLiteral("Activated"), this,
-                     SLOT(onActivated(QDBusObjectPath, QString, qulonglong, QVariantMap)));
+                     SLOT(onActivated(QDBusMessage)));
     }
     ~GlobalShortcutsPortal() override { close(); }
 
@@ -133,8 +135,11 @@ private slots:
         emit bound(ids);
     }
 
-    void onActivated(const QDBusObjectPath& session, const QString& id, qulonglong, const QVariantMap&) {
-        if (session.path() == session_) emit activated(id);
+    // Activated(o session_handle, s shortcut_id, t timestamp, a{sv} options).
+    void onActivated(const QDBusMessage& message) {
+        const QList<QVariant> args = message.arguments();
+        if (args.size() < 2) return;
+        if (args[0].value<QDBusObjectPath>().path() == session_) emit activated(args[1].toString());
     }
 
 private:
