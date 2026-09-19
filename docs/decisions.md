@@ -4248,6 +4248,60 @@ Checked by forcing the new path rather than waiting for another flake: with
 3,000,000 chunks and passed, where the 500 ms window alone would have stopped at
 about 1.5 million.
 
+## The installer's machine-wide half lives in devicetool
+
+Everything the installer does to HKLM and to the ProgramData ACL is a
+devicetool command, not NSIS script: `machine-install --dll <path>` and
+`machine-uninstall`, both with `--dry-run` and both printing the same JSON every
+other command prints. NSIS is left copying files and calling this. That keeps
+the owner's rule workable, because a dry run of the whole machine-wide install
+is one command he can read, and it puts the work where the tests already are.
+
+**The COM class is registered by the DLL's own `DllRegisterServer`**, loaded and
+called, rather than reimplemented in devicetool. `RegisterAPO` and the
+`APO_REG_PROPERTIES` live in `dllmain.cpp` and two copies would drift. The cost
+is that a dry run cannot run it, since it goes at the registry directly and has
+no `RegistryDryRun` to install; so the dry run checks every precondition it can
+and says the call would follow. The preconditions are the ones that matter: an
+absolute local path, the file exists, it is not under a user profile, and
+LOCAL SERVICE can read and execute it. audiodg runs as LocalService, and a DLL
+it cannot load registers cleanly and then fails every endpoint with
+E_ACCESSDENIED.
+
+**`DisableProtectedAudioDG` is not ours to remove.** This machine already had it
+at 1, set by Equalizer APO, which is installed here and stops working without
+it. So `machine-install` records whether it was the one to set the value
+(`HKLM\SOFTWARE\IsoAPO\ProtectedAudioDGSetByIsotone`), and `machine-uninstall`
+removes it only when that record says yes and Equalizer APO is not installed.
+The dry run says which of the three it is and why.
+
+**The data directory's ACL**, which `docs/ui-spec.md` has been carrying a note
+about since stage 4 ("a file one Windows account writes cannot be replaced by
+another until the installer sets the directory's ACL"):
+
+```
+D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;<Audiosrv>)
+```
+
+Protected, so ProgramData's inheritance (Users: read and create only) does not
+apply as well, and OICI so files created inside carry it. `0x1301bf` is modify
+rather than write because the app replaces the state file with `MoveFileEx`,
+which needs DELETE on the file already there. The Audiosrv ACE is resolved
+through `LookupAccountName("NT SERVICE\Audiosrv")` rather than written out: the
+SID is derived from the service name and is the same everywhere, but a literal
+that is wrong is an ACE that silently grants nothing, and the value differed
+from the one memory offered.
+
+Each of the four is mutation-checked: dropping the LOCAL SERVICE ACE, taking
+DELETE off Authenticated Users, unprotecting the DACL and not resolving the
+Audiosrv SID each fail a test. The first attempt at the ACL test passed all four
+mutations, because it read `registration.dll` where the field is
+`isoapo.registration.dll` and skipped itself. The command was changed rather than
+only the test: the plan (the directory, the ACL, the protected-audio state) is
+now reported even when the DLL checks fail, which is what a dry run should do
+anyway, and the test no longer depends on what is installed on the machine
+running it.
+
 # Where things stand (2026-09-19)
 
 ## Done

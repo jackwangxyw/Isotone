@@ -39,6 +39,7 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
 #include <sddl.h>
@@ -53,6 +54,7 @@
 #include <cctype>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <functional>
@@ -208,6 +210,8 @@ int usage(const std::string& command, const std::string& reason) {
                  "  isotone-devicetool uninstall <endpoint> [--dry-run]\n"
                  "  isotone-devicetool repair    [<endpoint>] [--mode mfx|efx|gfx] [--dry-run]\n"
                  "  isotone-devicetool test      <endpoint>\n"
+                 "  isotone-devicetool machine-install   --dll <absolute path> [--dry-run]\n"
+                 "  isotone-devicetool machine-uninstall [--remove-data] [--dry-run]\n"
                  "  isotone-devicetool enable-enhancements <endpoint> [--dry-run]\n"
                  "  isotone-devicetool restart-audio [--dry-run]\n"
                  "  isotone-devicetool layouts   <endpoint>\n"
@@ -566,6 +570,23 @@ std::optional<bool> local_service_can_load(const std::wstring& path) {
     }
 }
 
+// audiodg hosts the APO as LocalService, which cannot read user profiles; a DLL
+// there fails the whole endpoint with E_ACCESSDENIED. machine-install refuses
+// such a path before registering it, and status reports one already registered.
+bool under_user_profile(const std::wstring& path) {
+    std::wstring lower = path;
+    for (wchar_t& c : lower) c = static_cast<wchar_t>(towlower(c));
+    wchar_t profiles[MAX_PATH] = {};
+    DWORD n = MAX_PATH;
+    std::wstring root = L"c:\\users\\";
+    if (GetProfilesDirectoryW(profiles, &n)) {
+        root = profiles;
+        for (wchar_t& c : root) c = static_cast<wchar_t>(towlower(c));
+        if (root.back() != L'\\') root += L'\\';
+    }
+    return lower.rfind(root, 0) == 0;
+}
+
 Registration read_registration() {
     Registration r;
     const std::wstring clsid = RegistryHelper::getGuidString(ISOAPO_POST_MIX_GUID);
@@ -573,19 +594,7 @@ Registration read_registration() {
     try_read_string(std::wstring(kClsid) + L"\\" + clsid + L"\\InprocServer32", L"", &r.dll);
     if (!r.dll.empty()) {
         r.dll_exists = GetFileAttributesW(r.dll.c_str()) != INVALID_FILE_ATTRIBUTES;
-        // audiodg hosts the APO as LocalService, which cannot read user
-        // profiles; a DLL there fails the whole endpoint with E_ACCESSDENIED.
-        std::wstring lower = r.dll;
-        for (wchar_t& c : lower) c = static_cast<wchar_t>(towlower(c));
-        wchar_t profiles[MAX_PATH] = {};
-        DWORD n = MAX_PATH;
-        std::wstring root = L"c:\\users\\";
-        if (GetProfilesDirectoryW(profiles, &n)) {
-            root = profiles;
-            for (wchar_t& c : root) c = static_cast<wchar_t>(towlower(c));
-            if (root.back() != L'\\') root += L'\\';
-        }
-        r.dll_under_user_profile = lower.rfind(root, 0) == 0;
+        r.dll_under_user_profile = under_user_profile(r.dll);
         if (r.dll_exists) r.dll_local_service_can_load = local_service_can_load(r.dll);
     }
     r.json = std::string("{\"clsid\":") + quote(clsid) + ",\"apo_registered\":" +
@@ -2181,6 +2190,302 @@ int cmd_restart_audio(bool dry_run) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The machine-wide half of an install: what the installer does once for the
+// machine rather than once per endpoint (plan section 8, the Setup/ row).
+//
+//   the COM class      HKLM\SOFTWARE\Classes\CLSID\{IsoAPO} and
+//                      AudioEngine\AudioProcessingObjects. Written by the DLL's
+//                      own DllRegisterServer rather than reimplemented here:
+//                      that is where RegisterAPO and the APO_REG_PROPERTIES
+//                      live, and two copies of it would drift.
+//   protected audio    DisableProtectedAudioDG=1, without which audiodg loads
+//                      no unsigned APO at all.
+//   the data directory %ProgramData%\IsoAPO\{devices,backups}, with an ACL
+//                      audiodg can read and any account's app can write.
+//
+// A dry run writes nothing anywhere. It cannot call DllRegisterServer, which
+// goes at the registry directly and has no dry run to install, so it reports
+// every precondition it can check and says the call would follow.
+
+const wchar_t* const kAudioSettingsKey =
+    L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
+const wchar_t* const kProtectedAudioValue = L"DisableProtectedAudioDG";
+const wchar_t* const kIsotoneKey = L"HKEY_LOCAL_MACHINE\\SOFTWARE\\IsoAPO";
+// 1 when this install set DisableProtectedAudioDG, so machine-uninstall knows
+// whether the value is ours to remove. Equalizer APO sets the same value, and
+// on a machine that had it first this reads 0 and the uninstall leaves it.
+const wchar_t* const kProtectedAudioOursValue = L"ProtectedAudioDGSetByIsotone";
+
+std::wstring program_data_dir() {
+    wchar_t* base = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &base))) dir = base;
+    CoTaskMemFree(base);
+    return dir.empty() ? dir : dir + L"\\IsoAPO";
+}
+
+// "NT SERVICE\<service>" as an SDDL SID string, empty when it cannot be
+// resolved. Derived by the LSA from the service name, so it is the same on
+// every machine; resolved here rather than written out, because a wrong literal
+// would be an ACE that silently grants nothing.
+std::wstring service_sid(const wchar_t* service) {
+    const std::wstring account = std::wstring(L"NT SERVICE\\") + service;
+    DWORD sid_size = 0, domain_size = 0;
+    SID_NAME_USE use{};
+    LookupAccountNameW(nullptr, account.c_str(), nullptr, &sid_size, nullptr, &domain_size, &use);
+    if (sid_size == 0) return {};
+    std::vector<BYTE> sid(sid_size);
+    std::vector<wchar_t> domain(domain_size == 0 ? 1 : domain_size);
+    if (!LookupAccountNameW(nullptr, account.c_str(), sid.data(), &sid_size, domain.data(), &domain_size, &use)) {
+        return {};
+    }
+    wchar_t* text = nullptr;
+    if (!ConvertSidToStringSidW(sid.data(), &text)) return {};
+    std::wstring out = text;
+    LocalFree(text);
+    return out;
+}
+
+// SYSTEM and Administrators full control; LOCAL SERVICE, which audiodg runs as,
+// and the Windows Audio service read and execute; Authenticated Users modify.
+//
+// Modify rather than write, and Authenticated Users rather than the creator,
+// because the app runs unelevated as whoever is logged in and replaces the state
+// file with MoveFileEx, which needs DELETE on the file that is already there.
+// ProgramData's inherited ACL gives Users read and create only, so until this is
+// set "a file one Windows account writes cannot be replaced by another"
+// (docs/ui-spec.md). Protected (D:P), so those inherited ACEs do not apply as
+// well, and inherited by what is created inside (OICI).
+std::wstring data_dir_sddl() {
+    std::wstring sddl = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)(A;OICI;0x1301bf;;;AU)";
+    const std::wstring audiosrv = service_sid(L"Audiosrv");
+    if (!audiosrv.empty()) sddl += L"(A;OICI;0x1200a9;;;" + audiosrv + L")";
+    return sddl;
+}
+
+// Creates `dir` if it is not there and puts `sddl`'s DACL on it, replacing
+// whatever it had. Empty on success, else what went wrong.
+std::string apply_data_dir_acl(const std::wstring& dir, const std::wstring& sddl) {
+    if (!CreateDirectoryW(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return "cannot create " + utf8(dir) + " (error " + std::to_string(GetLastError()) + ")";
+    }
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) {
+        return "cannot build the security descriptor (error " + std::to_string(GetLastError()) + ")";
+    }
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    const bool got = GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present;
+    const DWORD set =
+        got ? SetNamedSecurityInfoW(const_cast<wchar_t*>(dir.c_str()), SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                    nullptr, nullptr, dacl, nullptr)
+            : ERROR_INVALID_PARAMETER;
+    LocalFree(sd);
+    if (set != ERROR_SUCCESS) {
+        return "cannot set the ACL on " + utf8(dir) + " (error " + std::to_string(set) + ")";
+    }
+    return {};
+}
+
+// The DACL a directory actually carries, so a caller can compare it with what
+// was asked for. Empty when it cannot be read.
+std::wstring read_dacl(const std::wstring& dir) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (GetNamedSecurityInfoW(dir.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                              nullptr, nullptr, &sd) != ERROR_SUCCESS) {
+        return {};
+    }
+    wchar_t* text = nullptr;
+    ULONG length = 0;
+    const bool ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1,
+                                                                         DACL_SECURITY_INFORMATION, &text, &length);
+    std::wstring out;
+    if (ok && text != nullptr) out = text;
+    if (text != nullptr) LocalFree(text);
+    LocalFree(sd);
+    return out;
+}
+
+// Calls the named entry point in the DLL at `path`. Empty on success.
+std::string call_dll_entry(const std::wstring& path, const char* entry) {
+    // LOAD_WITH_ALTERED_SEARCH_PATH so the DLL's own directory is searched for
+    // what it imports, which is how audiodg loads it through CoLoadLibrary.
+    const HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (module == nullptr) {
+        return std::string("cannot load the DLL (error ") + std::to_string(GetLastError()) + ")";
+    }
+    using EntryFn = HRESULT(__stdcall*)();
+    const auto fn = reinterpret_cast<EntryFn>(GetProcAddress(module, entry));
+    if (fn == nullptr) {
+        FreeLibrary(module);
+        return std::string("the DLL does not export ") + entry;
+    }
+    const HRESULT hr = fn();
+    FreeLibrary(module);
+    if (FAILED(hr)) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "0x%08lX", static_cast<unsigned long>(hr));
+        return std::string(entry) + " returned " + buffer;
+    }
+    return {};
+}
+
+std::string check_json(const char* name, bool ok, std::vector<std::string>* failed) {
+    if (!ok) failed->push_back(name);
+    return std::string("{\"check\":") + quote(std::string(name)) + ",\"ok\":" + boolean(ok) + "}";
+}
+
+int cmd_machine_install(const std::wstring& dll, bool dry_run) {
+    // Everything this would do, worked out before anything is written, so a run
+    // that stops at a bad DLL still reports the whole plan rather than only the
+    // step it failed at. Recorded as ours only when this run is what sets
+    // DisableProtectedAudioDG, so machine-uninstall leaves alone a value
+    // Equalizer APO put there first.
+    bool protected_audio_present = false;
+    const DWORD type = value_type(kAudioSettingsKey, kProtectedAudioValue, &protected_audio_present);
+    const bool already =
+        protected_audio_present && type == REG_DWORD && read_dword(kAudioSettingsKey, kProtectedAudioValue) == 1;
+    const std::wstring data_dir = program_data_dir();
+    const std::wstring sddl = data_dir_sddl();
+    const std::string plan = std::string("\"command\":\"machine-install\",\"dry_run\":") + boolean(dry_run) +
+                             ",\"dll\":" + quote(dll) + ",\"protected_audiodg_already_disabled\":" + boolean(already) +
+                             ",\"data_dir\":" + (data_dir.empty() ? "null" : quote(data_dir)) + ",\"acl\":" +
+                             quote(sddl);
+
+    // The DLL: a path audiodg cannot load would register cleanly and then fail
+    // every endpoint with E_ACCESSDENIED.
+    const bool absolute = dll.size() >= 3 && dll[1] == L':' && dll[2] == L'\\';
+    std::vector<std::string> failed;
+    std::string checks = "[";
+    checks += check_json("the path is a local absolute path", absolute, &failed);
+    checks += "," + check_json("the DLL exists",
+                               absolute && GetFileAttributesW(dll.c_str()) != INVALID_FILE_ATTRIBUTES, &failed);
+    checks += "," + check_json("the DLL is not under a user profile (audiodg runs as LocalService)",
+                               absolute && !under_user_profile(dll), &failed);
+    const std::optional<bool> loadable = absolute ? local_service_can_load(dll) : std::optional<bool>(false);
+    checks += "," + check_json("LOCAL SERVICE can read and execute the DLL", loadable.value_or(false), &failed);
+    checks += "]";
+    const std::string facts = plan + ",\"checks\":" + checks;
+    if (!failed.empty()) {
+        return fail("machine-install", "the DLL cannot be registered: " + failed.front(), "," + facts);
+    }
+
+    if (dry_run) {
+        std::printf("{%s,\"ok\":true,\"would\":[\"call DllRegisterServer in the DLL\",%s%s]}\n", facts.c_str(),
+                    already ? "" : "\"set DisableProtectedAudioDG=1\",",
+                    "\"create the data directory and set its ACL\"");
+        return 0;
+    }
+
+    if (data_dir.empty()) return fail("machine-install", "cannot find ProgramData", "," + facts);
+
+    const std::string registered = call_dll_entry(dll, "DllRegisterServer");
+    if (!registered.empty()) return fail("machine-install", registered, "," + facts);
+
+    if (!already) {
+        const std::string wrote = error_text([] {
+            RegistryHelper::writeDWORDValue(kAudioSettingsKey, kProtectedAudioValue, 1);
+        });
+        if (!wrote.empty()) return fail("machine-install", "DisableProtectedAudioDG: " + wrote, "," + facts);
+    }
+    const std::string recorded = error_text([&] {
+        RegistryHelper::writeDWORDValue(kIsotoneKey, kProtectedAudioOursValue, already ? 0 : 1);
+    });
+    if (!recorded.empty()) return fail("machine-install", "the install record: " + recorded, "," + facts);
+
+    for (const std::wstring& dir : {data_dir, data_dir + L"\\devices", data_dir + L"\\backups"}) {
+        const std::string error = apply_data_dir_acl(dir, sddl);
+        if (!error.empty()) return fail("machine-install", error, "," + facts);
+    }
+
+    // What the machine actually holds now, not what was asked for.
+    const Registration after = read_registration();
+    std::vector<std::string> after_failed;
+    std::string done = "[";
+    done += check_json("the post-mix CLSID is registered", after.apo_registered, &after_failed);
+    done += "," + check_json("InprocServer32 names the DLL that was installed",
+                             !after.dll.empty() && _wcsicmp(after.dll.c_str(), dll.c_str()) == 0, &after_failed);
+    bool present_now = false;
+    value_type(kAudioSettingsKey, kProtectedAudioValue, &present_now);
+    done += "," + check_json("DisableProtectedAudioDG is 1",
+                             present_now && read_dword(kAudioSettingsKey, kProtectedAudioValue) == 1, &after_failed);
+    done += "," + check_json("the data directory carries the ACL", read_dacl(data_dir + L"\\devices") == sddl,
+                             &after_failed);
+    done += "]";
+    const std::string outcome = facts + ",\"after\":" + done + ",\"registration\":" + after.json;
+    if (!after_failed.empty()) {
+        return fail("machine-install", "installed, but " + after_failed.front() + " is not true", "," + outcome);
+    }
+    std::printf("{%s,\"ok\":true}\n", outcome.c_str());
+    return 0;
+}
+
+int cmd_machine_uninstall(bool remove_data, bool dry_run) {
+    const Registration before = read_registration();
+    const std::wstring data_dir = program_data_dir();
+    // Only what this install set, and only while nothing else needs it:
+    // Equalizer APO sets the same value and stops working without it.
+    bool ours_present = false;
+    value_type(kIsotoneKey, kProtectedAudioOursValue, &ours_present);
+    const bool ours = ours_present && read_dword(kIsotoneKey, kProtectedAudioOursValue) == 1;
+    const bool equalizerapo = RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO");
+    const bool restore_protected_audio = ours && !equalizerapo;
+    const std::string facts = std::string("\"command\":\"machine-uninstall\",\"dry_run\":") + boolean(dry_run) +
+                              ",\"dll\":" + (before.dll.empty() ? "null" : quote(before.dll)) +
+                              ",\"protected_audiodg_set_by_isotone\":" + boolean(ours) +
+                              ",\"equalizerapo_installed\":" + boolean(equalizerapo) +
+                              ",\"restore_protected_audio\":" + boolean(restore_protected_audio) +
+                              ",\"remove_data\":" + boolean(remove_data) + ",\"data_dir\":" +
+                              (data_dir.empty() ? "null" : quote(data_dir));
+
+    if (dry_run) {
+        std::string would = "[\"call DllUnregisterServer in the DLL\"";
+        if (restore_protected_audio) would += ",\"remove DisableProtectedAudioDG\"";
+        else if (ours) would += ",\"leave DisableProtectedAudioDG: Equalizer APO is installed and needs it\"";
+        else would += ",\"leave DisableProtectedAudioDG: this install did not set it\"";
+        would += remove_data ? ",\"delete the data directory and every saved state in it\"]"
+                             : ",\"leave the data directory and the saved state in it\"]";
+        std::printf("{%s,\"ok\":true,\"would\":%s}\n", facts.c_str(), would.c_str());
+        return 0;
+    }
+
+    if (!before.dll.empty() && before.dll_exists) {
+        const std::string error = call_dll_entry(before.dll, "DllUnregisterServer");
+        if (!error.empty()) return fail("machine-uninstall", error, "," + facts);
+    }
+    if (restore_protected_audio) {
+        const std::string error =
+            error_text([] { RegistryHelper::deleteValue(kAudioSettingsKey, kProtectedAudioValue); });
+        if (!error.empty()) return fail("machine-uninstall", "DisableProtectedAudioDG: " + error, "," + facts);
+    }
+    if (ours_present) {
+        error_text([] { RegistryHelper::deleteValue(kIsotoneKey, kProtectedAudioOursValue); });
+    }
+    if (remove_data && !data_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(data_dir), ec);
+        if (ec) return fail("machine-uninstall", "cannot delete " + utf8(data_dir) + ": " + ec.message(), "," + facts);
+    }
+
+    const Registration after = read_registration();
+    std::vector<std::string> after_failed;
+    std::string done = "[" + check_json("the post-mix CLSID is no longer registered", !after.apo_registered,
+                                        &after_failed);
+    bool present_now = false;
+    value_type(kAudioSettingsKey, kProtectedAudioValue, &present_now);
+    done += "," + check_json("DisableProtectedAudioDG is as it should be",
+                             restore_protected_audio ? !present_now : true, &after_failed);
+    done += "]";
+    const std::string outcome = facts + ",\"after\":" + done + ",\"registration\":" + after.json;
+    if (!after_failed.empty()) {
+        return fail("machine-uninstall", "uninstalled, but " + after_failed.front() + " is not true", "," + outcome);
+    }
+    std::printf("{%s,\"ok\":true}\n", outcome.c_str());
+    return 0;
+}
+
 struct Simulation {
     std::wstring pre, post;         // vendor APOs Equalizer APO replaced, pre-mix and post-mix
     bool hosted = true;             // false: "use original APO" was off in Equalizer APO
@@ -3688,15 +3993,17 @@ int dispatch(int argc, wchar_t** wargv) {
     }
 
     std::vector<std::string> args, flags;
-    bool dry_run = false, replace_eapo = false;
+    bool dry_run = false, replace_eapo = false, remove_data = false;
     std::optional<std::string> mode_text;
     std::optional<std::string> simulation_text;
     std::string pipe_text, parent_text;
     std::optional<std::string> layout_text;
+    std::optional<std::string> dll_text;
     int outputs = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string& a = argv_utf8[i];
-        const bool takes_value = a == "--mode" || a == "--simulate-equalizerapo" || a == "--output" || a == "--pipe" || a == "--parent" || a == "--layout";
+        const bool takes_value = a == "--mode" || a == "--simulate-equalizerapo" || a == "--output" || a == "--pipe" || a == "--parent" || a == "--layout" ||
+                               a == "--dll";
         if (takes_value && i + 1 >= argc) return usage("", a + " needs a value");
         if (a == "--dry-run") dry_run = true;
         else if (a == "--replace-equalizerapo") replace_eapo = true;
@@ -3705,6 +4012,8 @@ int dispatch(int argc, wchar_t** wargv) {
         else if (a == "--pipe") pipe_text = argv_utf8[++i];
         else if (a == "--parent") parent_text = argv_utf8[++i];
         else if (a == "--layout") layout_text = argv_utf8[++i];
+        else if (a == "--dll") dll_text = argv_utf8[++i];
+        else if (a == "--remove-data") remove_data = true;
         else if (a == "--output") { ++i; ++outputs; continue; }
         else if (a.rfind("--", 0) == 0) return usage("", "unknown flag " + a);
         else { args.push_back(a); continue; }
@@ -3723,6 +4032,8 @@ int dispatch(int argc, wchar_t** wargv) {
         {"uninstall", {"--dry-run"}},
         {"repair", {"--mode", "--dry-run"}},
         {"roundtrip", {"--mode", "--replace-equalizerapo", "--simulate-equalizerapo"}},
+        {"machine-install", {"--dll", "--dry-run"}},
+        {"machine-uninstall", {"--remove-data", "--dry-run"}},
         {"enable-enhancements", {"--dry-run"}},
         {"restart-audio", {"--dry-run"}},
         {"layouts", {}},
@@ -3738,6 +4049,7 @@ int dispatch(int argc, wchar_t** wargv) {
     }
     // repair: one endpoint, or none for every render endpoint.
     const bool takes_endpoint = command != "list" && command != "restart-audio" && command != "serve" &&
+                                command != "machine-install" && command != "machine-uninstall" &&
                                 (command != "repair" || args.size() == 2);
     if (args.size() != (takes_endpoint ? 2u : 1u))
         return usage(command, command == "repair"      ? "repair takes one endpoint or none"
@@ -3813,7 +4125,7 @@ int dispatch(int argc, wchar_t** wargv) {
     // process, one run at a time.
     MachineLock lock;
     if ((command == "install" || command == "uninstall" || command == "repair" || command == "enable-enhancements" ||
-         command == "restart-audio") &&
+         command == "restart-audio" || command == "machine-install" || command == "machine-uninstall") &&
         !dry_run) {
         if (!is_elevated())
             return fail_with(kExitNotElevated, "not_elevated", command, "needs an elevated process; use --dry-run to preview");
@@ -3823,6 +4135,11 @@ int dispatch(int argc, wchar_t** wargv) {
         if (!error.empty()) return fail(command, error);
     }
 
+    if (command == "machine-install") {
+        if (!dll_text) return usage(command, "machine-install needs --dll");
+        return cmd_machine_install(wide(*dll_text), dry_run);
+    }
+    if (command == "machine-uninstall") return cmd_machine_uninstall(remove_data, dry_run);
     if (command == "list") return cmd_list();
     if (command == "repair") return cmd_repair(takes_endpoint ? std::optional<Endpoint>(endpoint) : std::nullopt, mode, dry_run);
     if (command == "status") return cmd_status(endpoint);

@@ -182,7 +182,7 @@ std::wstring tool() {
 // The rule these tests keep on an elevated runner.
 void require_dry_run_where_it_matters(const std::vector<std::wstring>& args) {
     static const wchar_t* const changing[] = {L"install", L"uninstall", L"repair", L"enable-enhancements", L"restart-audio",
-                                                L"set-layout"};
+                                                L"set-layout", L"machine-install", L"machine-uninstall"};
     const bool changes = std::any_of(args.begin(), args.end(), [](const std::wstring& a) {
         return std::any_of(std::begin(changing), std::end(changing), [&](const wchar_t* c) { return a == c; });
     });
@@ -735,5 +735,142 @@ TEST_CASE("layouts and set-layout refuse bad arguments") {
         const Json j = parsed(d.out);
         CHECK_FALSE(j["ok"].b);
         CHECK(j["command"].s == narrow(c.args[0]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The machine-wide half of an install (stage 6). Every case here is a dry run:
+// these commands write HKLM and the ProgramData ACL, and run_direct's
+// require_dry_run_where_it_matters refuses them without --dry-run.
+
+TEST_CASE("machine-install --dry-run refuses a DLL audiodg could not load") {
+    struct Case {
+        std::wstring dll;
+        const char* failing;   // the check that must be false, or nullptr for a path refused outright
+        DWORD exit;
+    };
+    const std::vector<Case> cases = {
+        {L"IsoAPO.dll", nullptr, 1},                                  // relative
+        {L"\\\\server\\share\\IsoAPO.dll", nullptr, 1},               // UNC: audiodg would not reach it
+        {L"C:\\does\\not\\exist\\IsoAPO.dll", "the DLL exists", 1},
+    };
+    for (const Case& c : cases) {
+        INFO(narrow(c.dll));
+        const Direct d = run_direct({L"machine-install", L"--dll", c.dll, L"--dry-run"});
+        CHECK(d.exit == c.exit);
+        const Json j = parsed(d.out);
+        CHECK_FALSE(j["ok"].b);
+        CHECK(j["command"].s == "machine-install");
+        CHECK(j["dry_run"].b);
+        if (c.failing != nullptr) {
+            bool found = false;
+            for (const Json& check : j["checks"].items) {
+                if (check["check"].s == c.failing) {
+                    found = true;
+                    CHECK_FALSE(check["ok"].b);
+                }
+            }
+            CHECK_MESSAGE(found, "no check named " << c.failing);
+        }
+    }
+}
+
+TEST_CASE("machine-install --dry-run plans the ACL audiodg and every account need") {
+    // A path that cannot be registered, so this runs the same everywhere,
+    // including a CI runner with no IsoAPO on it: the plan is reported whether
+    // or not the DLL passes, because a run that stops at a bad DLL should still
+    // say what the whole install would do.
+    const Direct d = run_direct({L"machine-install", L"--dll", L"C:\\Isotone\\IsoAPO.dll", L"--dry-run"});
+    const Json j = parsed(d.out);
+    CHECK(j["dry_run"].b);
+    CHECK(j["data_dir"].s.find("IsoAPO") != std::string::npos);
+
+    const std::string acl = j["acl"].s;
+    INFO(acl);
+    // Protected, so ProgramData's read-and-create-only inheritance does not
+    // apply as well, and inherited by what is created inside it.
+    CHECK(acl.rfind("D:P", 0) == 0);
+    CHECK(acl.find("(A;OICI;FA;;;SY)") != std::string::npos);
+    CHECK(acl.find("(A;OICI;FA;;;BA)") != std::string::npos);
+    // LOCAL SERVICE, which audiodg runs as, reads and executes.
+    CHECK(acl.find("(A;OICI;0x1200a9;;;LS)") != std::string::npos);
+    // Authenticated Users modify, which is DELETE as well as write: the app
+    // replaces the state file with MoveFileEx, and without DELETE on the file
+    // already there one account cannot replace another's (docs/ui-spec.md).
+    CHECK(acl.find("(A;OICI;0x1301bf;;;AU)") != std::string::npos);
+    // The Windows Audio service by its own SID, resolved from the name rather
+    // than written out: a wrong literal is an ACE that silently grants nothing.
+    CHECK(acl.find(";;;S-1-5-80-") != std::string::npos);
+}
+
+TEST_CASE("machine-install --dry-run says what it would do and does none of it") {
+    const Direct registered = run_direct({L"status", L"{798436d2-8c71-4834-9248-00ccbaaca00a}"});
+    const Json status = parsed(registered.out);
+    const std::string dll = status["isoapo"]["registration"]["dll"].s;
+    if (dll.empty()) return;   // nothing registered here, so nothing that passes the DLL checks
+
+    const Direct d = run_direct({L"machine-install", L"--dll", widen(dll), L"--dry-run"});
+    const Json j = parsed(d.out);
+    if (!j["ok"].b) return;    // a registered DLL that is gone or unreadable: the case above covers that
+    CHECK(has(j["would"], "call DllRegisterServer in the DLL"));
+    CHECK(has(j["would"], "create the data directory and set its ACL"));
+    // The value is only set when it is not already 1, and this machine's state
+    // decides which; either way the step matches what was read.
+    CHECK(has(j["would"], "set DisableProtectedAudioDG=1") != j["protected_audiodg_already_disabled"].b);
+}
+
+TEST_CASE("machine-uninstall --dry-run leaves DisableProtectedAudioDG that is not ours") {
+    const Direct d = run_direct({L"machine-uninstall", L"--dry-run"});
+    CHECK(d.exit == 0);
+    const Json j = parsed(d.out);
+    CHECK(j["ok"].b);
+    CHECK(j["dry_run"].b);
+    CHECK_FALSE(j["remove_data"].b);   // the saved state stays unless it is asked for
+
+    // Equalizer APO sets the same value and stops working without it, so the
+    // value is only ever removed when this install is what set it and nothing
+    // else needs it.
+    const bool ours = j["protected_audiodg_set_by_isotone"].b;
+    const bool eapo = j["equalizerapo_installed"].b;
+    CHECK(j["restore_protected_audio"].b == (ours && !eapo));
+
+    bool says_why = false;
+    for (const Json& step : j["would"].items) {
+        if (step.s.rfind("remove DisableProtectedAudioDG", 0) == 0 ||
+            step.s.rfind("leave DisableProtectedAudioDG", 0) == 0) {
+            says_why = true;
+        }
+    }
+    CHECK(says_why);
+}
+
+TEST_CASE("machine-uninstall --dry-run says what --remove-data would take") {
+    const Direct kept = run_direct({L"machine-uninstall", L"--dry-run"});
+    const Direct removed = run_direct({L"machine-uninstall", L"--remove-data", L"--dry-run"});
+    const Json a = parsed(kept.out), b = parsed(removed.out);
+    CHECK_FALSE(a["remove_data"].b);
+    CHECK(b["remove_data"].b);
+    CHECK(has(a["would"], "leave the data directory and the saved state in it"));
+    CHECK(has(b["would"], "delete the data directory and every saved state in it"));
+}
+
+TEST_CASE("machine-install and machine-uninstall refuse bad arguments") {
+    const std::wstring cable = L"{798436d2-8c71-4834-9248-00ccbaaca00a}";
+    // Never reached: every case here is refused for its arguments first.
+    const wchar_t* const kAnyDll = L"C:\\Isotone\\IsoAPO.dll";
+    const std::vector<std::vector<std::wstring>> cases = {
+        {L"machine-install", L"--dry-run"},                                    // no --dll
+        {L"machine-install", L"--dll", kAnyDll, cable, L"--dry-run"},          // takes no endpoint
+        {L"machine-install", L"--dll", kAnyDll, L"--remove-data", L"--dry-run"},
+        {L"machine-uninstall", L"--dll", kAnyDll, L"--dry-run"},
+        {L"machine-uninstall", cable, L"--dry-run"},
+        {L"machine-uninstall", L"--mode", L"mfx", L"--dry-run"},
+    };
+    for (const std::vector<std::wstring>& args : cases) {
+        std::string joined;
+        for (const std::wstring& a : args) joined += narrow(a) + " ";
+        INFO(joined);
+        const Direct d = run_direct(args);
+        CHECK(d.exit == 2);
     }
 }
