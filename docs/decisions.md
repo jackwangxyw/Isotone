@@ -3690,9 +3690,289 @@ that failed to match, not the test: applied by line number instead, it fails two
 assertions. A mutation that does not change the binary proves nothing, so a
 mutation check has to show the mutation actually landed.
 
+## 2026-09-19: The Qt layer on Linux
+
+The whole UI builds and runs on Linux now, against the distribution's Qt 6.4.2
+(Ubuntu 24.04, Linux Mint 22), and Windows builds from the same sources against
+6.11. Commits 3c8e71c to 7daf8ab.
+
+**How it is split.** The QML is shared, with `Qt.platform.os` branching where a
+screen is Windows' alone. The C++ is shared where it was portable, and the rest
+is either `#if defined(_WIN32)` inside the file (where most of it is shared:
+`outputs.cpp`, `about.cpp`, `startup.cpp`, `speakers.cpp`, `main.cpp`) or a
+second translation unit where the two sides share nothing below the header
+(`devicesmodel_posix.cpp`, `devicetool_posix.{h,cpp}`,
+`globalhotkeys_posix.cpp`, `test_tone_posix.cpp`), as `devicelink_posix.cpp`
+already did.
+
+What each piece is on Linux:
+
+| Windows | Linux |
+|---|---|
+| render endpoints with IsoAPO or Equalizer APO | every PipeWire sink but Isotone's own (`pipewire_outputs`) |
+| the engine probe for the status dot | the daemon's heartbeat in the fed sink's region, compared between 3 s probes |
+| Devices: devicetool, install, repair | Devices: each sink fed, standby or daemon stopped; Start runs `systemctl --user start isotone-daemon` |
+| tones by WASAPI on the endpoint | a PipeWire stream into Isotone's sink, only while the daemon feeds the output asked for |
+| RegisterHotKey | X11 key grabs on an X session, the GlobalShortcuts portal on Wayland |
+| the Run key | an XDG autostart entry |
+| `%APPDATA%\Isotone` | `$XDG_CONFIG_HOME/isotone/ui` |
+| About: IsoAPO, Equalizer APO, protected audio | About: the daemon and the PipeWire library |
+| Settings, Outputs; first run | none: nothing is chosen per output and nothing is installed |
+
+**What Qt 6.4 lacks, and how each is bridged where it is used:**
+
+- `QQmlEngine::singletonInstance(uri, name)` is 6.5. 6.4 looks C++ singletons up
+  by type id; a singleton defined in QML (UiState) has none there, so it is read
+  through Main.qml's own imports (`qmlsingleton.h`).
+- `qrc:/qt/qml` became a default import path in 6.5. Without it 6.4 never reads
+  the module's qmldir, the singletons are plain types, and every `Theme.x` is
+  undefined: the whole UI renders without colours. `main.cpp` and the QML test
+  runner add it.
+- The resource prefix: 6.4 puts the module at `/`, so `RESOURCE_PREFIX /qt/qml`
+  is written out.
+- `Qt.styleHints.colorScheme` is 6.5: System reads the palette's window colour
+  instead. `Shape.CurveRenderer` is 6.6: the geometry renderer with 4x
+  multisampling. `PathRectangle` is 6.8: the drop outline is a PathSvg.
+  `QFont::setFeature` (tabular figures) is 6.7: 6.4 draws proportional figures.
+- A QML list property is not iterable with `for...of` before 6.5 (tests only).
+- A subclass of a QML singleton is a singleton in 6.4 too: PreviewSession, the
+  Appearance page's preview, could not be created, so Settings, Appearance did
+  not load at all. It shadows the marker.
+
+One false lead worth recording: a startup hang looked like 6.4's ahead-of-time
+compiled bindings looping on a type lookup, and bytecode-only compilation was
+put in. It was the missing import path. With the path added, the compiled
+bindings run, and the workaround came out again.
+
+**The build machine.** The Mint VM builds the tree in about 16 s, but it is not
+a reliable place to measure audio (see "The Mint VM, and why it is slow"
+below). Levels are measured in the WSL box under its PipeWire, as before; the VM
+is for the desktop.
+
+
+## 2026-09-19: The Linux app measured through the daemon
+
+`ui/tests/measure_linux.py` runs the app itself, offscreen, on the rig's sink
+and measures what the daemon plays, so the Qt layer's own path is in the chain.
+It runs in CI after the daemon's measurement:
+
+```
+      case    freq       flat   with band   measured   analytic     error
+       app    1000     -6.021     -18.021    -12.000    -12.000    +0.000
+       app     100     -6.021      -6.102     -0.081     -0.082    +0.001
+     saved    1000     -6.021     -18.021    -12.000    -12.000    +0.000
+      tone    1000    -30.001     -42.012    -12.011    -12.000    -0.011
+```
+
+`app` is Add band into the live region; `saved` is the file the app writes,
+read by a daemon started afterwards; `tone` is EQ by ear's own stream at its
+-30 dBFS, through the same band. Two check flags were added for it,
+`--save-output` and `--ear-tone <hz>`.
+
+Getting the tone case to pass found two bugs:
+
+- `PipewireOutputs::wait_ready()` returned before the default sink was known.
+  The metadata that holds it is bound during the registry sweep and its
+  properties arrive after the sweep is answered, so the app saw the default
+  "change" moments after starting, and Switch preset when the default output
+  changes moved the session off the output it had been opened on. A second sync
+  once the metadata is bound; the new test failed 5 of 5 before it.
+- The tone's hand-iterated PipeWire loop never connected from inside the app,
+  though the same code did from a bare test program. `pw_main_loop_run` with a
+  timer that quits on stop does.
+
+
+## 2026-09-19: Applications captured by the daemon
+
+**A decision of mine, for the owner to confirm.** Until now the EQ applied only
+to what played into Isotone's sink, so a user had to make that sink the default,
+and then changing output meant going round the desktop's settings twice. The
+daemon now does what EasyEffects does: it gives every application's playback
+stream a `target.object` of Isotone's sink in the default metadata as the
+stream appears, which is exactly what moving it in pavucontrol writes. The
+default sink stays the hardware the desktop shows, the daemon follows it as it
+already did, and so choosing another output in the desktop's sound settings
+moves the EQ with it. That is how an output is chosen on Windows too.
+
+The rules: a stream that names its own target is left alone (pw-play
+`--target`, Isotone's tones, the measurement rig); one the user moves elsewhere
+later is theirs, and the daemon forgets it; the targets it set are cleared on
+exit, with a round trip so the server has them, and the streams go back to the
+hardware. After a WirePlumber restart every current stream is captured again
+(written for, not yet exercised).
+`--leave-streams` turns it all off.
+
+Measured, in `linux/daemon/measure.py`:
+
+```
+   capture    1000     -6.021     -18.021    -12.000    -12.000    -0.000
+     leave    1000     -6.021      -6.021      0.000      0.000    +0.000
+   release  stream into isotone: yes, back to isotone_hw after exit: yes
+```
+
+`capture` is an application playing with no target to the default sink, which
+is the hardware; `leave` is the same with `--leave-streams`, which is what shows
+the capture and nothing else put the EQ in the path. In the Cinnamon VM an
+application's audio followed `pactl set-default-sink` from one sink to another
+and the app's sidebar and spectrum followed it.
+
+The one visible difference from Windows: a stream is moved a moment after it
+appears, so its first few milliseconds can reach the hardware unequalized.
+EasyEffects has the same.
+
+
+## 2026-09-19: The UI's suites on Linux, and what they found
+
+`ui_tests`, `ui_model_tests` and `ui_qml_tests` build and run on Linux, in ctest
+and in CI's linux-host job. `ui/tests/test_rig.h` gives the model tests an
+engine region and saved state of their own on either platform, where they had
+Windows' Local\ namespace written into them. Linux: `ui_tests` 40 cases,
+`ui_model_tests` 91 cases and 1433 assertions, `ui_qml_tests` 232 passed with
+49 skipped (Devices, its pill, first run and Settings, Outputs, which test
+devicetool and Equalizer APO). Two more ctest entries run the global hotkeys
+against real servers: `ui_model_tests_x11` under Xvfb, and
+`ui_model_tests_portal` against `ui/tests/mock_portal.py` on a private session
+bus.
+
+What running them there found, all fixed, each with a test that failed first:
+
+- **The GlobalShortcuts portal's presses never reached the app.** QtDBus
+  refused the typed slot for the Activated signal (connect returned false) and
+  said nothing, so on a Wayland desktop a bound shortcut would have done
+  nothing. The slot takes the whole message. With the typed slot put back, the
+  portal test fails at the press.
+- **A region never written read back crossover 0 Hz and LFE low-pass 0 Hz**, on
+  both platforms: `init_param_block` left them zero, where a default state has
+  80 and 120. A fresh output's Speakers view showed 0 Hz, and turning bass
+  management on from there would have used it. They are the defaults now. This
+  is in core, so IsoAPO gets it with its next build; audio is unchanged, since a
+  never-written region only ever plays with bass management off.
+- **The launch-at-sign-in entry wrote Exec unquoted**, so a path with a space or
+  another reserved character (an AppImage in "My Apps") would never start. It
+  follows the desktop entry specification's quoting now.
+- **Presets sorted "Preset 10" before "Preset 9" under the C locale**, where Qt
+  drops QCollator's numeric mode. C.UTF-8 is what a bare session, a container or
+  a CI runner has. English collation is used there.
+- **Releasing X11 grabs was a flush, not a round trip**, so another client could
+  be refused the keys a moment after Isotone let them go.
+- An unsequenced `id++` in a preset test's arguments, which MSVC and GCC order
+  differently; and a dead helper MSVC never warned about.
+
+Two limits, not fixed:
+
+- F13 and up have no keycode in a standard X keymap, so a global shortcut on
+  them cannot be grabbed on X11; the Shortcuts page shows it In use.
+- A Wayland desktop without the GlobalShortcuts portal (Cinnamon on Wayland,
+  older GNOME) marks every Global shortcut In use too, which is true in effect
+  but not in wording.
+
+
+## 2026-09-19: The desktop checks, on Cinnamon under X11
+
+In the Mint VM, on the owner's desktop, by hand and with screenshots:
+
+- The tray icon appears (Cinnamon's StatusNotifierWatcher), with its tooltip
+  ("Isotone", then output and preset) and its menu: EQ and Mute with their keys,
+  the Output and Preset submenus, Open Isotone, Quit.
+- A global Ctrl+E pressed through the X server with another window focused
+  turned EQ off, and the daemon's region read bypassed; pressed again, back.
+- Closing the window leaves the app in the tray; a second launch exits 0 and
+  raises and activates the running window, one process throughout.
+- Always on top sets `_NET_WM_STATE_ABOVE` and the window stays over another
+  that is activated; switched off in Settings it clears at once, the window
+  still mapped.
+- Launch at sign-in writes the entry and removes it; across a reboot the VM
+  signed in and Isotone started with `--tray`, no window, in the tray.
+- With the daemon stopped the top bar shows Daemon stopped and Start; Start in
+  Devices ran the user unit, and the lists followed as sinks appeared.
+- Import opened the desktop's own GTK file chooser; the file was read, the
+  preset made and loaded, and the region and saved state held its bands.
+
+**Not checked live: GNOME and KDE, and Wayland.** There is no VM for them yet
+(docs/notes/linux-vm-setup.md lists them). The portal is checked against the
+mock, which speaks the protocol as xdg-desktop-portal documents it, but not
+against Plasma's or GNOME's own.
+
+
+## 2026-09-19: Linux speaker layouts
+
+**A decision of mine, for the owner to confirm.** On Windows an output's layout
+is its endpoint's format, and the Speakers view offers the picker only for
+outputs with more than two channels; a stereo endpoint is switched in Windows'
+own sound settings. On Linux the layout is that of Isotone's own sink, one for
+every output, and there are no system settings for it. So it is chosen in
+Settings, General, Speakers, Layout (Linux only), with the same confirmation
+dialog. Showing the Speakers view for stereo was tried first and dropped: the
+view is not built for two channels (an empty speaker table, 0 Hz rows).
+
+A choice writes `$XDG_CONFIG_HOME/isotone/daemon.conf` (`channels=N`,
+`linux/transport/daemon_config.h`, read by both sides), which the daemon reads
+when no `--channels` is given, and restarts the user service. The daemon gains
+2.1 (FL FR LFE). The sink's streams are captured again when it comes back.
+
+Measured: a daemon left to find its count in daemon.conf, at 2.1 into the rig's
+5.1 sink, -12.000 at 1 kHz against -12.000. In the VM: Stereo to 5.1 to 7.1, the
+daemon restarted each time, and the sidebar, Settings and the Speakers view
+followed without restarting the app; 7.1's Speakers view played a speaker's
+test tone into the sink.
+
+Two things this found: the daemon published its layout only with the first
+processed block, so a suspended sink read as 0 channels and the UI took it for
+stereo (it is published when the region opens now); and Outputs' probe did
+nothing while no output was fed, and did not notice the fed one coming back in
+another layout.
+
+What the layout does not do: a 7.1 core feeding a stereo sink plays its front
+pair and drops the rest, with no downmix, as the daemon always has with a sink
+that lacks a position.
+
+
+## 2026-09-19: The Mint VM, and why it is slow
+
+The owner asked whether the VM could be given more. What was measured:
+
+- VirtualBox runs it through Hyper-V's platform API (the log: "AMD-V is not
+  available", NEM), because memory integrity is on. That was expected.
+- The kernel reports soft lockups: "CPU#1 stuck for 331s" once, then every
+  minute or so "stuck for 46s", on idle CPUs as well. The guest's clock stalls
+  and jumps; a timing loop read 783 million clock reads a second, which no
+  Python loop does.
+- The same `core_tests` took 55 s in the VM and 5.3 s in WSL at one moment, and
+  6 s in the VM after a reboot: the slowness comes and goes with the stalls, not
+  with a steady cost per instruction.
+- Four CPUs instead of eight, and 3D acceleration off: the lockups continued
+  (put back to the owner's eight and 3D on afterwards).
+  The Hyper-V paravirtualization interface: the guest detected no hypervisor
+  clock at all and fell back to the PM timer, which read wrong by a factor of
+  eight. Reverted to KVM, the default.
+
+So nothing inside VirtualBox's settings fixes it. What would: memory integrity
+off (declined, 2026-09-18), or a Linux machine that is not a guest of this one.
+For what the VM is used for, the desktop checks, it is good enough; audio
+levels are measured in WSL, where they are exact.
+
+Changed in the VM and put back: the sound card profile (turned off while
+testing so the rig's null sinks were the only sinks), the layout (back to
+stereo), launch at sign-in (off). Left in place: the build tools, Qt, the dev
+packages, the daemon's user unit pointing at `~/build`, `~/desk.sh` (runs a
+command in the logged-in session) and `~/rig.sh` (the two null sinks).
+
+
+## 2026-09-19: Intermittents seen, not diagnosed
+
+- `compat_tests` on the Windows runner failed with ERROR_SHARING_VIOLATION (32)
+  in 3 of the last 4 pushes, in the two concurrent-writer tests. The same flake
+  as "CI on a real runner" (2026-09-18), now much more often. Nothing here
+  touches `windows/compat`. The decision it waits on is still the owner's.
+- The stage 1c spike's 100 Hz case read 6.2 dB low once on a runner (534deb2);
+  the next push passed. The daemon's `stale` case read 1.18 dB low once in seven
+  local runs, the first of a sitting. Both look like dropped audio in the
+  capture window rather than a wrong filter, since the ring read correctly while
+  the sink read low. Not diagnosed.
+
 ---
 
-# Where things stand (2026-09-16)
+# Where things stand (2026-09-19)
 
 ## Done
 
@@ -3701,10 +3981,11 @@ mutation check has to show the mutation actually landed.
 | 0. Repo, CI, decisions log | complete | CI workflow builds MSVC + GCC with warnings as errors, runs tests and the APO self test |
 | 1a. Compat backend spike | complete | measured differential matched the analytic filter to 0.001 dB |
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
-| 1c. Linux spike | deferred | no Linux environment on this machine; owner's decision |
+| 1c. Linux spike | complete | the PipeWire topology measured at -12.000 against -12.000 (2026-09-17), in CI since 2026-09-18 |
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
-| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux daemon deferred with 1c | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
+| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux: the daemon, measured in CI (2026-09-17 and 18); capturing applications' streams and layouts from daemon.conf (2026-09-19) | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
+| 4. UI, Linux | complete on Cinnamon under X11; GNOME, KDE and Wayland not checked live | the whole Qt layer on Qt 6.4.2; `measure_linux.py` in CI (the app's edits, saved state and EQ by ear's tone through the daemon, to 0.011 dB); `ui_tests` 40, `ui_model_tests` 91, `ui_qml_tests` 232 (+49 Windows-only skipped), X11 and portal hotkey tests; the desktop checks by hand; the entries of 2026-09-19 |
 | 5. EQ by ear | complete: the sweep, approved by the owner in use; A/B set aside for later (owner) | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
@@ -3753,11 +4034,15 @@ points IntelliSense at `build/compile_commands.json`.
 **Stage 3** remaining:
 
 1. **Linux daemon**: done and measured, through "The Linux daemon finished to the
-   edge of stage 4" (2026-09-17). Stage 1c, the daemon, the transport, the audio
-   ring, following the default sink, a rate change and channels to 7.1 are all
-   done and measured; CI has a linux-host job that runs both measurements under a
-   PipeWire of its own. What is left on the Linux side is item 4 (the UI's Windows
-   layer) and item 5 (packaging). The Mint VM is wanted when the UI port starts.
+   edge of stage 4" (2026-09-17), and since then capturing applications' streams
+   and reading its layout from daemon.conf (2026-09-19).
+
+**Stage 4 on Linux is done** as far as one desktop can show it: the Qt layer, the
+tests and the measurements are in CI, and every desktop check passed on Cinnamon
+under X11 (2026-09-19). Left for Linux: GNOME and KDE, and Wayland, which need
+their VMs (docs/notes/linux-vm-setup.md); packaging (a .deb first, then Flatpak).
+Two decisions made on the way wait for the owner: applications captured by the
+daemon, and the layout picker in Settings, General on Linux.
 
 **Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
 real install, repair and uninstall from Devices with the Windows prompt;

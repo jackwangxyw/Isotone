@@ -5,8 +5,9 @@ processing object forked from Equalizer APO) or drives a stock Equalizer APO
 through its config files (the compat backend). Stages 0 to 4 are done: the Qt 6
 Quick UI is in `ui/`, every screen of the prototype except EQ by ear, and the
 owner has used it on his own outputs. EQ by ear (stage 5) is done: the sweep; A/B
-is set aside for later. Left: packaging (stage 6), and the Linux side (stage 1c
-and the daemon), deferred until the owner picks it up.
+is set aside for later. On Linux the daemon (`linux/`) hosts the same core and the
+same UI runs against it, checked on Cinnamon under X11 (decisions.md, the entries
+of 2026-09-19). Left: packaging (stage 6), and GNOME, KDE and Wayland checked live.
 
 Read first:
 - `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
@@ -72,19 +73,22 @@ windows/devices/      isotone_devices: render endpoints, their format and engine
                       speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
-linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG
+linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG, daemon.conf (the layout)
 linux/daemon/         isotone-daemon: the virtual sink, the core in a PipeWire filter node,
                       links to the sink being fed, the post-EQ ring, following the default sink
-                      through WirePlumber metadata, layouts to 7.1, systemd user unit;
+                      through WirePlumber metadata, capturing applications' streams, layouts to 7.1,
+                      systemd user unit;
                       isotone-state (show/set/save/capture)
 linux/spike/          stage 1c: the topology spike and the null sinks the rig declares
 linux/measure_lib.py  the shared measurement rig; linux/ci-audio.sh runs it under its own PipeWire
 ui/backend/           the UI without Qt: DeviceLink (where edits go), spectrum, typed values, speaker setup,
-                      test tone, config.txt attach, diagnostics
+                      test tone, config.txt attach, diagnostics; *_posix and pipewire_outputs, autostart_xdg,
+                      daemon_region for Linux
 ui/src/               EqSession (the edited state, undo), Outputs, Presets, Devices and Devicetool, Speakers,
                       ResponseGraph, settings, shortcuts, tray
 ui/qml/               the screens; Main.qml is the window, Theme.qml the tokens
-ui/tests/             ui_tests, ui_model_tests (doctest), qml/ (Qt Quick Test)
+ui/tests/             ui_tests, ui_model_tests (doctest), qml/ (Qt Quick Test); test_rig.h (an engine region of the
+                      test's own, either platform); measure_linux.py; mock_portal.py (GlobalShortcuts)
 tools/                gen_reference.py, check_shm_transport.py
 docs/design/          approved screens, the prototype's source, their generator; gitignored, this machine only
 docs/notes/           the stage 4 work packages' records (force-added: docs/* is gitignored)
@@ -107,12 +111,13 @@ filesystem, because compiling across `/mnt/c` is slow:
 
 ```bash
 cd /mnt/c/Users/jackw/OneDrive/Documents/GitHub/Isotone
-cmake -S . -B ~/build-linux -G Ninja -DISOTONE_WARNINGS_AS_ERRORS=ON
+cmake -S . -B ~/build-linux -G Ninja -DISOTONE_WARNINGS_AS_ERRORS=ON -DISOTONE_BUILD_UI=ON
 cmake --build ~/build-linux
-ctest --test-dir ~/build-linux                            # core and the POSIX transport
+ctest --test-dir ~/build-linux                            # core, transport, the UI's suites (X11 under Xvfb, the portal on a private bus)
 python3 linux/spike/measure.py                            # stage 1c, in the session's PipeWire
 python3 linux/daemon/measure.py                           # stage 3, the daemon
-ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # both, under a PipeWire of its own
+python3 ui/tests/measure_linux.py                         # the app through the daemon
+ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # all three, under a PipeWire of its own
 ```
 
 - `linux/spike` and `linux/daemon` are added only when pkg-config finds
@@ -122,6 +127,23 @@ ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # both, under a PipeWi
   it reports sinks that never become PipeWire nodes.
 - Do not use the repository's `build/` from Linux. That is the Windows build
   directory, and CI's Linux job is the only thing that builds into it.
+- The UI uses the distribution's Qt, 6.4.2. What 6.4 lacks is bridged where it is
+  used; decisions.md, "The Qt layer on Linux", lists each. Test with it, not only
+  with Windows' 6.11.
+- The app runs offscreen in WSL (`QT_QPA_PLATFORM=offscreen`); anything that needs
+  a desktop (the tray, global hotkeys, windows) is checked in the Mint VM below.
+
+## The Mint VM (the desktop)
+
+`ssh isotone-vm` (docs/notes/linux-vm-setup.md, local). Linux Mint 22.3 Cinnamon
+under X11, the owner's desktop. The tree is copied there with tar over ssh (git
+ls-files) into `~/Isotone`, built into `~/build`. `~/desk.sh <cmd>` runs a command
+in the logged-in session (DISPLAY, the session bus); `~/rig.sh` declares two null
+sinks and restarts the daemon, whose user unit points at `~/build`. Screenshots:
+`VBoxManage controlvm "Linux Mint Development" screenshotpng <file>` from Windows,
+or the app's `--screenshot`. It stalls now and then (decisions.md, "The Mint VM,
+and why it is slow"): measure audio levels in WSL, not here. Guest audio output to
+the host is off in VirtualBox.
 
 ## Rules
 
