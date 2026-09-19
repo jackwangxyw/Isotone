@@ -92,7 +92,8 @@ Item {
             objectName: "engineStatusAction"
             anchors.verticalCenter: parent.verticalCenter
             kind: "primary"
-            text: engineStatus.device.status === "not_installed" ? "Install" : engineStatus.device.status === "not_attached" ? "Attach" : "Repair"
+            text: engineStatus.device.status === "not_installed" ? "Install" : engineStatus.device.status === "not_attached" ? "Attach"
+                : engineStatus.device.status === "stopped" ? "Start" : "Repair"
             onClicked: {
                 UiState.devicesSelection = engineStatus.guid
                 UiState.view = "devices"

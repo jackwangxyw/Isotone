@@ -68,6 +68,9 @@ struct PipewireOutputsImpl {
     std::condition_variable ready_wake;
     bool                    ready = false;
     int                     sync_seq = 0;
+    // The default metadata is bound during the sweep and its properties come
+    // after the sweep's answer, so a second sync is what says the default is in.
+    bool                    metadata_synced = false;
     spa_hook                core_hook{};
 
     void changed() {
@@ -155,6 +158,11 @@ const pw_registry_events kRegistryEvents = {
 void on_core_done(void* data, uint32_t id, int seq) {
     auto* d = static_cast<PipewireOutputsImpl*>(data);
     if (id != PW_ID_CORE || seq != d->sync_seq) return;
+    if (d->metadata != nullptr && !d->metadata_synced) {
+        d->metadata_synced = true;
+        d->sync_seq = pw_core_sync(d->core, PW_ID_CORE, 0);
+        return;
+    }
     {
         const std::lock_guard<std::mutex> lock(d->ready_mutex);
         d->ready = true;
@@ -195,6 +203,7 @@ bool PipewireOutputs::start() {
         const std::lock_guard<std::mutex> lock(impl_->ready_mutex);
         impl_->ready = false;
     }
+    impl_->metadata_synced = false;
 
     pw_init(nullptr, nullptr);
     impl_->loop = pw_thread_loop_new("isotone-outputs", nullptr);

@@ -6,8 +6,11 @@ import Isotone
 Item {
     id: root
 
-    readonly property var tabs: [["general", "General"], ["outputs", "Outputs"], ["appearance", "Appearance"],
-                                 ["shortcuts", "Shortcuts"], ["about", "About"]]
+    // Outputs chooses IsoAPO or Equalizer APO per output: Windows only.
+    readonly property var tabs: Qt.platform.os === "linux"
+                                ? [["general", "General"], ["appearance", "Appearance"], ["shortcuts", "Shortcuts"], ["about", "About"]]
+                                : [["general", "General"], ["outputs", "Outputs"], ["appearance", "Appearance"],
+                                   ["shortcuts", "Shortcuts"], ["about", "About"]]
 
     Text {
         id: title

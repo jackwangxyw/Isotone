@@ -61,7 +61,32 @@ Item {
         }
 
         SettingsSection { text: "Engine" }
+        // Linux: the daemon and PipeWire in place of the two APOs and protected audio.
+        readonly property bool linux: Qt.platform.os === "linux"
         SettingsRow {
+            visible: root.linux
+            label: "Daemon"
+            Text {
+                objectName: "daemon"
+                text: About.daemon
+                font.family: Theme.font
+                font.pixelSize: 13
+                color: Theme.muted
+            }
+        }
+        SettingsRow {
+            visible: root.linux
+            label: "PipeWire"
+            Text {
+                objectName: "pipewire"
+                text: About.pipewire
+                font.family: Theme.font
+                font.pixelSize: 13
+                color: Theme.muted
+            }
+        }
+        SettingsRow {
+            visible: !root.linux
             label: "IsoAPO"
             Text {
                 objectName: "isoapo"
@@ -72,6 +97,7 @@ Item {
             }
         }
         SettingsRow {
+            visible: !root.linux
             label: "Equalizer APO"
             Text {
                 objectName: "equalizerApo"
@@ -82,6 +108,7 @@ Item {
             }
         }
         SettingsRow {
+            visible: !root.linux
             label: "Protected audio"
             Row {
                 spacing: 8

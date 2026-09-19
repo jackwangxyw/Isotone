@@ -32,8 +32,9 @@ Window {
         UiState.overlay = overlay
         EqSession.useOutput(Outputs)
         // Devices work package: first run, until it is done, while no output works.
+        // Linux has nothing to install: the package enables the daemon.
         const done = AppSettings.value("general/firstRunDone", false)
-        if (!(done === true || done === "true") && Outputs.count === 0) showFirstRun()
+        if (Qt.platform.os !== "linux" && !(done === true || done === "true") && Outputs.count === 0) showFirstRun()
     }
 
     // Devices work package. Engine changes raise no device notification: read

@@ -64,6 +64,30 @@ TEST_CASE("the default sink is one of the sinks, when something has said") {
     CHECK(has(outputs.sinks(), def));
 }
 
+TEST_CASE("the default is known once the outputs are ready, not a moment later") {
+    // The metadata that holds it is bound during the registry sweep, and its
+    // properties arrive after that sweep has been answered. A default that shows
+    // up only after wait_ready() reads to the app as the default output changing
+    // at startup, and "Switch preset when the default output changes" then moves
+    // the session off the output it was opened on.
+    for (int run = 0; run < 5; ++run) {
+        PipewireOutputs outputs;
+        if (!outputs.start()) {
+            MESSAGE("no PipeWire to talk to; skipped");
+            return;
+        }
+        REQUIRE(outputs.wait_ready());
+        const std::string at_ready = outputs.default_sink();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const std::string later = outputs.default_sink();
+        if (later.empty()) {
+            MESSAGE("no default has been set; skipped");
+            return;
+        }
+        CHECK(at_ready == later);
+    }
+}
+
 TEST_CASE("stopping releases everything, and starting again works") {
     PipewireOutputs outputs;
     if (!outputs.start()) {

@@ -112,7 +112,7 @@ public:
         std::string guid;       // node.name
         QString name;           // node.description
         bool is_default = false;
-        QString status;         // active (the daemon feeds it), standby, stopped (no daemon)
+        QString status;         // fed (the daemon feeds it), standby, stopped (no daemon)
         QString format;         // the fed sink's, from the region header
     };
 #endif

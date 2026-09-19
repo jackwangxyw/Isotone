@@ -224,10 +224,24 @@ void TestTone::run(std::string output, uint32_t channel_mask, Source source, Fai
         return fail(-connected, "pw_stream_connect");
     }
 
-    pw_loop* l = pw_main_loop_get_loop(loop);
-    pw_loop_enter(l);
-    while (!stop_ && !s.failed) pw_loop_iterate(l, 10);
-    pw_loop_leave(l);
+    // The loop runs until stop() or a failed stream; a timer looks every 10 ms,
+    // since stop() is called from another thread.
+    struct Watch {
+        pw_main_loop* loop;
+        const std::atomic<bool>* stop;
+        const Stream* stream;
+    } watch{loop, &stop_, &s};
+    spa_source* timer = pw_loop_add_timer(
+        pw_main_loop_get_loop(loop),
+        [](void* data, uint64_t) {
+            auto* w = static_cast<Watch*>(data);
+            if (*w->stop || w->stream->failed) pw_main_loop_quit(w->loop);
+        },
+        &watch);
+    timespec interval{0, 10 * 1000 * 1000};
+    pw_loop_update_timer(pw_main_loop_get_loop(loop), timer, &interval, &interval, false);
+    pw_main_loop_run(loop);
+    pw_loop_destroy_source(pw_main_loop_get_loop(loop), timer);
 
     pw_stream_destroy(s.stream);
     pw_main_loop_destroy(loop);

@@ -71,3 +71,6 @@ python3 "$root/linux/spike/measure.py"
 echo
 echo "=== stage 3: the daemon ==="
 python3 "$root/linux/daemon/measure.py"
+echo
+echo "=== stage 4: the app ==="
+python3 "$root/ui/tests/measure_linux.py"

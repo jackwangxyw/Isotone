@@ -3,7 +3,7 @@
 //
 // The Devices view on Linux. One daemon hosts the core for one sink at a time,
 // so the rows say which sink it feeds rather than what is installed where:
-//   active   the daemon feeds it (its region exists)             ok
+//   fed      the daemon feeds it (its region exists)             ok
 //   standby  the daemon runs and feeds another sink              off
 //   stopped  no daemon: Isotone's own sink is not there          bad   Start
 // The only action is Start, which asks systemd to start the user unit
@@ -24,13 +24,13 @@ namespace {
 constexpr int kPollIntervalMs = 3000;
 
 QString status_label(const QString& status) {
-    if (status == QLatin1String("active")) return QStringLiteral("Active");
+    if (status == QLatin1String("fed")) return QStringLiteral("Active");
     if (status == QLatin1String("standby")) return QStringLiteral("Standby");
     return QStringLiteral("Daemon stopped");
 }
 
 QString status_dot(const QString& status) {
-    if (status == QLatin1String("active")) return QStringLiteral("ok");
+    if (status == QLatin1String("fed")) return QStringLiteral("ok");
     if (status == QLatin1String("standby")) return QStringLiteral("off");
     return QStringLiteral("bad");
 }
@@ -88,7 +88,7 @@ void DevicesModel::refresh() {
         e.guid = sink.name;
         e.name = QString::fromStdString(sink.description);
         e.is_default = sink.name == default_sink;
-        e.status = !running ? QStringLiteral("stopped") : sink.name == fed ? QStringLiteral("active") : QStringLiteral("standby");
+        e.status = !running ? QStringLiteral("stopped") : sink.name == fed ? QStringLiteral("fed") : QStringLiteral("standby");
         if (sink.name == fed && region.sample_rate > 0) e.format = format_label(region);
         entries.push_back(std::move(e));
     }
@@ -99,7 +99,7 @@ void DevicesModel::poll() {
     // Only a change of which sink is fed needs a new read; the rest arrives as notifications.
     std::string fed;
     for (const Entry& e : entries_)
-        if (e.status == QLatin1String("active")) fed = e.guid;
+        if (e.status == QLatin1String("fed")) fed = e.guid;
     isotone::ui::DaemonRegion region;
     const bool still = !fed.empty() && isotone::ui::read_daemon_region(fed, &region) == 0;
     if (!still || fed.empty()) refresh();

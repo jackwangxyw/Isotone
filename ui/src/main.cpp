@@ -6,6 +6,8 @@
 //   --screenshot-after <s>    take that screenshot later, to catch what changes
 //   --output <endpoint>       edit this output instead of the default one
 //   --add-band <hz>,<db>      add a band as the Add band button does (repeatable)
+//   --save-output             then save the output's state, as saving a preset does
+//   --ear-tone <hz>           play EQ by ear's tone there, as its Play button does (past the volume warning)
 //   --quit-after <seconds>    exit on its own
 //   --click <x>,<y>[,right]   click there once the window has drawn (repeatable, in order)
 //   --data-dir <dir>          settings and presets there instead of %APPDATA%\Isotone
@@ -51,6 +53,7 @@
 #else
 #include "devicetool_posix.h"
 #endif
+#include "eqbyear.h"
 #include "eqsession.h"
 #include "outputs.h"
 // Settings
@@ -91,6 +94,10 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption quit_after(QStringLiteral("quit-after"), QStringLiteral("Exit after <seconds>."), QStringLiteral("seconds"));
     parser.addOption(output);
     parser.addOption(add_band);
+    const QCommandLineOption save_output(QStringLiteral("save-output"), QStringLiteral("Save the output's state after the bands."));
+    parser.addOption(save_output);
+    const QCommandLineOption ear_tone(QStringLiteral("ear-tone"), QStringLiteral("Play EQ by ear's tone at <hz>."), QStringLiteral("hz"));
+    parser.addOption(ear_tone);
     parser.addOption(quit_after);
     const QCommandLineOption click(QStringLiteral("click"), QStringLiteral("Click at <x,y[,right]>."), QStringLiteral("x,y"));
     parser.addOption(click);
@@ -204,7 +211,7 @@ int main(int argc, char* argv[]) {
     if (parser.isSet(first_run)) QMetaObject::invokeMethod(engine.rootObjects().constFirst(), "showFirstRun");
     if (parser.isSet(view)) {
         const QStringList parts = parser.value(view).split(QLatin1Char('/'));
-        if (auto* ui = isotoneSingleton<QObject>(&engine, "UiState")) {
+        if (auto* ui = isotoneQmlSingleton(&engine, engine.rootObjects().constFirst(), "UiState")) {
             ui->setProperty("view", parts[0]);
             if (parts.size() > 1) ui->setProperty("settingsTab", parts[1]);
         }
@@ -251,6 +258,22 @@ int main(int argc, char* argv[]) {
         if (parts.size() != 2 || !session) return 1;
         session->addBand(parts[0].toDouble(), parts[1].toDouble());
         std::fprintf(stdout, "added a band at %s Hz, %s dB\n", qPrintable(parts[0]), qPrintable(parts[1]));
+    }
+    if (parser.isSet(ear_tone)) {
+        auto* ear = isotoneSingleton<EqByEar>(&engine, "EqByEar");
+        auto* ui = isotoneQmlSingleton(&engine, engine.rootObjects().constFirst(), "UiState");
+        if (!ear || !ui) return 1;
+        // The tone plays only while its view is open.
+        ui->setProperty("view", QStringLiteral("ear"));
+        ear->setFrequency(parser.value(ear_tone).toDouble());
+        ear->setPlaying(true);
+        std::fprintf(stdout, "playing EQ by ear's tone at %s Hz\n", qPrintable(parser.value(ear_tone)));
+    }
+    if (parser.isSet(save_output)) {
+        auto* session = isotoneSingleton<EqSession>(&engine, "EqSession");
+        if (!session) return 1;
+        session->saveToOutput();
+        std::fprintf(stdout, "saved the output's state\n");
     }
     if (parser.isSet(quit_after)) {
         QTimer::singleShot(static_cast<int>(parser.value(quit_after).toDouble() * 1000), &app, [] { QCoreApplication::exit(0); });

@@ -75,10 +75,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build libpipewire-0.3-dev pipewire pipewire-bin wireplumber dbus-x11 python3-numpy
-          # Qt for the UI's backend half, which builds on Linux and carries its
-          # own tests. find_package asks for every component the Windows UI uses,
-          # so they all have to be here even though only the backend is built.
+          # Qt for the UI, which builds on Linux. find_package asks for every
+          # component the Windows UI uses.
           sudo apt-get install -y -qq qt6-base-dev qt6-declarative-dev qt6-base-dev-tools
+          # The app runs offscreen in the measurement, so the QML modules it
+          # imports have to be there at run time too; the X11 and xcb headers are
+          # the global hotkeys'.
+          sudo apt-get install -y -qq libx11-dev libxcb1-dev qml6-module-qtquick qml6-module-qtquick-window \
+            qml6-module-qtquick-shapes qml6-module-qtquick-dialogs qml6-module-qtcore qml6-module-qttest \
+            qml6-module-qtqml-workerscript qml6-module-qtquick-templates qml6-module-qtquick-controls qml6-module-qtquick-layouts
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DISOTONE_WARNINGS_AS_ERRORS=ON -DISOTONE_BUILD_UI=ON
@@ -96,6 +101,7 @@ jobs:
           test -x build/linux/spike/isotone-pw-spike || { echo "the spike was not built"; exit 1; }
           test -x build/linux/daemon/isotone-state || { echo "isotone-state was not built"; exit 1; }
           test -x build/ui/ui_backend_posix_tests || { echo "the UI backend was not built"; exit 1; }
+          test -x build/ui/isotone || { echo "the app was not built"; exit 1; }
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
