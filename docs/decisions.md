@@ -4224,6 +4224,30 @@ The self test checks it, and the mutation check confirms it catches the old
 state: with `isotone_version_resource` commented out, `FileVersion = '',
 expected '0.1.0'` and two failures.
 
+## A CI failure on a docs-only commit: the ring test's clock
+
+CI went red on `Where things stand before packaging`, which changed nothing but
+`docs/`. `core_tests` failed at `test_audio_ring.cpp:414`, `CHECK(chunks > 100)`,
+in the case where a reader races a writer for 500 ms and every chunk it reads
+must be contiguous. `bad == 0` is vacuous if the reader saw nothing, so the chunk
+count was asserted as well, against a fixed slice of wall clock. That makes it a
+claim about scheduling, and on a starved runner it is false with the code
+correct.
+
+The scale says it was not ordinary slowness: this machine reads 1,517,430 chunks
+in that 500 ms, and 1,010,464 with three busy processes per core, against the
+runner's fewer than 101. Whatever the runner was doing, the answer is the same.
+The loop now runs its 500 ms and then keeps going until it has seen
+`kMinChunks` (101), with a 30-second backstop so a ring that delivers nothing at
+all still fails rather than hangs. A fast machine does the full 500 ms, which is
+where the coverage of the race comes from; a starved one takes longer instead of
+failing.
+
+Checked by forcing the new path rather than waiting for another flake: with
+`kMinChunks` temporarily at 3,000,000, the loop ran 1,188 ms, stopped at exactly
+3,000,000 chunks and passed, where the 500 ms window alone would have stopped at
+about 1.5 million.
+
 # Where things stand (2026-09-19)
 
 ## Done

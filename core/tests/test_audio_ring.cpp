@@ -394,8 +394,22 @@ TEST_CASE("a reader racing a writer never receives an overwritten frame") {
     AudioRingCursor cursor;
     std::vector<float> out(kCapacity * kMaxChannels);
     uint64_t frames = 0, chunks = 0, bad = 0;
-    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < until) {
+    // 500 ms of reading, and then as long as it takes to see kMinChunks.
+    //
+    // The wall clock alone decided this before, and `bad == 0` means nothing
+    // unless the reader actually saw chunks, so the count was asserted
+    // afterwards: a CI runner that gave the reader too few turns in its 500 ms
+    // failed the run of 2026-09-19 on a docs-only commit, with the code
+    // identical to the run that passed before it. A machine fast enough still
+    // does its full 500 ms, which is where the coverage of the race comes from;
+    // a starved one now takes longer instead of failing. The backstop is what
+    // stops a ring that delivers nothing at all from hanging the suite.
+    constexpr uint64_t kMinChunks = 101;
+    const auto start = std::chrono::steady_clock::now();
+    const auto until = start + std::chrono::milliseconds(500);
+    const auto backstop = start + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < backstop &&
+           (std::chrono::steady_clock::now() < until || chunks < kMinChunks)) {
         uint32_t ch = 0;
         const uint32_t n = audio_ring_read(r.header(), r.capacity, &cursor, out.data(), kCapacity, &ch);
         if (n == 0) continue;
@@ -411,7 +425,7 @@ TEST_CASE("a reader racing a writer never receives an overwritten frame") {
 
     CAPTURE(chunks);
     CAPTURE(frames);
-    CHECK(chunks > 100);
+    CHECK(chunks >= kMinChunks);
     CHECK(bad == 0);
 }
 
