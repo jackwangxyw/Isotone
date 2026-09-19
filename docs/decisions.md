@@ -4079,6 +4079,32 @@ flat line along the bottom (owner, 2026-09-19). The curves are clipped to the
 plot now, as the spectrum already was, and clamped a plot's height outside so
 the slope at the edge is still the curve's.
 
+## 2026-09-19: An output with nothing plugged into it is not listed
+
+The owner: his laptop's three HDMI outputs, none of them plugged in, sat in the
+sidebar; Windows leaves an unplugged endpoint out (`e.state != DEVICE_STATE_ACTIVE`,
+outputs.cpp). PipeWire says the same thing, but about the card rather than the
+sink: its EnumRoute params carry an availability each, "[Out] HDMI3" no,
+"[Out] Speaker" unknown, with the card's device index each route is for.
+
+So `PipewireOutputs` binds the Audio/Device cards and reads their routes, and a
+sink is connected unless every route for its `card.profile.device` says no
+(`sink_connected`). A route that cannot tell says unknown, which counts as
+plugged, as does a card whose routes have not arrived yet: an output is never
+hidden for want of an answer. Virtual sinks have no card and are always shown.
+
+Two things this needed. The registry's properties for a node carry `device.id`
+but not `card.profile.device`, so each sink node is bound as well, for the
+properties its info carries (found by printing them, 2026-09-19). And a card's
+routes are published as each param arrives rather than at the end of the
+enumeration: nothing says an enumeration ended, and a route more can only free
+an output, never hide one. A cable in or out makes the server send the device's
+info again, which is when they are read afresh.
+
+Measured on the laptop: before, four outputs, all four named "Alder Lake PCH-P
+High Defi..."; now, Speaker + Headphones alone, with Easy Effects' sink and the
+rig's.
+
 ---
 
 # Where things stand (2026-09-19)

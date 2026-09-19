@@ -152,7 +152,9 @@ void Outputs::refresh() {
 
     std::vector<Output> found;
     for (const isotone::ui::PipewireSink& sink : sinks) {
-        if (sink.is_isotone) continue;
+        // A socket with nothing in it, an unplugged HDMI, is left out, as an
+        // unplugged endpoint is on Windows (owner, 2026-09-19).
+        if (sink.is_isotone || !sink.connected) continue;
         Output o;
         o.guid = sink.name;
         o.name = QString::fromStdString(sink.description);

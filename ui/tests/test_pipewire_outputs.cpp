@@ -34,6 +34,20 @@ TEST_CASE("an output is shown by its short name") {
     CHECK(sink_display_name(nullptr, nullptr, "isotone_test_hw") == "isotone_test_hw");
 }
 
+TEST_CASE("an output whose every route is unavailable is not connected") {
+    // One laptop's card, unplugged HDMI (pw-dump, 2026-09-19): routes "[Out] HDMI3",
+    // "HDMI2" and "HDMI1" available no, one per card.profile.device; "[Out] Speaker"
+    // unknown, which is what a route that cannot tell says, and "[Out] Headphones"
+    // no, both on the device the speakers are.
+    const std::vector<CardRoute> card = {{0, false}, {1, false}, {2, false}, {3, true}, {3, false}};
+    CHECK_FALSE(sink_connected(card, 0));   // HDMI 3
+    CHECK_FALSE(sink_connected(card, 2));   // HDMI 1
+    CHECK(sink_connected(card, 3));         // Speaker + Headphones
+    // Nothing known about the card yet, or a sink that is on none: shown.
+    CHECK(sink_connected({}, 0));
+    CHECK(sink_connected(card, 7));
+}
+
 TEST_CASE("the sinks PipeWire reports are the ones it has") {
     PipewireOutputs outputs;
     if (!outputs.start()) {

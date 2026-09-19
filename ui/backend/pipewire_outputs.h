@@ -35,7 +35,23 @@ struct PipewireSink {
     // Isotone's own virtual sink, which is an output to play into but never one
     // to feed: its monitor is the core's input, so targeting it is a loop.
     bool is_isotone = false;
+    // False for a socket with nothing in it, an unplugged HDMI: sink_connected()
+    // over its card's routes. A sink with no card, a virtual one, is connected.
+    bool connected = true;
 };
+
+// One route of a card: which of the card's devices (card.profile.device, the
+// property a sink node carries) it is for, and whether it reports something
+// plugged in. A route that cannot tell says "unknown", which counts as plugged.
+struct CardRoute {
+    uint32_t card_device = 0;
+    bool     available = true;
+};
+
+// Whether a sink on `card_device` has any route with something in it. True when
+// the card's routes are not known yet, so an output is never hidden by not
+// having been read.
+bool sink_connected(const std::vector<CardRoute>& routes, uint32_t card_device);
 
 // node.nick ("HDMI 3", "Speaker + Headphones"), else node.description, else
 // node.name. A card's outputs share the start of their descriptions, which is

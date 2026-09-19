@@ -5,11 +5,14 @@
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
+#include <spa/param/audio/raw.h>
+#include <spa/pod/parser.h>
 #include <spa/utils/json.h>
 
 #include <condition_variable>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -54,9 +57,39 @@ struct PipewireOutputsImpl {
     uint32_t        metadata_id = SPA_ID_INVALID;
     spa_hook        metadata_hook{};
 
+    // The cards, for the routes that say what is plugged in. Bound for as long
+    // as the card is there; a route changes when a cable is (param event).
+    struct Card {
+        uint32_t               id = SPA_ID_INVALID;   // its registry id, the sinks' device.id
+        pw_device*             proxy = nullptr;
+        spa_hook               hook{};
+        std::vector<CardRoute> routes;
+        PipewireOutputsImpl*   owner = nullptr;
+    };
+    std::map<uint32_t, std::unique_ptr<Card>> cards;   // by registry id
+
+    // A bound sink, for card.profile.device: the registry's properties carry
+    // device.id but not which of the card's devices the sink is, and that is what
+    // a route names.
+    struct Sink {
+        uint32_t             id = SPA_ID_INVALID;
+        pw_node*             proxy = nullptr;
+        spa_hook             hook{};
+        PipewireOutputsImpl* owner = nullptr;
+    };
+    std::map<uint32_t, std::unique_ptr<Sink>> bound_sinks;   // by registry id
+
     // Guards everything a caller can read. The PipeWire thread writes it.
     mutable std::mutex           mutex;
     std::map<uint32_t, PipewireSink> sinks;   // by registry id
+    // Each sink's card (device.id) and which of its devices it is
+    // (card.profile.device), so a route can be matched to it.
+    struct SinkCard {
+        uint32_t device_id = SPA_ID_INVALID;
+        uint32_t card_device = SPA_ID_INVALID;
+    };
+    std::map<uint32_t, SinkCard> sink_cards;   // by the sink's registry id
+    std::map<uint32_t, std::vector<CardRoute>> card_routes;   // by the card's device.id
     std::string                  default_name;
 
     std::function<void()> on_changed;
@@ -78,6 +111,16 @@ struct PipewireOutputsImpl {
     }
 };
 
+bool sink_connected(const std::vector<CardRoute>& routes, uint32_t card_device) {
+    bool any_for_this_device = false;
+    for (const CardRoute& r : routes) {
+        if (r.card_device != card_device) continue;
+        any_for_this_device = true;
+        if (r.available) return true;
+    }
+    return !any_for_this_device;
+}
+
 std::string sink_display_name(const char* nick, const char* description, const std::string& name) {
     if (nick != nullptr && *nick != '\0') return nick;
     if (description != nullptr && *description != '\0') return description;
@@ -85,6 +128,98 @@ std::string sink_display_name(const char* nick, const char* description, const s
 }
 
 namespace {
+
+// A card's routes: which of its devices each is for, and whether it reports
+// something plugged in (SPA_PARAM_AVAILABILITY_no is an empty socket, an
+// unplugged HDMI; "unknown" is a route that cannot tell, and counts as plugged).
+void on_card_param(void* data, int /*seq*/, uint32_t id, uint32_t /*index*/, uint32_t /*next*/,
+                   const spa_pod* param) {
+    auto* card = static_cast<PipewireOutputsImpl::Card*>(data);
+    if (id != SPA_PARAM_EnumRoute || param == nullptr) return;
+    uint32_t available = SPA_PARAM_AVAILABILITY_unknown;
+    spa_pod* devices = nullptr;
+    if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamRoute, nullptr,
+                             SPA_PARAM_ROUTE_available, SPA_POD_OPT_Id(&available),
+                             SPA_PARAM_ROUTE_devices, SPA_POD_OPT_Pod(&devices)) < 0) {
+        return;
+    }
+    if (devices == nullptr || !spa_pod_is_array(devices)) return;
+    uint32_t n = 0;
+    const int32_t* values = static_cast<int32_t*>(spa_pod_get_array(devices, &n));
+    if (values == nullptr) return;
+    for (uint32_t i = 0; i < n; ++i) {
+        card->routes.push_back(CardRoute{static_cast<uint32_t>(values[i]),
+                                         available != SPA_PARAM_AVAILABILITY_no});
+    }
+    // Published as each arrives rather than at the end of the enumeration: there
+    // is no event that says it ended, and a route more can only free an output.
+    {
+        const std::lock_guard<std::mutex> lock(card->owner->mutex);
+        card->owner->card_routes[card->id] = card->routes;
+    }
+    card->owner->changed();
+}
+
+// Every info carries the routes again: a cable in or out changes one, and the
+// server says so by sending the device's info with EnumRoute among its params.
+void on_card_info(void* data, const pw_device_info* info) {
+    auto* card = static_cast<PipewireOutputsImpl::Card*>(data);
+    bool routes = false;
+    for (uint32_t i = 0; i < info->n_params; ++i)
+        if (info->params[i].id == SPA_PARAM_EnumRoute) routes = true;
+    if (!routes) return;
+    card->routes.clear();
+    pw_device_enum_params(card->proxy, 0, SPA_PARAM_EnumRoute, 0, UINT32_MAX, nullptr);
+}
+
+const pw_device_events kCardEvents = {
+    .version = PW_VERSION_DEVICE_EVENTS,
+    .info = on_card_info,
+    .param = on_card_param,
+};
+
+void on_sink_info(void* data, const pw_node_info* info) {
+    auto* sink = static_cast<PipewireOutputsImpl::Sink*>(data);
+    if (info->props == nullptr) return;
+    const char* card_device = spa_dict_lookup(info->props, "card.profile.device");
+    if (card_device == nullptr) return;
+    {
+        const std::lock_guard<std::mutex> lock(sink->owner->mutex);
+        sink->owner->sink_cards[sink->id].card_device =
+            static_cast<uint32_t>(std::strtoul(card_device, nullptr, 10));
+    }
+    sink->owner->changed();
+}
+
+const pw_node_events kSinkEvents = {
+    .version = PW_VERSION_NODE_EVENTS,
+    .info = on_sink_info,
+    .param = nullptr,
+};
+
+void bind_sink(PipewireOutputsImpl& d, uint32_t id) {
+    if (d.bound_sinks.count(id) != 0) return;
+    auto sink = std::make_unique<PipewireOutputsImpl::Sink>();
+    sink->id = id;
+    sink->owner = &d;
+    sink->proxy = static_cast<pw_node*>(
+        pw_registry_bind(d.registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0));
+    if (sink->proxy == nullptr) return;
+    pw_node_add_listener(sink->proxy, &sink->hook, &kSinkEvents, sink.get());
+    d.bound_sinks[id] = std::move(sink);
+}
+
+void bind_card(PipewireOutputsImpl& d, uint32_t id) {
+    if (d.cards.count(id) != 0) return;
+    auto card = std::make_unique<PipewireOutputsImpl::Card>();
+    card->id = id;
+    card->owner = &d;
+    card->proxy = static_cast<pw_device*>(
+        pw_registry_bind(d.registry, id, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE, 0));
+    if (card->proxy == nullptr) return;
+    pw_device_add_listener(card->proxy, &card->hook, &kCardEvents, card.get());
+    d.cards[id] = std::move(card);
+}
 
 void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* type,
                uint32_t /*version*/, const spa_dict* props) {
@@ -102,11 +237,26 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
         sink.description = sink_display_name(spa_dict_lookup(props, PW_KEY_NODE_NICK),
                                              spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION), sink.name);
         sink.is_isotone = sink.name == kIsotoneSinkName;
+        PipewireOutputsImpl::SinkCard card;
+        if (const char* device_id = spa_dict_lookup(props, PW_KEY_DEVICE_ID))
+            card.device_id = static_cast<uint32_t>(std::strtoul(device_id, nullptr, 10));
+        if (const char* card_device = spa_dict_lookup(props, "card.profile.device"))
+            card.card_device = static_cast<uint32_t>(std::strtoul(card_device, nullptr, 10));
         {
             const std::lock_guard<std::mutex> lock(d->mutex);
             d->sinks[id] = std::move(sink);
+            d->sink_cards[id].device_id = card.device_id;
         }
+        if (card.device_id != SPA_ID_INVALID) bind_sink(*d, id);
         d->changed();
+        return;
+    }
+
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Device) == 0) {
+        const char* api = spa_dict_lookup(props, PW_KEY_DEVICE_API);
+        const char* media = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+        if (media == nullptr || std::strcmp(media, "Audio/Device") != 0 || api == nullptr) return;
+        bind_card(*d, id);
         return;
     }
 
@@ -146,10 +296,26 @@ void on_global_remove(void* data, uint32_t id) {
         d->metadata = nullptr;
         d->metadata_id = SPA_ID_INVALID;
     }
+    if (auto card = d->cards.find(id); card != d->cards.end()) {
+        spa_hook_remove(&card->second->hook);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy*>(card->second->proxy));
+        d->cards.erase(card);
+        {
+            const std::lock_guard<std::mutex> lock(d->mutex);
+            d->card_routes.erase(id);
+        }
+        d->changed();
+    }
+    if (auto sink = d->bound_sinks.find(id); sink != d->bound_sinks.end()) {
+        spa_hook_remove(&sink->second->hook);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy*>(sink->second->proxy));
+        d->bound_sinks.erase(sink);
+    }
     bool removed = false;
     {
         const std::lock_guard<std::mutex> lock(d->mutex);
         removed = d->sinks.erase(id) > 0;
+        d->sink_cards.erase(id);
     }
     if (removed) d->changed();
 }
@@ -242,6 +408,16 @@ void PipewireOutputs::stop() {
     if (impl_->loop == nullptr) return;
 
     pw_thread_loop_lock(impl_->loop);
+    for (auto& [id, card] : impl_->cards) {
+        spa_hook_remove(&card->hook);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy*>(card->proxy));
+    }
+    impl_->cards.clear();
+    for (auto& [id, sink] : impl_->bound_sinks) {
+        spa_hook_remove(&sink->hook);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy*>(sink->proxy));
+    }
+    impl_->bound_sinks.clear();
     if (impl_->metadata != nullptr) {
         spa_hook_remove(&impl_->metadata_hook);
         pw_proxy_destroy(reinterpret_cast<pw_proxy*>(impl_->metadata));
@@ -269,6 +445,8 @@ void PipewireOutputs::stop() {
 
     const std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->sinks.clear();
+    impl_->sink_cards.clear();
+    impl_->card_routes.clear();
     impl_->default_name.clear();
 }
 
@@ -278,7 +456,17 @@ std::vector<PipewireSink> PipewireOutputs::sinks() const {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
     std::vector<PipewireSink> out;
     out.reserve(impl_->sinks.size());
-    for (const auto& [id, sink] : impl_->sinks) out.push_back(sink);
+    for (const auto& [id, sink] : impl_->sinks) {
+        PipewireSink copy = sink;
+        const auto card = impl_->sink_cards.find(id);
+        if (card != impl_->sink_cards.end() && card->second.device_id != SPA_ID_INVALID &&
+            card->second.card_device != SPA_ID_INVALID) {
+            const auto routes = impl_->card_routes.find(card->second.device_id);
+            copy.connected = routes == impl_->card_routes.end() ||
+                             sink_connected(routes->second, card->second.card_device);
+        }
+        out.push_back(std::move(copy));
+    }
     return out;
 }
 
