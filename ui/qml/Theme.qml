@@ -15,7 +15,12 @@ QtObject {
     readonly property string mode: AppSettings.theme
     readonly property bool custom: mode === "custom"
     readonly property bool dark: custom ? luminance(customColour("background", "#121519")) <= luminance(customColour("text", "#e8ebf1"))
-                                        : mode === "dark" || (mode !== "light" && Qt.styleHints.colorScheme !== Qt.ColorScheme.Light)
+                                        : mode === "dark" || (mode !== "light" && systemDark)
+    // The system's scheme (Qt 6.5); Qt 6.4, which Linux distributions ship, has
+    // none, and the palette's window colour says instead.
+    readonly property SystemPalette systemPalette: SystemPalette {}
+    readonly property bool systemDark: Qt.ColorScheme !== undefined ? Qt.styleHints.colorScheme !== Qt.ColorScheme.Light
+                                                                    : luminance(systemPalette.window) < 0.5
     function pick(d, l) { return dark ? d : l }
     function customColour(key, fallback) {
         if (!custom) return fallback

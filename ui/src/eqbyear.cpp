@@ -2,6 +2,7 @@
 // Copyright (C) 2026 The Isotone authors
 
 #include "eqbyear.h"
+#include "qmlsingleton.h"
 
 #include <QQmlEngine>
 
@@ -26,7 +27,7 @@ EqByEar::MarkedBand EqByEar::bandFromMarks(double start, double top, double end,
 }
 
 EqByEar* EqByEar::create(QQmlEngine* qml, QJSEngine*) {
-    return new EqByEar(qml->singletonInstance<EqSession*>("Isotone", "EqSession"));
+    return new EqByEar(isotoneSingleton<EqSession>(qml, "EqSession"));
 }
 
 EqByEar::EqByEar(EqSession* session, QObject* parent) : QObject(parent), session_(session) {
@@ -251,9 +252,9 @@ void EqByEar::startStream() {
     stream_mask_ = toneMask();
     QPointer<EqByEar> self(this);
     tone_.start(
-        isotone::ui::widen_id(stream_guid_), stream_mask_,
+        stream_guid_, stream_mask_,
         [this](float* out, uint32_t frames, double sample_rate) { sine_.render(out, frames, sample_rate); },
-        [self, generation](HRESULT hr, const char*) {
+        [self, generation](int32_t hr, const char*) {
             QMetaObject::invokeMethod(
                 self.data(),
                 [self, hr, generation] {

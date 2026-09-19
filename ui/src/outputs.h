@@ -7,6 +7,10 @@
 // Outputs has not turned them Off (equalizerapoconfig.h).
 // Refreshed on device notifications; the current output's engine is probed off
 // the UI thread every few seconds for its status dot.
+//
+// Linux: every PipeWire sink but Isotone's own, all edited through the daemon
+// (outputs_posix.cpp). The default is the default sink, or the sink the daemon
+// feeds while Isotone's own sink is the default.
 
 #pragma once
 
@@ -20,9 +24,15 @@
 
 #include "devicelink.h"
 
+#if defined(_WIN32)
 namespace isotone::devices {
 class DeviceWatcher;
 }
+#else
+namespace isotone::ui {
+class PipewireOutputs;
+}
+#endif
 
 class Outputs : public QAbstractListModel {
     Q_OBJECT
@@ -87,8 +97,17 @@ private:
 
     std::vector<Output> outputs_;
     std::string current_guid_;
+#if defined(_WIN32)
     std::unique_ptr<isotone::devices::DeviceWatcher> watcher_;
     QTimer probe_timer_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::atomic<bool> probing_{false};
+#else
+    // Linux: the sinks from PipeWire's registry; the daemon's heartbeat on the
+    // fed sink at the last probe, to tell running from idle.
+    std::unique_ptr<isotone::ui::PipewireOutputs> pipewire_;
+    QTimer probe_timer_;
+    std::string fed_;
+    uint32_t heartbeat_ = 0;
+#endif
 };

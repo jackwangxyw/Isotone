@@ -18,6 +18,7 @@
 #include <QtQuickTest>
 
 #include "eqsession.h"
+#include "qmlsingleton.h"
 #include <windows.h>
 
 // Offscreen unless the caller picks a platform: on the desktop a window is laid
@@ -58,7 +59,7 @@ class TestHooks : public QObject {
 public:
     explicit TestHooks(QQmlEngine* engine) : QObject(engine), engine_(engine) {}
     Q_INVOKABLE void useLayout(int channels, int speakerMask) {
-        auto* session = engine_->singletonInstance<EqSession*>("Isotone", "EqSession");
+        auto* session = isotoneSingleton<EqSession>(engine_, "EqSession");
         session->useTarget(isotone::ui::OutputTarget{
             "", isotone::ui::Backend::none,
             isotone::ui::OutputLayout{static_cast<uint32_t>(channels), static_cast<uint32_t>(speakerMask), 48000.0}});

@@ -8,12 +8,19 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 SingleInstance::SingleInstance(const QString& name, QObject* parent) : QObject(parent), name_(name) {}
 
 QString SingleInstance::nameFor(const QString& dataDir) {
+#if defined(_WIN32)
     const QString key = qEnvironmentVariable("USERNAME") + QLatin1Char('|') + QDir(dataDir).absolutePath().toLower();
+#else
+    // Paths are case-sensitive here; the socket lives in the user's own runtime directory anyway.
+    const QString key = qEnvironmentVariable("USER") + QLatin1Char('|') + QDir(dataDir).absolutePath();
+#endif
     return QStringLiteral("Isotone-") + QString::fromLatin1(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha256).toHex().left(24));
 }
 
@@ -22,7 +29,9 @@ bool SingleInstance::notifyRunning(bool show) {
     socket.connectToServer(name_);
     if (!socket.waitForConnected(1000)) return false;
     // The running instance may take the foreground from this launch.
+#if defined(_WIN32)
     AllowSetForegroundWindow(ASFW_ANY);
+#endif
     socket.write(show ? "show\n" : "tray\n");
     socket.waitForBytesWritten(1000);
     // Closing before the running instance has read the line loses it: wait for its answer.

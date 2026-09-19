@@ -23,8 +23,18 @@ namespace AppPaths {
 
 QString dataDir() {
     QString dir = data_override();
+#if defined(_WIN32)
     // The roaming profile, as the plan puts presets (7.6): %APPDATA%\Isotone.
     if (dir.isEmpty()) dir = QDir(qEnvironmentVariable("APPDATA")).filePath(QStringLiteral("Isotone"));
+#else
+    // $XDG_CONFIG_HOME/isotone/ui, beside the daemon's devices directory; a
+    // relative XDG_CONFIG_HOME is ignored, as the spec says.
+    if (dir.isEmpty()) {
+        QString config = qEnvironmentVariable("XDG_CONFIG_HOME");
+        if (config.isEmpty() || QDir::isRelativePath(config)) config = QDir::home().filePath(QStringLiteral(".config"));
+        dir = QDir(config).filePath(QStringLiteral("isotone/ui"));
+    }
+#endif
     QDir().mkpath(dir);
     return dir;
 }

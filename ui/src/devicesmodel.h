@@ -9,6 +9,10 @@
 // on device notifications, after devicetool runs (Main.qml) and when the engine
 // state polled every 3 s changes, since engine changes raise no notification.
 //
+// Linux: every PipeWire sink but Isotone's own, with whether the daemon feeds
+// it; there is nothing to install, and the one action is starting a daemon
+// that is not running (devicesmodel_posix.cpp).
+//
 // ISOTONE_FAKE_DEVICETOOL names a script whose "devices" (status JSON objects)
 // and "equalizer_apo" ({"installed", "version", "uninstaller"}) replace the
 // machine's (tests, screenshots).
@@ -23,11 +27,19 @@
 #include <memory>
 #include <vector>
 
+#if defined(_WIN32)
 #include "devicestatus.h"
 
 namespace isotone::devices {
 class DeviceWatcher;
 }
+#else
+#include <string>
+
+namespace isotone::ui {
+class PipewireOutputs;
+}
+#endif
 
 class DevicesModel : public QAbstractListModel {
     Q_OBJECT
@@ -88,11 +100,22 @@ public:
     // Replaces the rows with a script's (tests). False when it does not parse.
     Q_INVOKABLE bool loadScript(const QString& script);
 
+#if defined(_WIN32)
     struct Entry {
         DeviceFacts facts;
         QString status_json;
         QString config;
     };
+#else
+    // Linux: every sink but Isotone's own (devicesmodel_posix.cpp).
+    struct Entry {
+        std::string guid;       // node.name
+        QString name;           // node.description
+        bool is_default = false;
+        QString status;         // active (the daemon feeds it), standby, stopped (no daemon)
+        QString format;         // the fed sink's, from the region header
+    };
+#endif
 
 signals:
     void revisionChanged();
@@ -113,7 +136,11 @@ private:
     QString eapo_version_, eapo_uninstaller_;
     bool fake_ = false;
 
+#if defined(_WIN32)
     std::unique_ptr<isotone::devices::DeviceWatcher> watcher_;
+#else
+    std::unique_ptr<isotone::ui::PipewireOutputs> pipewire_;
+#endif
     QTimer poll_timer_;
     QTimer debounce_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);

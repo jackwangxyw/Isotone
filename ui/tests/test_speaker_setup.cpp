@@ -430,7 +430,7 @@ TEST_CASE("a test tone on an endpoint that does not exist reports it and plays n
     std::mutex m;
     std::condition_variable cv;
     HRESULT failed = S_OK;
-    tone.start(L"{8f4d2a10-0000-4000-8000-00000000dead}", 0, [&](HRESULT hr, const char*) {
+    tone.start("{8f4d2a10-0000-4000-8000-00000000dead}", 0, [&](int32_t hr, const char*) {
         std::lock_guard<std::mutex> lock(m);
         failed = hr;
         cv.notify_one();

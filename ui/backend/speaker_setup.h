@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -106,9 +107,9 @@ double snap_lfe_lowpass_hz(double hz);
 EqState saved_with_speakers(const EqState* saved, const EqState& live);
 
 // Reads the saved state at `path`, replaces its speaker part with `live`'s and
-// writes it back (file only). A missing or invalid file counts as flat. Win32
-// error code.
-unsigned long save_speaker_setup(const std::wstring& path, const EqState& live);
+// writes it back (file only). A missing or invalid file counts as flat. A Win32
+// error code on Windows, an errno on Linux.
+unsigned long save_speaker_setup(const std::filesystem::path& path, const EqState& live);
 
 // The graph on a surround output. `view` is the Showing picker's mask, 0 for
 // every speaker. The composite is drawn for the channel in view with the most

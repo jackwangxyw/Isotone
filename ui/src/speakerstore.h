@@ -24,17 +24,17 @@ public:
     // speakers.json in AppPaths::dataDir() unless given.
     explicit SpeakerStore(QString path = QString());
 
-    std::vector<isotone::ui::SpeakerGroup> groups(const std::wstring& guid) const;
-    bool setGroups(const std::wstring& guid, const std::vector<isotone::ui::SpeakerGroup>& groups);
+    std::vector<isotone::ui::SpeakerGroup> groups(const std::string& guid) const;
+    bool setGroups(const std::string& guid, const std::vector<isotone::ui::SpeakerGroup>& groups);
     // kDefaultFarthestM when none is kept.
-    double farthest(const std::wstring& guid) const;
-    bool setFarthest(const std::wstring& guid, double metres);
+    double farthest(const std::string& guid) const;
+    bool setFarthest(const std::string& guid, double metres);
 
     const QString& path() const { return path_; }
 
 private:
-    QJsonObject output(const std::wstring& guid) const;
-    bool setOutput(const std::wstring& guid, const QJsonObject& value);
+    QJsonObject output(const std::string& guid) const;
+    bool setOutput(const std::string& guid, const QJsonObject& value);
 
     QString path_;
 };

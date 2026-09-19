@@ -3,6 +3,8 @@
 
 #include "test_tone.h"
 
+#include <windows.h>
+
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <mmreg.h>
@@ -14,6 +16,7 @@
 #include <optional>
 #include <vector>
 
+#include "devicelink.h"
 #include "devices.h"
 #include "pink_noise.h"
 
@@ -34,23 +37,23 @@ struct Released {
 
 TestTone::~TestTone() { stop(); }
 
-void TestTone::start(const std::wstring& endpoint, uint32_t channel_mask, Source source, Failure on_failure) {
+void TestTone::start(const std::string& output, uint32_t channel_mask, Source source, Failure on_failure) {
     stop();
     stop_ = false;
     frames_ = 0;
-    thread_ = std::thread([this, endpoint, channel_mask, source = std::move(source), on_failure = std::move(on_failure)] {
-        run(endpoint, channel_mask, source, on_failure);
+    thread_ = std::thread([this, output, channel_mask, source = std::move(source), on_failure = std::move(on_failure)] {
+        run(output, channel_mask, source, on_failure);
     });
 }
 
-void TestTone::start(const std::wstring& endpoint, uint32_t channel, Failure on_failure) {
+void TestTone::start(const std::string& output, uint32_t channel, Failure on_failure) {
     // Built at the endpoint's rate, on the tone's thread.
     auto noise = std::make_shared<std::optional<PinkNoise>>();
     const Source source = [noise](float* out, uint32_t frames, double sample_rate) {
         if (!*noise) noise->emplace(sample_rate);
         for (uint32_t i = 0; i < frames; ++i) out[i] = (*noise)->next();
     };
-    start(endpoint, channel < 32 ? uint32_t{1} << channel : 0, source, std::move(on_failure));
+    start(output, channel < 32 ? uint32_t{1} << channel : 0, source, std::move(on_failure));
 }
 
 void TestTone::stop() {
@@ -59,7 +62,8 @@ void TestTone::stop() {
     thread_.join();
 }
 
-void TestTone::run(std::wstring endpoint, uint32_t channel_mask, Source source, Failure on_failure) {
+void TestTone::run(std::string output, uint32_t channel_mask, Source source, Failure on_failure) {
+    const std::wstring endpoint = widen_id(output);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const auto fail = [&](HRESULT hr, const char* what) {
         if (on_failure) on_failure(hr, what);

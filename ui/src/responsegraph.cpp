@@ -300,7 +300,9 @@ void ResponseGraph::paint(QPainter* p) {
 
         QFont font(font_family_);
         font.setPixelSize(11);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
         font.setFeature(QFont::Tag("tnum"), 1);
+#endif
         p->setFont(font);
         const QFontMetricsF fm(font);
         p->setPen(label_colour_);

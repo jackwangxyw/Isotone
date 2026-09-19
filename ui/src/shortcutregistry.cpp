@@ -2,6 +2,7 @@
 // Copyright (C) 2026 The Isotone authors
 
 #include "shortcutregistry.h"
+#include "qmlsingleton.h"
 
 #include <QQmlEngine>
 
@@ -49,7 +50,7 @@ ShortcutRegistry::ShortcutRegistry(AppSettings* settings, QObject* parent) : QOb
 }
 
 ShortcutRegistry* ShortcutRegistry::create(QQmlEngine* qml, QJSEngine*) {
-    return new ShortcutRegistry(qml->singletonInstance<AppSettings*>("Isotone", "AppSettings"));
+    return new ShortcutRegistry(isotoneSingleton<AppSettings>(qml, "AppSettings"));
 }
 
 const ShortcutRegistry::Action* ShortcutRegistry::find(const QString& id) const {

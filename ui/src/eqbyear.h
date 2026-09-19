@@ -16,8 +16,6 @@
 #include <QTimer>
 #include <QtQml/qqmlregistration.h>
 
-#include <windows.h>
-
 #include <string>
 
 #include "devicelink.h"
@@ -117,7 +115,7 @@ signals:
     void channelChanged();
     void sweepChanged();
     void marksChanged();
-    // The stream could not open or failed; an HRESULT.
+    // The stream could not open or failed; an HRESULT on Windows, an errno on Linux.
     void toneFailed(int hr);
 
 private:

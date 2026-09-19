@@ -2,6 +2,7 @@
 // Copyright (C) 2026 The Isotone authors
 
 #include "presets.h"
+#include "qmlsingleton.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -21,7 +22,7 @@
 #include "isotone/response.h"
 #include "output_state.h"
 #include "outputs.h"
-#include "speaker_layout.h"
+#include "isotone/speaker_layouts.h"
 
 namespace {
 
@@ -52,20 +53,25 @@ std::string decode(const QByteArray& bytes) {
 }  // namespace
 
 Presets* Presets::create(QQmlEngine* qml, QJSEngine*) {
-    auto* session = qml->singletonInstance<EqSession*>("Isotone", "EqSession");
+    auto* session = isotoneSingleton<EqSession>(qml, "EqSession");
     // Outputs is asked when needed: it enumerates the machine's endpoints.
     OutputList outputs = [qml] {
         std::vector<OutputInfo> list;
-        auto* o = qml->singletonInstance<Outputs*>("Isotone", "Outputs");
+        auto* o = isotoneSingleton<Outputs>(qml, "Outputs");
         if (!o) return list;
         for (const Outputs::Output& out : o->outputs())
             list.push_back(OutputInfo{isotone::ui::OutputTarget{out.guid, out.backend, out.layout}, out.name});
         return list;
     };
+#if defined(_WIN32)
     return new Presets(AppPaths::dataDir(), session, std::move(outputs), L"Global\\",
                        AppPaths::compatConfigDir().toStdWString());
+#else
+    return new Presets(AppPaths::dataDir(), session, std::move(outputs), std::string());
+#endif
 }
 
+#if defined(_WIN32)
 Presets::Presets(const QString& data_dir, EqSession* session, OutputList outputs, std::wstring region_namespace,
                  std::wstring compat_dir, QObject* parent)
     : QAbstractListModel(parent),
@@ -74,6 +80,14 @@ Presets::Presets(const QString& data_dir, EqSession* session, OutputList outputs
       outputs_(std::move(outputs)),
       namespace_(std::move(region_namespace)),
       compat_dir_(std::move(compat_dir)) {
+#else
+Presets::Presets(const QString& data_dir, EqSession* session, OutputList outputs, std::string state_dir, QObject* parent)
+    : QAbstractListModel(parent),
+      store_(data_dir),
+      session_(session),
+      outputs_(std::move(outputs)),
+      state_dir_(std::move(state_dir)) {
+#endif
     if (session_) {
         connect(session_, &EqSession::targetChanged, this, &Presets::outputChanged);
         connect(session_, &EqSession::committed, this, &Presets::refresh);
@@ -255,14 +269,18 @@ void Presets::apply(const PresetStore::Preset& preset) {
 }
 
 void Presets::writeTo(const isotone::ui::OutputTarget& target, const isotone::EqState& eq) {
+#if defined(_WIN32)
     isotone::ui::DeviceLink link(namespace_, compat_dir_);
+#else
+    isotone::ui::DeviceLink link(state_dir_);
+#endif
     link.set_target(target);
     const isotone::ChannelLayout layout{target.layout.channels, target.layout.speaker_mask};
     isotone::EqState state;
     if (link.load_current(&state)) isotone::remap_channels(&state, layout);
     isotone::EqState moved = eq;
-    // The region holds kParamMaxBands: an IsoAPO output gets the first ones, as EqSession loads them.
-    if (target.backend == isotone::ui::Backend::native && moved.bands.size() > isotone::kParamMaxBands)
+    // The region holds kParamMaxBands: an IsoAPO or daemon output gets the first ones, as EqSession loads them.
+    if (isotone::ui::uses_region(target.backend) && moved.bands.size() > isotone::kParamMaxBands)
         moved.bands.resize(isotone::kParamMaxBands);
     isotone::remap_channels(&moved, layout);
     state.bands = std::move(moved.bands);
@@ -272,7 +290,7 @@ void Presets::writeTo(const isotone::ui::OutputTarget& target, const isotone::Eq
     state.layout_speaker_mask = target.layout.speaker_mask;
     if (state.auto_preamp) state.preamp_db = auto_value(state, target.layout);
     link.commit(state);
-    if (target.backend == isotone::ui::Backend::native) link.save(state, state);
+    if (isotone::ui::uses_region(target.backend)) link.save(state, state);
 }
 
 void Presets::propagate(const QString& id) {
@@ -520,12 +538,12 @@ QVariantList Presets::exportLayouts() const {
                            {QStringLiteral("mask"), static_cast<int>(mask)}};
     };
     QString label = QStringLiteral("%1 ch").arg(own.channels);
-    for (const isotone::devices::SpeakerLayoutSpec& spec : isotone::devices::kSpeakerLayouts) {
+    for (const isotone::SpeakerLayoutSpec& spec : isotone::kSpeakerLayouts) {
         if (spec.channels == own.channels && spec.mask == own.speaker_mask) label = QString::fromLatin1(spec.name);
     }
     list << entry(label, own.channels, own.speaker_mask);
     // As the prototype offers them: the output's own, then 5.1 and stereo below it.
-    const auto& five = isotone::devices::kSpeakerLayouts[2];
+    const auto& five = isotone::kSpeakerLayouts[2];
     if (own.channels > five.channels) list << entry(QStringLiteral("5.1"), five.channels, five.mask);
     list << entry(QStringLiteral("Stereo"), 2, 0x3);
     return list;

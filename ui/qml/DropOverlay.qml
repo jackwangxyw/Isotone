@@ -54,19 +54,28 @@ DropArea {
         }
         Shape {
             anchors.fill: parent
-            preferredRendererType: Shape.CurveRenderer
+            // Shape.CurveRenderer (Qt 6.6) where there is one; Qt 6.4, as Linux distributions
+            // ship it, has only the geometry renderer, smoothed here by multisampling.
+            Component.onCompleted: {
+                if ("preferredRendererType" in this) preferredRendererType = Shape.CurveRenderer
+                else { layer.samples = 4; layer.enabled = true }
+            }
             ShapePath {
                 strokeColor: Theme.accent
                 strokeWidth: 2
                 strokeStyle: ShapePath.DashLine
                 dashPattern: [3, 2]
                 fillColor: "transparent"
-                PathRectangle {
-                    x: 1
-                    y: 1
-                    width: root.width - 34
-                    height: root.height - 34
-                    radius: 15
+                // A rounded rectangle at (1, 1) with radius 15. PathSvg rather than
+                // PathRectangle, which is Qt 6.8 and Linux distributions ship 6.4.
+                PathSvg {
+                    readonly property real w: root.width - 34
+                    readonly property real h: root.height - 34
+                    readonly property real r: 15
+                    path: 'M ' + (1 + r) + ' 1 L ' + (1 + w - r) + ' 1 A ' + r + ' ' + r + ' 0 0 1 ' + (1 + w) + ' ' + (1 + r)
+                          + ' L ' + (1 + w) + ' ' + (1 + h - r) + ' A ' + r + ' ' + r + ' 0 0 1 ' + (1 + w - r) + ' ' + (1 + h)
+                          + ' L ' + (1 + r) + ' ' + (1 + h) + ' A ' + r + ' ' + r + ' 0 0 1 1 ' + (1 + h - r)
+                          + ' L 1 ' + (1 + r) + ' A ' + r + ' ' + r + ' 0 0 1 ' + (1 + r) + ' 1 Z'
                 }
             }
         }

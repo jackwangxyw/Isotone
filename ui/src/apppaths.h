@@ -12,7 +12,8 @@
 
 namespace AppPaths {
 
-// %APPDATA%\Isotone unless moved. Created on first use.
+// %APPDATA%\Isotone on Windows, $XDG_CONFIG_HOME/isotone/ui on Linux, unless
+// moved. Created on first use.
 QString dataDir();
 void setDataDir(const QString& dir);
 

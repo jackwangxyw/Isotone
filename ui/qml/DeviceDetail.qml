@@ -16,9 +16,9 @@ Rectangle {
         test: "Test", uninstall: "Uninstall", replace: "Replace with IsoAPO", repair: "Repair",
         removeEapo: "Remove Equalizer APO", takeBack: "Take back", keepEapo: "Keep Equalizer APO",
         undo: "Undo", copyDiagnostics: "Copy diagnostics", enableEnhancements: "Turn on enhancements", install: "Install",
-        attach: "Attach"
+        attach: "Attach", start: "Start"
     })
-    readonly property var primary: ["replace", "repair", "removeEapo", "takeBack", "undo", "enableEnhancements", "install", "attach"]
+    readonly property var primary: ["replace", "repair", "removeEapo", "takeBack", "undo", "enableEnhancements", "install", "attach", "start"]
 
     height: column.implicitHeight + 44
     radius: 14
@@ -77,7 +77,7 @@ Rectangle {
         }
         Item { width: 1; height: 14 }
         DetailRow { label: "Engine"; value: root.device.engineDetail || "" }
-        DetailRow { label: "Effect slot"; value: root.device.slot || root.dash }
+        DetailRow { visible: Qt.platform.os !== "linux"; label: "Effect slot"; value: root.device.slot || root.dash }
         DetailRow { label: "Format"; value: root.device.format || "" }
         DetailRow {
             objectName: "detailConfig"

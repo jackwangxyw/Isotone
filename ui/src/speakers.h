@@ -19,13 +19,11 @@
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 
-#include <windows.h>
-
 #include <functional>
 #include <string>
 #include <vector>
 
-#include "speaker_layout.h"
+#include "isotone/speaker_layouts.h"
 #include "speaker_setup.h"
 #include "speakerstore.h"
 #include "test_tone.h"
@@ -95,7 +93,8 @@ public:
     };
     Q_ENUM(Role)
 
-    using LayoutSetter = std::function<HRESULT(const std::wstring& endpoint, isotone::devices::SpeakerLayout layout)>;
+    // An HRESULT on Windows, an errno on Linux; 0 when it changed.
+    using LayoutSetter = std::function<int(const std::string& output, isotone::SpeakerLayout layout)>;
 
     explicit Speakers(EqSession* session, QObject* parent = nullptr);
     ~Speakers() override;
@@ -154,8 +153,9 @@ public:
     // Channels of a picker layout ("5.1" is 6), 0 for another name.
     Q_INVOKABLE int layoutChannels(const QString& name) const;
     Q_INVOKABLE void refreshSupportedLayouts();
-    // Changes the output's Windows speaker setup: an HRESULT, 0 when it changed.
-    // The new format reaches the session through the device notification.
+    // Changes the output's speaker setup: an HRESULT on Windows, an errno on
+    // Linux, 0 when it changed. The new format reaches the session through the
+    // device notification.
     Q_INVOKABLE int setLayout(const QString& name);
     // Leaving the Speakers view: test tones stop and solo ends.
     Q_INVOKABLE void endSession();
@@ -174,7 +174,7 @@ signals:
     void tonesChanged();
     void soloChanged();
     void showingChanged();
-    // A test tone could not play; an HRESULT.
+    // A test tone could not play; an HRESULT on Windows, an errno on Linux.
     void toneFailed(int hr);
     // Speaker settings or groups could not be saved.
     void saveFailed();

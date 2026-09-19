@@ -63,8 +63,12 @@ constexpr double kAutoPreampMatchDb = 0.01;
 
 }  // namespace
 
+#if defined(_WIN32)
 EqSession::EqSession(QObject* parent)
     : EqSession(std::make_unique<isotone::ui::DeviceLink>(L"Global\\", AppPaths::compatConfigDir().toStdWString()), parent) {}
+#else
+EqSession::EqSession(QObject* parent) : EqSession(std::make_unique<isotone::ui::DeviceLink>(), parent) {}
+#endif
 
 EqSession::EqSession(std::unique_ptr<isotone::ui::DeviceLink> link, QObject* parent)
     : QAbstractListModel(parent), link_(std::move(link)), audio_(size_t{8192} * isotone::kMaxChannels) {
@@ -485,8 +489,8 @@ void EqSession::resetGain(int row) {
 bool EqSession::canAddBand() const { return state_.bands.size() < isotone::kParamMaxBands; }
 
 void EqSession::limitBands(std::vector<isotone::Band>* bands) const {
-    // The region holds kParamMaxBands (engine contract): an IsoAPO output plays the first ones.
-    if (target_.backend == isotone::ui::Backend::native && bands->size() > isotone::kParamMaxBands)
+    // The region holds kParamMaxBands (engine contract): an IsoAPO or daemon output plays the first ones.
+    if (isotone::ui::uses_region(target_.backend) && bands->size() > isotone::kParamMaxBands)
         bands->resize(isotone::kParamMaxBands);
 }
 
@@ -648,9 +652,9 @@ void EqSession::editSpeakers(const std::function<void(isotone::EqState*)>& edit)
 
 void EqSession::saveSpeakerSetup() {
     // The file only, with the saved bands kept.
-    if (target_.backend != isotone::ui::Backend::native) return;
-    const DWORD error = isotone::ui::save_speaker_setup(link_->saved_state_path(), savedState());
-    if (error != ERROR_SUCCESS) emit speakerSaveFailed(static_cast<int>(error));
+    if (!isotone::ui::uses_region(target_.backend)) return;
+    const unsigned long error = isotone::ui::save_speaker_setup(link_->saved_state_path(), savedState());
+    if (error != 0) emit speakerSaveFailed(static_cast<int>(error));
 }
 
 void EqSession::setUndoExtra(double value, bool loaded) {
@@ -838,6 +842,7 @@ void EqSession::adoptEqPart(const isotone::EqState& eq) {
 void EqSession::saveToOutput() {
     switch (target_.backend) {
         case isotone::ui::Backend::native:
+        case isotone::ui::Backend::pipewire:
             link_->save(savedState(), engineState());
             break;
         case isotone::ui::Backend::equalizer_apo:

@@ -215,7 +215,7 @@ public:
     isotone::EqState engineState() const;
     isotone::EqState savedState() const;
     // The current output's saved state file (DeviceLink's: the self test's directory on a Local\ link).
-    std::wstring savedStatePath() const { return link_->saved_state_path(); }
+    std::filesystem::path savedStatePath() const { return link_->saved_state_path(); }
     // Presets. Edits `target` from now on, starting from what it plays (useOutput's work).
     explicit EqSession(std::unique_ptr<isotone::ui::DeviceLink> link, QObject* parent = nullptr);
     // Bands, preamp and Auto, for the output's layout (presetstore.h).

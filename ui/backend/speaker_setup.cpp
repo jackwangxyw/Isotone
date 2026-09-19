@@ -3,8 +3,6 @@
 
 #include "speaker_setup.h"
 
-#include <windows.h>
-
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -13,6 +11,12 @@
 #include "isotone/param_block.h"
 #include "isotone/speakers.h"
 #include "persisted_state.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <cerrno>
+#endif
 
 namespace isotone::ui {
 
@@ -185,15 +189,23 @@ EqState saved_with_speakers(const EqState* saved, const EqState& live) {
     return out;
 }
 
-unsigned long save_speaker_setup(const std::wstring& path, const EqState& live) {
+unsigned long save_speaker_setup(const std::filesystem::path& path, const EqState& live) {
+#if defined(_WIN32)
     if (path.empty()) return ERROR_INVALID_NAME;
+    namespace transport = isotone::win;
+    const std::wstring file = path.wstring();
+#else
+    if (path.empty()) return EINVAL;
+    namespace transport = isotone::posix;
+    const std::string file = path.string();
+#endif
     ParamBlock block{};
     EqState saved;
-    const bool have = isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded;
+    const bool have = transport::read_persisted_state(file, &block) == transport::PersistedRead::Loaded;
     if (have) from_param_block(block, &saved);
     ParamBlock merged{};
     to_param_block(saved_with_speakers(have ? &saved : nullptr, live), &merged);
-    return isotone::win::write_persisted_state(path, merged);
+    return static_cast<unsigned long>(transport::write_persisted_state(file, merged));
 }
 
 bool band_in_view(const Band& band, uint32_t channels, ChannelMask view) {

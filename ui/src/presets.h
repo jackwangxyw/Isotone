@@ -66,9 +66,15 @@ public:
     // The app's: presets under AppPaths::dataDir(), the EqSession and Outputs singletons.
     static Presets* create(QQmlEngine* qml, QJSEngine* js);
     // `outputs` lists the working outputs; other outputs are written through
+#if defined(_WIN32)
     // DeviceLinks on `region_namespace` and `compat_dir`, as EqSession's.
     Presets(const QString& data_dir, EqSession* session, OutputList outputs, std::wstring region_namespace,
             std::wstring compat_dir, QObject* parent = nullptr);
+#else
+    // DeviceLinks on `state_dir` (empty: the daemon's own), as EqSession's.
+    Presets(const QString& data_dir, EqSession* session, OutputList outputs, std::string state_dir,
+            QObject* parent = nullptr);
+#endif
     ~Presets() override;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -167,8 +173,12 @@ private:
     PresetStore store_;
     QPointer<EqSession> session_;
     OutputList outputs_;
+#if defined(_WIN32)
     std::wstring namespace_;
     std::wstring compat_dir_;
+#else
+    std::string state_dir_;
+#endif
     std::map<QString, OutputMemory> memory_;
     QString none_assignment_;
     QString current_name_;

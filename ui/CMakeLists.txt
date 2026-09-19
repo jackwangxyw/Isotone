@@ -5,10 +5,14 @@
 # module.
 # 6.4 is the floor because that is what Ubuntu 24.04 ships, and Linux Mint 22 is
 # built on it: holding out for 6.11 would mean a .deb that cannot use the
-# distribution's Qt. Windows still builds against 6.11. Provisional until the Qt
-# layer actually compiles on Linux and says whether it needs anything newer; all
-# eight components the UI asks for do exist in 6.4.2.
+# distribution's Qt. Windows still builds against 6.11. What 6.4 lacks is bridged
+# where it is used (qmlsingleton.h, the import path in main.cpp, Theme.qml's
+# system scheme, Icon.qml's renderer, DropOverlay.qml's outline).
 find_package(Qt6 6.4 REQUIRED COMPONENTS Gui Network Qml Quick QuickTest Test Widgets)
+if(NOT WIN32)
+    # Linux: the GlobalShortcuts portal on Wayland (globalhotkeys_posix.cpp).
+    find_package(Qt6 REQUIRED COMPONENTS DBus)
+endif()
 # The policy level is the Qt in use, not the floor. Passing a version lower than
 # the installed Qt quietly changes what qt_add_qml_module does: with 6.11 present
 # and REQUIRES 6.4, the module's types stop registering and every QML test fails
@@ -28,8 +32,6 @@ if(WIN32)
     set(ISOTONE_UI_BACKEND_PLATFORM
         backend/devicelink.cpp
         backend/devicelink.h
-        backend/speaker_setup.cpp
-        backend/speaker_setup.h
         backend/test_tone.cpp
         backend/test_tone.h
         # Devices work package.
@@ -45,22 +47,28 @@ if(WIN32)
 else()
     # devicelink_posix is where edits go on Linux: the daemon's region in place of
     # the APO's mapping, and the daemon's ring in place of the loopback capture.
-    # Still to be written: PipeWire in place of the device APIs, XDG autostart in
-    # place of the Run key, and the tones.
+    # PipeWire's registry stands in for the device APIs, XDG autostart for the
+    # Run key, and a PipeWire stream into Isotone's sink for the tones.
     set(ISOTONE_UI_BACKEND_PLATFORM
         backend/devicelink.h
         backend/devicelink_posix.cpp
         backend/autostart_xdg.h
         backend/autostart_xdg.cpp
+        # Which sink the daemon feeds, and the format it runs at.
+        backend/daemon_region.h
+        backend/daemon_region.cpp
     )
     set(ISOTONE_UI_BACKEND_PLATFORM_LIBS isotone_transport_posix)
     # Enumerating outputs needs PipeWire itself, which the top-level list file
     # has already looked for. Without it the backend still builds, just without
     # a way to see the machine's sinks.
     if(PIPEWIRE_FOUND)
+        # The tones play into Isotone's virtual sink through PipeWire.
         list(APPEND ISOTONE_UI_BACKEND_PLATFORM
              backend/pipewire_outputs.h
-             backend/pipewire_outputs.cpp)
+             backend/pipewire_outputs.cpp
+             backend/test_tone.h
+             backend/test_tone_posix.cpp)
         list(APPEND ISOTONE_UI_BACKEND_PLATFORM_LIBS PkgConfig::PIPEWIRE)
     endif()
 endif()
@@ -73,6 +81,9 @@ add_library(isotone_ui_backend STATIC
     backend/spectrum.h
     backend/typed_value.cpp
     backend/typed_value.h
+    # Surround; saves through the platform's persisted state.
+    backend/speaker_setup.cpp
+    backend/speaker_setup.h
     # Surround
     backend/pink_noise.cpp
     backend/pink_noise.h
@@ -90,9 +101,6 @@ if(WIN32)
     target_link_libraries(isotone_ui_backend PRIVATE version)
 endif()
 
-# The Qt layer is still Windows-only: its models reach the device APIs, the
-# devicetool and the compat writer directly. The backend above is what builds on
-# both today; porting these is the next step.
 if(NOT WIN32)
     # What the Linux backend can be held to without a Qt layer or a daemon: the
     # test creates the sink's region and writes its ring the way a daemon does.
@@ -108,7 +116,39 @@ if(NOT WIN32)
                                    ${PROJECT_SOURCE_DIR}/core/tests/third_party)
         add_test(NAME ui_backend_posix_tests COMMAND ui_backend_posix_tests)
     endif()
-    return()
+    # The Qt layer lists outputs and plays its tones through PipeWire; without
+    # it there is no Linux app to build.
+    if(NOT PIPEWIRE_FOUND)
+        message(STATUS "isotone UI: libpipewire-0.3 not found, only the backend is built")
+        return()
+    endif()
+endif()
+
+# The Qt layer's platform half. Linux has one engine, the daemon, and nothing to
+# install: Devices lists sinks, Devicetool only starts the daemon, and global
+# hotkeys are X11 grabs or the GlobalShortcuts portal.
+if(WIN32)
+    set(ISOTONE_UI_PLATFORM
+        # Devices work package.
+        src/devicesmodel.cpp
+        src/devicestatus.cpp
+        src/devicestatus.h
+        src/devicetoolcontroller.cpp
+        src/devicetoolcontroller.h
+        src/devicetoolrunner.cpp
+        src/devicetoolrunner.h
+        src/equalizerapoconfig.cpp
+        src/equalizerapoconfig.h
+        # Settings
+        src/globalhotkeys.cpp
+    )
+else()
+    set(ISOTONE_UI_PLATFORM
+        src/devicesmodel_posix.cpp
+        src/devicetool_posix.cpp
+        src/devicetool_posix.h
+        src/globalhotkeys_posix.cpp
+    )
 endif()
 
 qt_add_library(isotone_ui STATIC
@@ -127,6 +167,7 @@ qt_add_library(isotone_ui STATIC
     src/outputs.h
     src/presets.cpp
     src/presets.h
+    src/qmlsingleton.h
     src/responsegraph.cpp
     src/responsegraph.h
     # Surround
@@ -142,22 +183,12 @@ qt_add_library(isotone_ui STATIC
     src/curvepreview.cpp
     src/curvepreview.h
     # Devices work package.
-    src/devicesmodel.cpp
     src/devicesmodel.h
-    src/devicestatus.cpp
-    src/devicestatus.h
-    src/devicetoolcontroller.cpp
-    src/devicetoolcontroller.h
-    src/devicetoolrunner.cpp
-    src/devicetoolrunner.h
-    src/equalizerapoconfig.cpp
-    src/equalizerapoconfig.h
     # Settings
     src/about.cpp
     src/about.h
     src/bandkeys.cpp
     src/bandkeys.h
-    src/globalhotkeys.cpp
     src/globalhotkeys.h
     src/logomark.cpp
     src/logomark.h
@@ -171,6 +202,7 @@ qt_add_library(isotone_ui STATIC
     src/startup.h
     src/traymenu.cpp
     src/traymenu.h
+    ${ISOTONE_UI_PLATFORM}
 )
 # Settings, About: the version, defined once in project().
 target_compile_definitions(isotone_ui PRIVATE ISOTONE_VERSION="${PROJECT_VERSION}")
@@ -182,6 +214,11 @@ set_source_files_properties(qml/GeneralSettings.qml PROPERTIES QT_QML_SINGLETON_
 
 qt_add_qml_module(isotone_ui
     URI Isotone
+    # Qt 6.4 requires it; 6.11 made it optional.
+    VERSION 1.0
+    # 6.5 made /qt/qml the default (QTP0001); 6.4 puts the module at /, and the
+    # fonts and Main.qml are loaded by these paths.
+    RESOURCE_PREFIX /qt/qml
     QML_FILES
         qml/Main.qml
         qml/Theme.qml
@@ -262,24 +299,31 @@ qt_add_qml_module(isotone_ui
 )
 
 target_include_directories(isotone_ui PUBLIC src)
-# C4702 (unreachable code) is reported on lines of Qt's qmetatype.h, qvariant.h
-# and qjsengine.h as their templates are instantiated. It comes from code
-# generation, which /external:W0 does not cover.
-target_compile_options(isotone_ui PUBLIC /wd4702)
 target_link_libraries(isotone_ui PUBLIC Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Widgets isotone_ui_backend)
-# Devices: the elevated devicetool session, and the devicetool this build makes,
-# found when isotone.exe has none beside it.
-target_link_libraries(isotone_ui PUBLIC isotone_devicetool_session)
-target_compile_definitions(isotone_ui PRIVATE ISOTONE_DEVICETOOL_BUILD_PATH="$<TARGET_FILE:isotone-devicetool>")
-add_dependencies(isotone_ui isotone-devicetool)
 # Settings: the single instance's local socket.
 target_link_libraries(isotone_ui PUBLIC Qt6::Network)
+if(WIN32)
+    # C4702 (unreachable code) is reported on lines of Qt's qmetatype.h, qvariant.h
+    # and qjsengine.h as their templates are instantiated. It comes from code
+    # generation, which /external:W0 does not cover.
+    target_compile_options(isotone_ui PUBLIC /wd4702)
+    # Devices: the elevated devicetool session, and the devicetool this build makes,
+    # found when isotone.exe has none beside it.
+    target_link_libraries(isotone_ui PUBLIC isotone_devicetool_session)
+    target_compile_definitions(isotone_ui PRIVATE ISOTONE_DEVICETOOL_BUILD_PATH="$<TARGET_FILE:isotone-devicetool>")
+    add_dependencies(isotone_ui isotone-devicetool)
 
-# res/isotone.rc: the exe's icon.
-qt_add_executable(isotone WIN32 src/main.cpp res/isotone.rc)
+    # res/isotone.rc: the exe's icon.
+    qt_add_executable(isotone WIN32 src/main.cpp res/isotone.rc)
+else()
+    # Global hotkeys: X11 key grabs, and the portal over D-Bus.
+    find_package(X11 REQUIRED)
+    target_link_libraries(isotone_ui PUBLIC Qt6::DBus X11::X11 X11::xcb)
+    qt_add_executable(isotone src/main.cpp)
+endif()
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
-if(ISOTONE_BUILD_TESTS)
+if(ISOTONE_BUILD_TESTS AND WIN32)
     add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
                    tests/test_speaker_setup.cpp tests/test_config_attach.cpp tests/test_settings_backend.cpp
                    tests/test_compat_retry.cpp tests/test_sine_tone.cpp)

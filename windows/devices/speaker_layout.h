@@ -75,37 +75,17 @@
 #include <vector>
 
 #include "devices.h"
+#include "isotone/speaker_layouts.h"
 
 namespace isotone::devices {
 
-enum class SpeakerLayout { stereo, two_point_one, five_point_one, seven_point_one };
-
-struct SpeakerLayoutSpec {
-    SpeakerLayout layout;
-    uint16_t channels;
-    uint32_t mask;        // ksmedia.h KSAUDIO_SPEAKER_*
-    const char* name;     // "stereo", "2.1", "5.1", "7.1"
-};
-
-// In picker order; kSpeakerLayouts[i].layout == SpeakerLayout(i).
-//   stereo  2  0x3    KSAUDIO_SPEAKER_STEREO            FL FR
-//   2.1     3  0xB    KSAUDIO_SPEAKER_2POINT1           FL FR LFE
-//   5.1     6  0x60F  KSAUDIO_SPEAKER_5POINT1_SURROUND  FL FR FC LFE SL SR
-//   7.1     8  0x63F  KSAUDIO_SPEAKER_7POINT1_SURROUND  FL FR FC LFE BL BR SL SR
-// 5.1 and 7.1 are the masks isotone::default_speaker_mask gives 6 and 8
-// channels. It gives 3 channels no mask, so 2.1 exists only with its mask.
-inline constexpr SpeakerLayoutSpec kSpeakerLayouts[] = {
-    {SpeakerLayout::stereo, 2, 0x3, "stereo"},
-    {SpeakerLayout::two_point_one, 3, 0xB, "2.1"},
-    {SpeakerLayout::five_point_one, 6, 0x60F, "5.1"},
-    {SpeakerLayout::seven_point_one, 8, 0x63F, "7.1"},
-};
-
-// Null for a value outside the enum.
-const SpeakerLayoutSpec* speaker_layout_spec(SpeakerLayout layout);
-
-// The spec's name, case-sensitive. False for anything else.
-bool parse_speaker_layout(std::string_view name, SpeakerLayout* out);
+// The table and its lookups are portable (isotone/speaker_layouts.h): the UI
+// names layouts with them on Linux too.
+using isotone::kSpeakerLayouts;
+using isotone::parse_speaker_layout;
+using isotone::speaker_layout_spec;
+using isotone::SpeakerLayout;
+using isotone::SpeakerLayoutSpec;
 
 // The layout whose channel count and mask the format has. False when it has
 // none of them, or is not present. A defaulted mask counts (a 2-channel format

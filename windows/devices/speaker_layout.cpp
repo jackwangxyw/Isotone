@@ -222,23 +222,6 @@ HRESULT prepare(const std::wstring& endpoint, SpeakerLayout layout, LayoutChange
 
 }  // namespace
 
-const SpeakerLayoutSpec* speaker_layout_spec(SpeakerLayout layout) {
-    for (const SpeakerLayoutSpec& spec : kSpeakerLayouts) {
-        if (spec.layout == layout) return &spec;
-    }
-    return nullptr;
-}
-
-bool parse_speaker_layout(std::string_view name, SpeakerLayout* out) {
-    for (const SpeakerLayoutSpec& spec : kSpeakerLayouts) {
-        if (name == spec.name) {
-            *out = spec.layout;
-            return true;
-        }
-    }
-    return false;
-}
-
 bool current_speaker_layout(const DeviceFormat& format, SpeakerLayout* out) {
     if (!format.present) return false;
     for (const SpeakerLayoutSpec& spec : kSpeakerLayouts) {

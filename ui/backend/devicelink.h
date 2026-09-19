@@ -53,6 +53,10 @@ namespace isotone::ui {
 // ParamBlock and audio ring, so everything above this layer is unchanged.
 enum class Backend { none, native, equalizer_apo, pipewire };
 
+// An engine behind a shared ParamBlock region that starts from a saved state
+// file: IsoAPO, and the Linux daemon. The region holds kParamMaxBands.
+inline bool uses_region(Backend backend) { return backend == Backend::native || backend == Backend::pipewire; }
+
 // A platform error code, 0 for success: a Win32 code on Windows, an errno on
 // Linux. Callers above this layer only ever compare it with kLinkOk or show it.
 using LinkError = uint32_t;

@@ -53,7 +53,12 @@ Item {
             required property string modelData
             width: 24
             height: 24
-            preferredRendererType: Shape.CurveRenderer
+            // Shape.CurveRenderer (Qt 6.6) where there is one; Qt 6.4, as Linux distributions
+            // ship it, has only the geometry renderer, smoothed here by multisampling.
+            Component.onCompleted: {
+                if ("preferredRendererType" in this) preferredRendererType = Shape.CurveRenderer
+                else { layer.samples = 4; layer.enabled = true }
+            }
             transform: Scale { xScale: root.size / 24; yScale: root.size / 24 }
             ShapePath {
                 strokeColor: root.colour

@@ -468,10 +468,10 @@ TEST_CASE("changing the layout calls the layout setter for the output, with test
     EqSession session;
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("layout.json")));
-    std::wstring called_guid;
+    std::string called_guid;
     int calls = 0;
-    devices::SpeakerLayout called_layout = devices::SpeakerLayout::stereo;
-    speakers.setLayoutSetter([&](const std::wstring& guid, devices::SpeakerLayout layout) {
+    isotone::SpeakerLayout called_layout = isotone::SpeakerLayout::stereo;
+    speakers.setLayoutSetter([&](const std::string& guid, isotone::SpeakerLayout layout) -> int {
         ++calls;
         called_guid = guid;
         called_layout = layout;
@@ -487,8 +487,8 @@ TEST_CASE("changing the layout calls the layout setter for the output, with test
     speakers.setTestTones(true);
     CHECK(speakers.setLayout(QStringLiteral("5.1")) == S_OK);
     CHECK(calls == 1);
-    CHECK(called_guid == L"{8f4d2a10-0000-4000-8000-00000000cafe}");
-    CHECK(called_layout == devices::SpeakerLayout::five_point_one);
+    CHECK(called_guid == "{8f4d2a10-0000-4000-8000-00000000cafe}");
+    CHECK(called_layout == isotone::SpeakerLayout::five_point_one);
     CHECK_FALSE(speakers.testTones());
     CHECK(speakers.setLayout(QStringLiteral("9.1")) == E_INVALIDARG);
     CHECK(calls == 1);

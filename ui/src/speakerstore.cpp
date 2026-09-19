@@ -24,14 +24,14 @@ QJsonObject read_file(const QString& path) {
 SpeakerStore::SpeakerStore(QString path)
     : path_(path.isEmpty() ? QDir(AppPaths::dataDir()).filePath(QStringLiteral("speakers.json")) : std::move(path)) {}
 
-QJsonObject SpeakerStore::output(const std::wstring& guid) const {
-    return read_file(path_).value(QStringLiteral("outputs")).toObject().value(QString::fromStdWString(guid)).toObject();
+QJsonObject SpeakerStore::output(const std::string& guid) const {
+    return read_file(path_).value(QStringLiteral("outputs")).toObject().value(QString::fromStdString(guid)).toObject();
 }
 
-bool SpeakerStore::setOutput(const std::wstring& guid, const QJsonObject& value) {
+bool SpeakerStore::setOutput(const std::string& guid, const QJsonObject& value) {
     QJsonObject root = read_file(path_);
     QJsonObject outputs = root.value(QStringLiteral("outputs")).toObject();
-    outputs.insert(QString::fromStdWString(guid), value);
+    outputs.insert(QString::fromStdString(guid), value);
     root.insert(QStringLiteral("outputs"), outputs);
     QSaveFile file(path_);
     if (!file.open(QIODevice::WriteOnly)) return false;
@@ -39,7 +39,7 @@ bool SpeakerStore::setOutput(const std::wstring& guid, const QJsonObject& value)
     return file.commit();
 }
 
-std::vector<isotone::ui::SpeakerGroup> SpeakerStore::groups(const std::wstring& guid) const {
+std::vector<isotone::ui::SpeakerGroup> SpeakerStore::groups(const std::string& guid) const {
     std::vector<isotone::ui::SpeakerGroup> out;
     for (const QJsonValue& g : output(guid).value(QStringLiteral("groups")).toArray()) {
         isotone::ui::SpeakerGroup group;
@@ -51,7 +51,7 @@ std::vector<isotone::ui::SpeakerGroup> SpeakerStore::groups(const std::wstring& 
     return out;
 }
 
-bool SpeakerStore::setGroups(const std::wstring& guid, const std::vector<isotone::ui::SpeakerGroup>& groups) {
+bool SpeakerStore::setGroups(const std::string& guid, const std::vector<isotone::ui::SpeakerGroup>& groups) {
     QJsonArray array;
     for (const isotone::ui::SpeakerGroup& g : groups) {
         QJsonArray codes;
@@ -63,12 +63,12 @@ bool SpeakerStore::setGroups(const std::wstring& guid, const std::vector<isotone
     return setOutput(guid, o);
 }
 
-double SpeakerStore::farthest(const std::wstring& guid) const {
+double SpeakerStore::farthest(const std::string& guid) const {
     const QJsonValue v = output(guid).value(QStringLiteral("farthestM"));
     return v.isDouble() ? v.toDouble() : isotone::ui::kDefaultFarthestM;
 }
 
-bool SpeakerStore::setFarthest(const std::wstring& guid, double metres) {
+bool SpeakerStore::setFarthest(const std::string& guid, double metres) {
     QJsonObject o = output(guid);
     o.insert(QStringLiteral("farthestM"), metres);
     return setOutput(guid, o);

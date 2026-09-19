@@ -38,19 +38,26 @@
 
 #include <QProcess>
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
+#endif
 
 #include "apppaths.h"
 #include "devicesmodel.h"
+#if defined(_WIN32)
 #include "devicetoolcontroller.h"
 #include "equalizerapoconfig.h"
+#else
+#include "devicetool_posix.h"
+#endif
 #include "eqsession.h"
 #include "outputs.h"
 // Settings
 #include "globalhotkeys.h"
 #include "logomark.h"
 #include "presets.h"
+#include "qmlsingleton.h"
 #include "shortcutregistry.h"
 #include "singleinstance.h"
 #include "traymenu.h"
@@ -109,6 +116,7 @@ int main(int argc, char* argv[]) {
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
     if (parser.isSet(compat_dir)) AppPaths::setCompatConfigDir(parser.value(compat_dir));
+#if defined(_WIN32)
     if (parser.isSet(fake_devicetool)) qputenv("ISOTONE_FAKE_DEVICETOOL", parser.value(fake_devicetool).toLocal8Bit());
     // The flag or the environment: the controller and Devices read the environment.
     const bool faked = fakeDevicetool();
@@ -116,6 +124,13 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "%s\n", qPrintable(refusal));
         return 1;
     }
+#else
+    // Linux has no devicetool to script.
+    if (parser.isSet(fake_devicetool)) {
+        std::fprintf(stderr, "--fake-devicetool is Windows only\n");
+        return 1;
+    }
+#endif
 
     // Settings: one instance; the tray keeps the app running with the window closed.
     const bool checking = parser.isSet(screenshot);
@@ -139,19 +154,31 @@ int main(int argc, char* argv[]) {
     }
     QFont font(QStringLiteral("Instrument Sans"));
     font.setPixelSize(13);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     font.setFeature(QFont::Tag("tnum"), 1);
+#endif
     QGuiApplication::setFont(font);
 
     QQmlApplicationEngine engine;
+#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
+    // 6.5 made qrc:/qt/qml a default import path. Without it 6.4 never reads the
+    // module's qmldir, and the singletons (Theme, UiState) are plain types.
+    engine.addImportPath(QStringLiteral("qrc:/qt/qml"));
+#endif
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
                      Qt::QueuedConnection);
     if (start_hidden) engine.setInitialProperties({{QStringLiteral("visible"), false}});
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     engine.loadFromModule("Isotone", "Main");
+#else
+    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/Isotone/qml/Main.qml")));
+#endif
     if (engine.rootObjects().isEmpty()) return 1;
 
+#if defined(_WIN32)
     // Restart Windows and Equalizer APO's uninstaller, only from their buttons in
     // the app itself; with a scripted devicetool they only say so.
-    if (auto* devicetool = engine.singletonInstance<DevicetoolController*>("Isotone", "Devicetool")) {
+    if (auto* devicetool = isotoneSingleton<DevicetoolController>(&engine, "Devicetool")) {
         QObject::connect(devicetool, &DevicetoolController::restartWindowsRequested, &app, [faked] {
             if (faked) {
                 std::fprintf(stdout, "restart Windows requested (not with --fake-devicetool)\n");
@@ -160,7 +187,7 @@ int main(int argc, char* argv[]) {
             QProcess::startDetached(QStringLiteral("shutdown.exe"), {QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0")});
         });
     }
-    if (auto* devices = engine.singletonInstance<DevicesModel*>("Isotone", "Devices")) {
+    if (auto* devices = isotoneSingleton<DevicesModel>(&engine, "Devices")) {
         QObject::connect(devices, &DevicesModel::equalizerApoUninstallerRequested, &app, [faked](const QString& command) {
             QStringList parts = QProcess::splitCommand(command);
             if (faked || parts.isEmpty()) {
@@ -173,10 +200,11 @@ int main(int argc, char* argv[]) {
                           nullptr, SW_SHOWNORMAL);
         });
     }
+#endif
     if (parser.isSet(first_run)) QMetaObject::invokeMethod(engine.rootObjects().constFirst(), "showFirstRun");
     if (parser.isSet(view)) {
         const QStringList parts = parser.value(view).split(QLatin1Char('/'));
-        if (auto* ui = engine.singletonInstance<QObject*>("Isotone", "UiState")) {
+        if (auto* ui = isotoneSingleton<QObject>(&engine, "UiState")) {
             ui->setProperty("view", parts[0]);
             if (parts.size() > 1) ui->setProperty("settingsTab", parts[1]);
         }
@@ -196,12 +224,12 @@ int main(int argc, char* argv[]) {
         root_window->raise();
         root_window->requestActivate();
     };
-    auto* shortcuts = engine.singletonInstance<ShortcutRegistry*>("Isotone", "ShortcutRegistry");
+    auto* shortcuts = isotoneSingleton<ShortcutRegistry>(&engine, "ShortcutRegistry");
     std::unique_ptr<GlobalHotkeys> hotkeys;
     if (!checking) hotkeys = std::make_unique<GlobalHotkeys>(shortcuts);
-    TrayMenu tray_menu(engine.singletonInstance<EqSession*>("Isotone", "EqSession"),
-                       engine.singletonInstance<Outputs*>("Isotone", "Outputs"),
-                       engine.singletonInstance<Presets*>("Isotone", "Presets"), shortcuts);
+    TrayMenu tray_menu(isotoneSingleton<EqSession>(&engine, "EqSession"),
+                       isotoneSingleton<Outputs>(&engine, "Outputs"),
+                       isotoneSingleton<Presets>(&engine, "Presets"), shortcuts);
     QSystemTrayIcon tray_icon(logo_mark_icon());
     tray_menu.attach(&tray_icon);
     if (!checking) tray_icon.show();
@@ -211,7 +239,7 @@ int main(int argc, char* argv[]) {
     QObject::connect(&instance, &SingleInstance::showRequested, &app, show_window);
 
     if (parser.isSet(output)) {
-        auto* outputs = engine.singletonInstance<Outputs*>("Isotone", "Outputs");
+        auto* outputs = isotoneSingleton<Outputs>(&engine, "Outputs");
         if (!outputs || !outputs->selectGuid(parser.value(output).toStdString())) {
             std::fprintf(stderr, "%s is not a working output\n", qPrintable(parser.value(output)));
             return 1;
@@ -219,7 +247,7 @@ int main(int argc, char* argv[]) {
     }
     for (const QString& spec : parser.values(add_band)) {
         const QStringList parts = spec.split(QLatin1Char(','));
-        auto* session = engine.singletonInstance<EqSession*>("Isotone", "EqSession");
+        auto* session = isotoneSingleton<EqSession>(&engine, "EqSession");
         if (parts.size() != 2 || !session) return 1;
         session->addBand(parts[0].toDouble(), parts[1].toDouble());
         std::fprintf(stdout, "added a band at %s Hz, %s dB\n", qPrintable(parts[0]), qPrintable(parts[1]));

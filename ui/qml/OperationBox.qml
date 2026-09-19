@@ -9,11 +9,11 @@ Rectangle {
     readonly property string phase: Devicetool.phase
     readonly property string kind: Devicetool.kind
     readonly property var verbs: ({ install: "Installing", repair: "Repairing", uninstall: "Uninstalling",
-                                    replace: "Replacing Equalizer APO", test: "Testing" })
+                                    replace: "Replacing Equalizer APO", test: "Testing", start: "Starting" })
     readonly property var dones: ({ install: "Installed", repair: "Repaired", uninstall: "Uninstalled",
-                                    replace: "IsoAPO installed", test: "Test passed" })
+                                    replace: "IsoAPO installed", test: "Test passed", start: "Started" })
     readonly property var failures: ({ install: "Install failed", repair: "Repair failed", uninstall: "Uninstall failed",
-                                       replace: "Replace failed", test: "Test failed" })
+                                       replace: "Replace failed", test: "Test failed", start: "Start failed" })
 
     readonly property string icon: phase === "uac" || phase === "declined" ? "shield"
                                  : phase === "done" ? "check"
