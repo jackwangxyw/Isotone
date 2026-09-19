@@ -301,6 +301,8 @@ if(WIN32)
 
     # res/isotone.rc: the exe's icon.
     qt_add_executable(isotone WIN32 src/main.cpp res/isotone.rc)
+    # And the version Explorer's properties page and Settings, About show.
+    isotone_version_resource(isotone "Isotone")
 else()
     # Global hotkeys: X11 key grabs, and the portal over D-Bus.
     find_package(X11 REQUIRED)

@@ -4139,6 +4139,91 @@ restarted, and a band added, the band reached the new daemon's region.
 
 ---
 
+---
+
+# Stage 6 begins: the bug pass before packaging (2026-09-19)
+
+The owner's order: fix the bugs and explore for more, then package (2026-09-19).
+Versions are `x.y.z`, major for an overhaul, minor for a feature, patch for
+fixes; `0` is the beta, so the first release is **0.1.0**, which is what
+`project(VERSION)` already said. GitHub releases, when the owner says.
+
+Baselines first, all green before anything changed: Windows ctest 7/7, the APO
+self test, the transport check, `gen_reference.py --check` (largest difference
+0.000e+00), `ui_tests` 50, `ui_model_tests` 125, `ui_qml_tests` 290; Linux ctest
+7/7 and all three stages of `ci-audio.sh`.
+
+## A stream another program claimed was lost for the rest of the run
+
+The one left open on 2026-09-19. EasyEffects moves a stream by writing
+`target.object` into the default metadata for that node, and clears it again
+when it quits. The daemon saw the claim, erased the stream from `moved_streams`
+so its own exit would not undo someone else's choice, and then never looked at
+that stream again. EasyEffects quitting gave the stream back to the default
+sink, not to Isotone.
+
+`on_metadata_property` now takes the stream back when the target is cleared and
+the node is one it would have captured. Reproduced first, in the rig rather than
+by reading: `reclaim` in `linux/daemon/measure.py` plays a stream, waits for
+Isotone to capture it, claims it away to the 5.1 sink with `pw-metadata`, clears
+the claim, and requires it to come back. Before the fix: `claimed away: yes,
+back: NO`. After: both yes, with every other figure in the suite unchanged to
+the last decimal.
+
+**A guard that could never fire, removed rather than kept.** The first version
+of the fix carried a `releasing` flag, on the reasoning that `release_streams`
+clears these same targets on the way out and runs the loop (`roundtrip`) to see
+the clears land, so it would re-capture everything it had just released.
+Mutating the flag out did not break the suite, which is the point at which a
+guard has to be justified or deleted. A `fprintf` in the branch settled it: with
+another program's claim the handler fires twice (the claim, then the clear), and
+during `release_streams` it fires **zero** times. PipeWire does not deliver a
+metadata change back to the client that made it, so only another program's clear
+ever reaches the handler. The flag was dead code and is gone; the reason is in
+the comment where the hazard looked real.
+
+The measurement that could not see it either: `released()` only checked which
+sink the stream was linked to. A daemon that re-claimed on the way out still
+leaves the stream falling back to the default, because its own sink has gone, so
+the link cannot tell the two apart. It now also requires the `target.object`
+entry to be gone from the metadata, which is what `release_streams` is for.
+
+## The CRT under audiodg, settled
+
+`windows/apo/CMakeLists.txt` had deferred this to stage 6. Measured rather than
+assumed:
+
+| | imports | size |
+|---|---|---|
+| `/MD`, as built until now | `MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, 7 `api-ms-win-crt-*` | 996,352 bytes |
+| `/MT` | `ole32`, `SHELL32`, `ADVAPI32`, `KERNEL32` | 2,379,264 bytes |
+
+`/MT` it is. audiodg loads the APO as LocalService, and a DLL that needs the
+redistributable there fails in the process that carries all system audio; 1.4 MB
+in an installer is not a reason to keep that failure available. `isotone_core_mt`
+and `isotone_transport_mt` are second targets rather than a property on the
+first, because `/MT` and `/MD` static libraries cannot both be linked into one
+binary and the UI links Qt, which is `/MD`. Nothing crosses a heap boundary
+between them: everything the APO hands out is COM-allocated.
+
+`isotone-apo-selftest` passes unchanged with the `/MD` host loading the `/MT`
+DLL, which is the same mismatch audiodg has, and is the evidence this is safe
+rather than the reasoning.
+
+## Every shipped Windows binary now carries its version
+
+`IsoAPO.dll` had no version resource at all, so Settings, About showed the
+engine's version as blank: `diagnostics.h` reads the registered DLL's file
+version, and there was none to read. `windows/version.rc.in` and
+`isotone_version_resource()` in `windows/version.cmake` give one to `IsoAPO.dll`,
+`isotone.exe`, `isotone-devicetool.exe` and `isotone-compat.exe`, configured from
+`project(VERSION)` so the number lives in one place. Test executables get none:
+nothing reads their version.
+
+The self test checks it, and the mutation check confirms it catches the old
+state: with `isotone_version_resource` commented out, `FileVersion = '',
+expected '0.1.0'` and two failures.
+
 # Where things stand (2026-09-19)
 
 ## Done
@@ -4232,21 +4317,25 @@ short windows (Settings, General, Short window), always on top, the graph repain
 only the spectrum on each frame (the maximized lag), the frequency grid's three
 weights, and the placeholder icon. **A/B is set aside for later** (owner): plan 8.4
 and the `EqByEarAB` board are its design if it is wanted.
-**Stage 6** (packaging) is not started, and is next: the owner starts it in a
-session of its own (2026-09-19). A Windows installer first, then a .deb and
-Flatpak. Launch at sign-in on Windows waits on it: what is left to see is
-Windows running the Run value at sign-in, and that wants the installed app
-rather than a build directory (owner, 2026-09-19).
+**Stage 6** (packaging) is under way (2026-09-19). The owner's order is to fix
+the bugs and explore for more first, then package: a Windows installer, then a
+.deb, then Flatpak. Versions are `x.y.z` and the first release is **0.1.0**.
+Done so far: the claimed-stream bug below, the CRT under audiodg settled at
+`/MT`, and a version resource on every shipped Windows binary. Launch at sign-in
+on Windows still waits on the installer: what is left to see is Windows running
+the Run value at sign-in, and that wants the installed app rather than a build
+directory (owner, 2026-09-19).
 
 Left for Linux after packaging: GNOME, KDE and Wayland, one VM each
 (docs/notes/linux-vm-setup.md). Two smaller things, neither started:
 
-- A stream another program has aimed elsewhere is left alone, and nothing looks
-  at it again when that program lets go: EasyEffects quit and Isotone still did
-  not take the stream back (2026-09-19).
+- ~~A stream another program has aimed elsewhere is left alone, and nothing
+  looks at it again when that program lets go.~~ Fixed in stage 6
+  (2026-09-19); the `reclaim` case in `linux/daemon/measure.py` covers it.
 - Two programs that both capture every stream cannot share a machine. Isotone
   has no setting for its capture, where EasyEffects has one, a per-application
-  blocklist and a per-output one.
+  blocklist and a per-output one. Still open, and a feature rather than a bug:
+  0.2.0 material, to decide with the owner.
 
 ## State of the owner's machine
 

@@ -7,9 +7,12 @@ function(isoapo_dll target)
         IsoAPO.def
     )
 
+    # The CRT statically (see the note at the end of this file).
+    set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
     target_link_libraries(${target} PRIVATE
-        isotone_core
-        isotone_transport
+        isotone_core_mt
+        isotone_transport_mt
         audiobaseprocessingobject
         audiomediatypecrt        # CreateAudioMediaTypeFromUncompressedAudioFormat
         legacy_stdio_definitions # audiobaseprocessingobject.lib wants _vsnwprintf
@@ -21,6 +24,9 @@ function(isoapo_dll target)
     )
 
     set_target_properties(${target} PROPERTIES OUTPUT_NAME "${target}" PREFIX "")
+
+    # Settings, About reads this DLL's file version to show the engine's.
+    isotone_version_resource(${target} "Isotone audio processing object")
 
     # CRegAPOProperties<1> in the Windows SDK declares a trailing zero-sized array,
     # which MSVC warns about (C4815). SDK header, nothing for us to fix.
@@ -52,12 +58,12 @@ isoapo_dll(IsoAPO)
 isoapo_dll(IsoAPO-selftest)
 target_compile_definitions(IsoAPO-selftest PRIVATE ISOAPO_SELFTEST_LOCAL_NAMESPACE)
 
-# Upstream links the CRT statically, which is the safer choice for a DLL loaded
-# into audiodg.exe. Deferred: it has to apply to isotone_core as well or the two
-# disagree about which CRT owns lround and copysign, so it is a packaging-time
-# decision (stage 6) rather than something to half-apply here. A real Equalizer
-# APO install already ships msvcp140.dll alongside its DLL, so the dynamic CRT
-# demonstrably works in that process.
+# The CRT is linked statically, through isotone_core_mt and
+# isotone_transport_mt (core/CMakeLists.txt says why). Measured 2026-09-19: with
+# /MD the DLL imported MSVCP140, VCRUNTIME140 and VCRUNTIME140_1; with /MT it
+# imports only ole32, shell32, advapi32 and kernel32, and isotone-apo-selftest
+# passes unchanged with a /MD host loading the /MT DLL, which is the mismatch
+# audiodg has.
 
 # Offline host for the APO: loads the DLL, drives the COM lifecycle, opens the
 # shared region as the UI would, and measures the audio, without registering
@@ -72,8 +78,10 @@ target_link_libraries(isotone-apo-selftest PRIVATE
     oleaut32
     uuid
     advapi32
+    version          # the version resource check
 )
-add_dependencies(isotone-apo-selftest IsoAPO-selftest)
+target_compile_definitions(isotone-apo-selftest PRIVATE ISOTONE_VERSION="${PROJECT_VERSION}")
+add_dependencies(isotone-apo-selftest IsoAPO-selftest IsoAPO)
 if(MSVC)
     target_link_options(isotone-apo-selftest PRIVATE /NODEFAULTLIB:atls.lib)
 endif()

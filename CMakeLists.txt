@@ -42,6 +42,11 @@ else()
     endif()
 endif()
 
+# isotone_version_resource(): the VERSIONINFO shipped Windows binaries carry.
+if(WIN32 AND MSVC)
+    include(windows/version.cmake)
+endif()
+
 add_subdirectory(core)
 
 # The Windows hosts need the MSVC toolchain: the APO links SDK libraries that

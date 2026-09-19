@@ -29,6 +29,7 @@
 #include <audiomediatype.h>
 #include <psapi.h>
 #include <sddl.h>
+#include <winver.h>
 
 #include <chrono>
 #include <cmath>
@@ -55,6 +56,27 @@ constexpr UINT32 kChannels = 2;
 constexpr UINT32 kMaxFrames = 1024;
 
 int g_failures = 0;
+
+// The FileVersion in a binary's VERSIONINFO, as Settings, About reads IsoAPO's
+// (ui/backend/diagnostics.cpp). Empty when the binary carries no resource at
+// all, which is what every build before 0.1.0 produced.
+std::string file_version(const std::wstring& path) {
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    if (size == 0) return {};
+    std::vector<BYTE> data(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) return {};
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT length = 0;
+    if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&info), &length) ||
+        info == nullptr || length < sizeof(VS_FIXEDFILEINFO)) {
+        return {};
+    }
+    char text[64] = {};
+    std::snprintf(text, sizeof(text), "%u.%u.%u", HIWORD(info->dwFileVersionMS),
+                  LOWORD(info->dwFileVersionMS), HIWORD(info->dwFileVersionLS));
+    return text;
+}
 
 void check(bool ok, const char* what) {
     std::printf("  %-66s %s\n", what, ok ? "ok" : "FAIL");
@@ -517,6 +539,21 @@ int main(int argc, char** argv) {
     }
 
     std::printf("IsoAPO self test\n");
+
+    // The version resource, because Settings, About shows the engine's version
+    // from it and a DLL built without one reports nothing at all. Both builds
+    // come from isoapo_dll(), so the shipped IsoAPO.dll is checked by name too
+    // when it is beside this one.
+    {
+        const std::string want = ISOTONE_VERSION;
+        const std::string got = file_version(dll);
+        check(got == want, "the DLL under test carries the project version");
+        if (got != want) {
+            std::fprintf(stderr, "  FileVersion = '%s', expected '%s'\n", got.c_str(), want.c_str());
+        }
+        const std::string shipped = file_version(L"IsoAPO.dll");
+        check(shipped == want, "IsoAPO.dll beside it carries the same version");
+    }
 
     HMODULE module = LoadLibraryW(dll.c_str());
     check(module != nullptr, "LoadLibrary IsoAPO-selftest.dll");

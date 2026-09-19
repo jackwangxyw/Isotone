@@ -26,6 +26,8 @@ target_link_libraries(isotone-devicetool PRIVATE
 )
 
 # The UI's side of `serve`: an elevated devicetool for the life of the app.
+isotone_version_resource(isotone-devicetool "Isotone device tool")
+
 add_library(isotone_devicetool_session STATIC session.cpp)
 target_include_directories(isotone_devicetool_session PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(isotone_devicetool_session PRIVATE UNICODE _UNICODE)

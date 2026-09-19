@@ -13,6 +13,7 @@ target_link_libraries(isotone_compat PUBLIC isotone_core PRIVATE advapi32 ole32 
 
 add_executable(isotone-compat main.cpp)
 target_link_libraries(isotone-compat PRIVATE isotone_compat)
+isotone_version_resource(isotone-compat "Isotone Equalizer APO backend")
 
 if(ISOTONE_BUILD_TESTS)
     add_executable(compat_tests tests/test_main.cpp tests/test_compat.cpp)
