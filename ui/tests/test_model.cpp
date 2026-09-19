@@ -8,6 +8,8 @@
 
 #include <QDir>
 #include <QApplication>
+#include <QImage>
+#include <QPainter>
 
 #include <cmath>
 
@@ -281,6 +283,49 @@ TEST_CASE("the graph draws the channel in view, and a handle sits on its band's 
 
     session.setViewChannel(5);
     CHECK(session.viewChannel() == 0);
+}
+
+TEST_CASE("a curve that leaves the plot is not drawn along its edge") {
+    // The owner, 2026-09-19: a high-pass below the bottom of the plot showed as a
+    // flat line along the bottom edge. It leaves through the bottom instead.
+    EqSession session;
+    EqState s;
+    s.bands = {band(1, FilterType::HighPass, 200, 0, 0.707, WidthMode::Q)};
+    session.loadState(&s);
+    ResponseGraph graph;
+    graph.setSession(&session);
+    graph.setSize(QSizeF(1060, 404));
+    // Only the composite's line is drawn, in red.
+    graph.setProperty("accent", QColor(255, 0, 0));
+    graph.setProperty("fillEdgeAlpha", 0.0);
+    graph.setProperty("fillMidAlpha", 0.0);
+    for (const char* name : {"gridMajor", "gridMinor", "zeroLine", "labelColour", "bell", "spectrumEdge", "spectrumFill"})
+        graph.setProperty(name, QColor(0, 0, 0, 0));
+    REQUIRE(graph.compositeAt(30) < -20.0);   // well under the bottom of the plot there
+
+    QImage image(1060, 404, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    graph.paint(&painter);
+    painter.end();
+
+    const double bottom = graph.plotTop() + graph.plotHeight();
+    const int x_from = static_cast<int>(graph.xOf(20)), x_to = static_cast<int>(graph.xOf(40));
+    int on_edge = 0, below = 0, inside = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const QColor c = image.pixelColor(x, y);
+            if (c.alpha() == 0 || c.red() == 0) continue;
+            if (y > bottom + 1) ++below;
+            else if (y >= bottom - 3 && x >= x_from && x <= x_to) ++on_edge;
+            else ++inside;
+        }
+    }
+    CAPTURE(on_edge);
+    CAPTURE(below);
+    REQUIRE(inside > 0);   // the curve was drawn
+    CHECK(on_edge == 0);
+    CHECK(below == 0);
 }
 
 TEST_CASE("an output's layout is named by its channels and speakers") {

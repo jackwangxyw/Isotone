@@ -376,9 +376,20 @@ void ResponseGraph::paint(QPainter* p) {
     }
     if (!session_ || part_ == Grid || part_ == Spectrum) return;
 
+    // The curves are cut at the plot's edges: one that leaves it, a high-pass under
+    // the bottom, goes out of sight there rather than running along the edge
+    // (owner, 2026-09-19). The clamp only keeps a -inf or a huge dB finite, a
+    // plot's height out of sight so the slope at the edge is still the curve's.
+    struct Clip {
+        QPainter* p;
+        ~Clip() { p->restore(); }
+    } clip{p};
+    p->save();
+    p->setClipRect(QRectF(kLeft, kTop, pw, ph));
+
     const isotone::EqState& state = session_->state();
     const auto y_at = [&](const std::vector<double>& db, size_t i) {
-        return std::clamp(yOf(db[i]), kTop - 2.0, kTop + ph + 2.0);
+        return std::clamp(yOf(db[i]), kTop - ph, kTop + 2.0 * ph);
     };
     const auto polyline = [&](const std::vector<double>& db) {
         QPainterPath path;

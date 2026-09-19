@@ -73,6 +73,10 @@ private:
     // The portal's preferred_trigger, as the XDG shortcuts specification writes
     // it: "CTRL+ALT+e". Empty when the keys have no keysym.
     static QString toPortalTrigger(const QString& sequence);
+    // Whether XKB options (comma-separated, as _XKB_RULES_NAMES holds them) make
+    // Alt+Shift switch the keyboard layout. The second of the two pressed is then
+    // taken out of the modifiers, and a binding with both never matches.
+    static bool altShiftSwitchesLayout(const QString& xkbOptions);
     // "x11", "portal", or empty when this session has neither.
     QString mechanism() const { return mechanism_; }
 

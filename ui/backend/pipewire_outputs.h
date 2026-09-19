@@ -30,12 +30,17 @@ struct PipewireSink {
     // node.name: the identity an OutputTarget carries and the shared region is
     // named for. Stable across restarts, unlike the object id.
     std::string name;
-    // node.description: what a person is shown. Falls back to the name.
+    // What a person is shown: sink_display_name().
     std::string description;
     // Isotone's own virtual sink, which is an output to play into but never one
     // to feed: its monitor is the core's input, so targeting it is a loop.
     bool is_isotone = false;
 };
+
+// node.nick ("HDMI 3", "Speaker + Headphones"), else node.description, else
+// node.name. A card's outputs share the start of their descriptions, which is
+// all the sidebar has room for.
+std::string sink_display_name(const char* nick, const char* description, const std::string& name);
 
 class PipewireOutputs {
 public:

@@ -225,6 +225,27 @@ unsigned long keysym_for(Qt::Key key) {
     return 0;
 }
 
+// The XKB options in force, the fifth of the NUL-separated names on the root's
+// _XKB_RULES_NAMES (rules, model, layout, variant, options), as setxkbmap -query
+// reads them. Empty when the server has none.
+QString xkbOptions(xcb_connection_t* c, xcb_window_t root) {
+    static const char kName[] = "_XKB_RULES_NAMES";
+    xcb_intern_atom_reply_t* atom =
+        xcb_intern_atom_reply(c, xcb_intern_atom(c, 1, sizeof(kName) - 1, kName), nullptr);
+    if (atom == nullptr) return {};
+    const xcb_atom_t name = atom->atom;
+    free(atom);
+    if (name == XCB_ATOM_NONE) return {};
+    xcb_get_property_reply_t* reply =
+        xcb_get_property_reply(c, xcb_get_property(c, 0, root, name, XCB_ATOM_STRING, 0, 1024), nullptr);
+    if (reply == nullptr) return {};
+    const QByteArray value(static_cast<const char*>(xcb_get_property_value(reply)),
+                           xcb_get_property_value_length(reply));
+    free(reply);
+    const QList<QByteArray> names = value.split('\0');
+    return names.size() > 4 ? QString::fromLatin1(names[4]) : QString();
+}
+
 }  // namespace
 
 bool GlobalHotkeys::toKeysym(const QString& sequence, unsigned* modifiers, unsigned long* keysym) {
@@ -240,6 +261,16 @@ bool GlobalHotkeys::toKeysym(const QString& sequence, unsigned* modifiers, unsig
     if (m & Qt::ShiftModifier) *modifiers |= ShiftMask;
     if (m & Qt::MetaModifier) *modifiers |= Mod4Mask;
     return true;
+}
+
+bool GlobalHotkeys::altShiftSwitchesLayout(const QString& xkbOptions) {
+    // grp:alt_shift_toggle, grp:lalt_lshift_toggle, grp:ralt_rshift_toggle.
+    for (const QString& option : xkbOptions.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+        const QString o = option.trimmed();
+        if (o.startsWith(QLatin1String("grp:")) && o.contains(QLatin1String("alt")) && o.contains(QLatin1String("shift")))
+            return true;
+    }
+    return false;
 }
 
 QString GlobalHotkeys::toPortalTrigger(const QString& sequence) {
@@ -325,11 +356,17 @@ void GlobalHotkeys::grabX11() {
     xcb_connection_t* c = x11->connection();
     Display* display = x11->display();
     const xcb_window_t root = xcb_setup_roots_iterator(xcb_get_setup(c)).data->root;
+    const bool alt_shift_switches = altShiftSwitchesLayout(xkbOptions(c, root));
     for (const QString& id : registry_->ids(QStringLiteral("app"))) {
         unsigned modifiers = 0;
         unsigned long keysym = 0;
         if (!registry_->isGlobal(id) || !toKeysym(registry_->sequence(id), &modifiers, &keysym)) {
             registry_->setGlobalFailed(id, false);
+            continue;
+        }
+        // The grab would be granted and never match: say so, and leave the keys alone.
+        if (alt_shift_switches && (modifiers & (Mod1Mask | ShiftMask)) == (Mod1Mask | ShiftMask)) {
+            registry_->setGlobalFailed(id, true);
             continue;
         }
         const unsigned keycode = XKeysymToKeycode(display, keysym);

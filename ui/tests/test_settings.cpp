@@ -38,6 +38,7 @@
 
 // Last: Xlib's macros (Bool, Status, None) collide with names in Qt's headers.
 #if !defined(_WIN32)
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #endif
@@ -205,10 +206,14 @@ TEST_CASE("shortcut defaults") {
     CHECK(r.ids(QStringLiteral("app")) == QStringList{"eq", "mute", "nextPreset", "previousPreset", "savePreset", "undo", "redo"});
     CHECK(r.ids(QStringLiteral("band")) == QStringList{"frequency", "gain", "q", "coarse", "delete"});
     CHECK(r.label(QStringLiteral("eq")) == QStringLiteral("EQ on / off"));
-    CHECK(r.sequence(QStringLiteral("eq")) == QStringLiteral("Ctrl+E"));
-    CHECK(r.sequence(QStringLiteral("mute")) == QStringLiteral("Ctrl+M"));
-    CHECK(r.sequence(QStringLiteral("nextPreset")) == QStringLiteral("Ctrl+Right"));
-    CHECK(r.sequence(QStringLiteral("previousPreset")) == QStringLiteral("Ctrl+Left"));
+    // The global ones are combinations nothing else is likely to want, since a
+    // global hotkey takes its keys from every other application (owner,
+    // 2026-09-19). Not Ctrl+Alt+Shift+arrows: GNOME and Cinnamon move a window
+    // to another workspace with them.
+    CHECK(r.sequence(QStringLiteral("eq")) == QStringLiteral("Ctrl+Alt+Shift+E"));
+    CHECK(r.sequence(QStringLiteral("mute")) == QStringLiteral("Ctrl+Alt+Shift+M"));
+    CHECK(r.sequence(QStringLiteral("nextPreset")) == QStringLiteral("Ctrl+Alt+Shift+PgDown"));
+    CHECK(r.sequence(QStringLiteral("previousPreset")) == QStringLiteral("Ctrl+Alt+Shift+PgUp"));
     CHECK(r.sequence(QStringLiteral("savePreset")) == QStringLiteral("Ctrl+S"));
     CHECK(r.sequence(QStringLiteral("undo")) == QStringLiteral("Ctrl+Z"));
     CHECK(r.sequence(QStringLiteral("redo")) == QStringLiteral("Ctrl+Y"));
@@ -229,14 +234,14 @@ TEST_CASE("shortcut defaults") {
     CHECK_FALSE(r.rebindable(QStringLiteral("frequency")));
     CHECK_FALSE(r.rebindable(QStringLiteral("coarse")));
 
-    CHECK(r.keyCaps(QStringLiteral("eq")) == QStringList{"Ctrl", "E"});
-    CHECK(r.keyCaps(QStringLiteral("nextPreset")) == QStringList{"Ctrl", QStringLiteral("→")});
+    CHECK(r.keyCaps(QStringLiteral("eq")) == QStringList{"Ctrl", "Alt", "Shift", "E"});
+    CHECK(r.keyCaps(QStringLiteral("nextPreset")) == QStringList{"Ctrl", "Alt", "Shift", "PgDown"});
     CHECK(r.keyCaps(QStringLiteral("frequency")) == QStringList{QStringLiteral("←"), QStringLiteral("→")});
     CHECK(r.keyCaps(QStringLiteral("gain")) == QStringList{QStringLiteral("↑"), QStringLiteral("↓")});
     CHECK(r.keyCaps(QStringLiteral("q")) == QStringList{"[", "]"});
     CHECK(r.keyCaps(QStringLiteral("coarse")) == QStringList{"Shift"});
     CHECK(r.keyCaps(QStringLiteral("delete")) == QStringList{"Delete"});
-    CHECK(r.nativeText(QStringLiteral("eq")) == QStringLiteral("Ctrl+E"));
+    CHECK(r.nativeText(QStringLiteral("eq")) == QStringLiteral("Ctrl+Alt+Shift+E"));
 }
 
 TEST_CASE("a pressed key becomes a sequence; a modifier alone does not") {
@@ -263,14 +268,14 @@ TEST_CASE("rebinding, conflicts and replacing") {
     // Its own keys are no conflict.
     CHECK(r.conflict(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+K")).isEmpty());
 
-    CHECK(r.conflict(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+M")) == QStringLiteral("mute"));
-    CHECK_FALSE(r.rebind(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+M")));
+    CHECK(r.conflict(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+Alt+Shift+M")) == QStringLiteral("mute"));
+    CHECK_FALSE(r.rebind(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+Alt+Shift+M")));
     CHECK(r.sequence(QStringLiteral("nextPreset")) == QStringLiteral("Ctrl+K"));
-    CHECK(r.sequence(QStringLiteral("mute")) == QStringLiteral("Ctrl+M"));
+    CHECK(r.sequence(QStringLiteral("mute")) == QStringLiteral("Ctrl+Alt+Shift+M"));
 
     // Replace takes the keys; the other action is left without any.
-    CHECK(r.replace(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+M")));
-    CHECK(r.sequence(QStringLiteral("nextPreset")) == QStringLiteral("Ctrl+M"));
+    CHECK(r.replace(QStringLiteral("nextPreset"), QStringLiteral("Ctrl+Alt+Shift+M")));
+    CHECK(r.sequence(QStringLiteral("nextPreset")) == QStringLiteral("Ctrl+Alt+Shift+M"));
     CHECK(r.sequence(QStringLiteral("mute")).isEmpty());
     CHECK(r.keyCaps(QStringLiteral("mute")).isEmpty());
 
@@ -406,6 +411,19 @@ TEST_CASE("a global hotkey's keys for an X grab and for the portal") {
     CHECK(GlobalHotkeys::toPortalTrigger(QStringLiteral("Ctrl+Alt+Shift+F13")) == QStringLiteral("CTRL+ALT+SHIFT+F13"));
     CHECK(GlobalHotkeys::toPortalTrigger(QStringLiteral("Meta+Right")) == QStringLiteral("LOGO+Right"));
     CHECK(GlobalHotkeys::toPortalTrigger(QString()).isEmpty());
+
+    // Alt+Shift as the layout switch takes whichever of the two is pressed second
+    // out of the modifiers, so no binding with both ever matches (the owner's
+    // laptop, 2026-09-19). The options as _XKB_RULES_NAMES holds them.
+    CHECK(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:alt_shift_toggle")));
+    CHECK(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("terminate:ctrl_alt_bksp,grp:alt_shift_toggle")));
+    CHECK(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:lalt_lshift_toggle")));
+    CHECK(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:ralt_rshift_toggle")));
+    CHECK_FALSE(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("terminate:ctrl_alt_bksp")));
+    CHECK_FALSE(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:win_space_toggle")));
+    CHECK_FALSE(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:ctrl_alt_toggle")));
+    CHECK_FALSE(GlobalHotkeys::altShiftSwitchesLayout(QStringLiteral("grp:alts_toggle")));
+    CHECK_FALSE(GlobalHotkeys::altShiftSwitchesLayout(QString()));
 }
 
 TEST_CASE("global hotkeys grab on X11 for Global actions, report one taken, and activate") {
@@ -453,6 +471,24 @@ TEST_CASE("global hotkeys grab on X11 for Global actions, report one taken, and 
     // Released there, the keys are free again.
     XUngrabKey(other, code, taken, root);
     XSync(other, 0);
+    hotkeys->apply();
+    CHECK(hotkeys->registered() == QStringList{"mute"});
+    CHECK_FALSE(first.globalFailed(QStringLiteral("mute")));
+
+    // With Alt+Shift switching the layout, keys with both never arrive as bound:
+    // not grabbed, and said so. The options as setxkbmap leaves them on the root.
+    const Atom rules = XInternAtom(other, "_XKB_RULES_NAMES", False);
+    const auto set_options = [&](const char* options) {
+        std::string names = std::string("evdev") + '\0' + "pc105" + '\0' + "us" + '\0' + '\0' + options + '\0';
+        XChangeProperty(other, root, rules, XA_STRING, 8, PropModeReplace,
+                        reinterpret_cast<const unsigned char*>(names.data()), static_cast<int>(names.size()));
+        XSync(other, 0);
+    };
+    set_options("terminate:ctrl_alt_bksp,grp:alt_shift_toggle");
+    hotkeys->apply();
+    CHECK(hotkeys->registered().isEmpty());
+    CHECK(first.globalFailed(QStringLiteral("mute")));
+    set_options("terminate:ctrl_alt_bksp");
     hotkeys->apply();
     CHECK(hotkeys->registered() == QStringList{"mute"});
     CHECK_FALSE(first.globalFailed(QStringLiteral("mute")));
@@ -514,8 +550,8 @@ TEST_CASE("global hotkeys bind through the GlobalShortcuts portal, report one re
     // What the desktop refused is marked; the keys went as the XDG shortcuts specification writes them.
     CHECK_FALSE(registry.globalFailed(QStringLiteral("eq")));
     CHECK(registry.globalFailed(QStringLiteral("mute")));
-    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts eq trigger=CTRL+e description=EQ on / off")));
-    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts mute trigger=CTRL+m description=Mute")));
+    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts eq trigger=CTRL+ALT+SHIFT+e description=EQ on / off")));
+    CHECK(read_all(log).contains(QStringLiteral("BindShortcuts mute trigger=CTRL+ALT+SHIFT+m description=Mute")));
 
     // The desktop's press arrives as Activated on the session: the action runs once.
     REQUIRE(wait_until([&] { return activated.count() == 1; }));
@@ -544,13 +580,13 @@ TEST_CASE("the tray menu") {
     const QList<QAction*> items = menu->actions();
     REQUIRE(items.size() == 8);
     // Keys only beside an action whose Global is on (on by default): elsewhere they do nothing.
-    CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+E"));
-    CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+M"));
+    CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+Alt+Shift+E"));
+    CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+Alt+Shift+M"));
     shortcuts.setGlobal(QStringLiteral("eq"), false);
     CHECK(items[0]->text() == QStringLiteral("EQ"));
     shortcuts.setGlobal(QStringLiteral("eq"), true);
-    CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+E"));
-    CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+M"));
+    CHECK(items[0]->text() == QStringLiteral("EQ\tCtrl+Alt+Shift+E"));
+    CHECK(items[1]->text() == QStringLiteral("Mute\tCtrl+Alt+Shift+M"));
     shortcuts.setGlobal(QStringLiteral("mute"), false);
     CHECK(items[1]->text() == QStringLiteral("Mute"));
     shortcuts.setGlobal(QStringLiteral("mute"), true);
@@ -581,7 +617,7 @@ TEST_CASE("the tray menu") {
     // The shortcut text follows a rebinding.
     shortcuts.rebind(QStringLiteral("eq"), QStringLiteral("Ctrl+Shift+E"));
     CHECK(eq->text() == QStringLiteral("EQ\tCtrl+Shift+E"));
-    shortcuts.replace(QStringLiteral("eq"), QStringLiteral("Ctrl+M"));
+    shortcuts.replace(QStringLiteral("eq"), QStringLiteral("Ctrl+Alt+Shift+M"));
     CHECK(mute->text() == QStringLiteral("Mute"));
 
     // Output: every working output, the current one checked; picking one selects it.

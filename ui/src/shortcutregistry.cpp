@@ -32,10 +32,14 @@ ShortcutRegistry::ShortcutRegistry(AppSettings* settings, QObject* parent) : QOb
     const auto app = [this](const char* id, const char* label, QKeySequence keys, bool global) {
         actions_.push_back({QString::fromLatin1(id), QString::fromUtf8(label), QStringLiteral("app"), keys, global, true, {}});
     };
-    app("eq", "EQ on / off", QKeySequence(Qt::CTRL | Qt::Key_E), true);
-    app("mute", "Mute", QKeySequence(Qt::CTRL | Qt::Key_M), true);
-    app("nextPreset", "Next preset", QKeySequence(Qt::CTRL | Qt::Key_Right), true);
-    app("previousPreset", "Previous preset", QKeySequence(Qt::CTRL | Qt::Key_Left), true);
+    // Global by default, so combinations nothing else is likely to want: a global
+    // hotkey takes its keys from every other application. Not Ctrl+Alt+Shift+
+    // arrows, which GNOME and Cinnamon use to move a window between workspaces.
+    constexpr auto kGlobal = Qt::CTRL | Qt::ALT | Qt::SHIFT;
+    app("eq", "EQ on / off", QKeySequence(kGlobal | Qt::Key_E), true);
+    app("mute", "Mute", QKeySequence(kGlobal | Qt::Key_M), true);
+    app("nextPreset", "Next preset", QKeySequence(kGlobal | Qt::Key_PageDown), true);
+    app("previousPreset", "Previous preset", QKeySequence(kGlobal | Qt::Key_PageUp), true);
     app("savePreset", "Save preset", QKeySequence(Qt::CTRL | Qt::Key_S), false);
     app("undo", "Undo", QKeySequence(Qt::CTRL | Qt::Key_Z), false);
     app("redo", "Redo", QKeySequence(Qt::CTRL | Qt::Key_Y), false);

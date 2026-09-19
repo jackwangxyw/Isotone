@@ -78,6 +78,12 @@ struct PipewireOutputsImpl {
     }
 };
 
+std::string sink_display_name(const char* nick, const char* description, const std::string& name) {
+    if (nick != nullptr && *nick != '\0') return nick;
+    if (description != nullptr && *description != '\0') return description;
+    return name;
+}
+
 namespace {
 
 void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* type,
@@ -93,9 +99,8 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
 
         PipewireSink sink;
         sink.name = name;
-        if (const char* description = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION))
-            sink.description = description;
-        if (sink.description.empty()) sink.description = sink.name;
+        sink.description = sink_display_name(spa_dict_lookup(props, PW_KEY_NODE_NICK),
+                                             spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION), sink.name);
         sink.is_isotone = sink.name == kIsotoneSinkName;
         {
             const std::lock_guard<std::mutex> lock(d->mutex);

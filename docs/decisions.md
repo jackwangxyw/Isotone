@@ -4041,6 +4041,44 @@ true, `src/contents/kcfg/easyeffects_db.kcfg:190`) writes `target.node` and
 (`src/pw_manager.cpp:460-477`), with a switch and per-application and
 per-output exclusion lists that Isotone does not have. Left as it is.
 
+## 2026-09-19: Short output names, the global defaults, and a curve that leaves the plot
+
+Three the owner asked for after the laptop's desktop checks.
+
+**An output is shown by its short name.** His laptop's four outputs all read
+"Alder Lake PCH-P High Defi..." in the sidebar: one card's node.descriptions
+share everything up to where the sidebar cuts them off. PipeWire also carries
+node.nick, "HDMI 3" or "Speaker + Headphones", which is what is shown now
+(`sink_display_name`, node.nick, else the description, else node.name).
+
+**The global hotkeys are Ctrl+Alt+Shift+E, M, PgDn and PgUp.** They were Ctrl+E,
+Ctrl+M and Ctrl+Left/Right, which a global hotkey takes from every other
+application: Ctrl+Left/Right is word-jumping in every text field. Save, undo,
+redo and the band keys are not global and keep theirs. Not Ctrl+Alt+Shift+
+arrows, which GNOME and Cinnamon use to move a window between workspaces.
+
+That found one more thing. On the owner's laptop the new keys did nothing, by
+hand or injected: `grp:alt_shift_toggle` was in his XKB options (two layouts,
+both us), so Alt+Shift switches the keyboard layout and whichever of the two is
+pressed second is taken out of the modifiers. Measured, with every modifier
+subset grabbed: Ctrl then Alt then Shift arrives as Ctrl+Alt, Ctrl then Shift
+then Alt as Ctrl+Shift. The X grab is granted either way and simply never
+matches, which is the worst kind of failure. The X11 path now reads the options
+from the root's `_XKB_RULES_NAMES` and, where they switch the layout on
+Alt+Shift, marks such a binding failed in Settings and leaves the keys alone
+(`altShiftSwitchesLayout`). Moonlight is not affected by any of this: a focused
+window is sent the keys whatever the modifiers say. Windows has the same
+Alt+Shift as a language switch, but only for a press of the two alone, so
+Ctrl+Alt+Shift+E works there; measured on the owner's machine. He turned the
+option off on the laptop, where the second layout was a duplicate, and the keys
+then worked.
+
+**A curve that leaves the plot is cut at the edge.** A high-pass under the
+bottom of the graph was clamped two pixels past it and drawn, so it read as a
+flat line along the bottom (owner, 2026-09-19). The curves are clipped to the
+plot now, as the spectrum already was, and clamped a plot's height outside so
+the slope at the edge is still the curve's.
+
 ---
 
 # Where things stand (2026-09-19)

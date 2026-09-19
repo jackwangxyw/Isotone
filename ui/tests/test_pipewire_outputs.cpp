@@ -24,6 +24,16 @@ bool has(const std::vector<PipewireSink>& sinks, const std::string& name) {
 
 }  // namespace
 
+TEST_CASE("an output is shown by its short name") {
+    // One laptop's four outputs share "Alder Lake PCH-P High Definition Audio
+    // Controller" and differ only after it, where the sidebar cuts them off.
+    CHECK(sink_display_name("HDMI 3", "Alder Lake PCH-P High Definition Audio Controller HDMI / DisplayPort 3 Output",
+                            "alsa_output.x") == "HDMI 3");
+    CHECK(sink_display_name(nullptr, "Isotone-test-sink", "isotone_test_hw") == "Isotone-test-sink");
+    CHECK(sink_display_name("", "Isotone-test-sink", "isotone_test_hw") == "Isotone-test-sink");
+    CHECK(sink_display_name(nullptr, nullptr, "isotone_test_hw") == "isotone_test_hw");
+}
+
 TEST_CASE("the sinks PipeWire reports are the ones it has") {
     PipewireOutputs outputs;
     if (!outputs.start()) {
