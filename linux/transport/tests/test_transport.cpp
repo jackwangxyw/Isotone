@@ -180,6 +180,35 @@ TEST_CASE("persisted_state_dir follows the XDG base directory specification") {
     if (saved != nullptr) ::setenv("XDG_CONFIG_HOME", keep.c_str(), 1);
 }
 
+TEST_CASE("a region knows when its name leads somewhere else") {
+    // A daemon restart unlinks the region and creates another under the same
+    // name. The old one stays mapped for whoever holds it, so "is it open" says
+    // nothing about whether anyone still reads what is written there.
+    const std::string name = "/isotone-stale-" + std::to_string(::getpid());
+    SharedRegion::unlink_region(name);
+    SharedRegion host;
+    REQUIRE(host.create_or_open(name) == 0);
+
+    SharedRegion client;
+    REQUIRE(client.open(name) == 0);
+    CHECK(client.still_named());
+
+    SharedRegion restarted;
+    SharedRegion::unlink_region(name);
+    REQUIRE(restarted.create_or_open(name) == 0);
+    CHECK_FALSE(client.still_named());   // the name is the new one's now
+    CHECK(restarted.still_named());
+    CHECK(client.is_open());             // and the old mapping is still readable
+
+    REQUIRE(client.open(name) == 0);
+    CHECK(client.still_named());
+
+    // Nothing of that name at all, and a region never opened.
+    SharedRegion::unlink_region(name);
+    CHECK_FALSE(client.still_named());
+    CHECK_FALSE(SharedRegion().still_named());
+}
+
 TEST_CASE("the saved file and the shared region name the same sink") {
     CHECK(persisted_state_path("/d", "bluez_output/AA:BB") == "/d/bluez_output_AA_BB.bin");
     CHECK(persisted_state_path("/d", "").empty());

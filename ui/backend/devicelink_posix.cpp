@@ -52,12 +52,22 @@ void DeviceLink::set_target(const OutputTarget& target) {
 }
 
 bool DeviceLink::ensure_region() {
-    if (region_.is_open()) return true;
-    if (target_.guid.empty() || target_.backend != Backend::pipewire) return false;
-
     const uint64_t now = now_ms();
-    if (last_open_attempt_ms_ != 0 && now - last_open_attempt_ms_ < kReopenAfterMs) return false;
+    if (region_.is_open()) {
+        // A daemon that restarted left this mapping behind and created another
+        // under the same name; writing into the old one reaches nothing. Looked
+        // at no more often than a reopen is tried, so a drag costs nothing.
+        if (now - last_open_attempt_ms_ < kReopenAfterMs) return true;   // looked recently
+        last_open_attempt_ms_ = now;
+        if (region_.still_named()) return true;
+        region_.close();
+        region_opened_ = false;
+        ring_cursor_ = AudioRingCursor{};
+    } else if (last_open_attempt_ms_ != 0 && now - last_open_attempt_ms_ < kReopenAfterMs) {
+        return false;
+    }
     last_open_attempt_ms_ = now;
+    if (target_.guid.empty() || target_.backend != Backend::pipewire) return false;
 
     if (region_.open(posix::region_name(target_.guid)) != 0) return false;
     region_opened_ = true;

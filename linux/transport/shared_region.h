@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <sys/stat.h>
+
 #include <string>
 
 #include "isotone/param_block.h"
@@ -68,6 +70,11 @@ public:
     static int unlink_region(const std::string& name);
 
     bool is_open() const { return base_ != nullptr; }
+    // Whether the name still leads to the object this holds. A daemon that
+    // restarts unlinks its region and creates another under the same name, and
+    // the old one stays mapped and writable for whoever still has it: an app
+    // that keeps it writes where nothing reads (the owner's laptop, 2026-09-19).
+    bool still_named() const;
     bool created() const { return created_; }
     ParamBlock* params() const { return base_ != nullptr ? region_params(base_) : nullptr; }
     AudioRingHeader* ring() const { return base_ != nullptr ? region_ring(base_) : nullptr; }
@@ -77,6 +84,9 @@ private:
 
     void* base_    = nullptr;
     bool  created_ = false;
+    std::string name_;
+    dev_t       device_ = 0;   // of the object mapped, to compare the name against
+    ino_t       inode_  = 0;
 };
 
 }  // namespace isotone::posix

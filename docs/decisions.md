@@ -4105,6 +4105,38 @@ Measured on the laptop: before, four outputs, all four named "Alder Lake PCH-P
 High Defi..."; now, Speaker + Headphones alone, with Easy Effects' sink and the
 rig's.
 
+## 2026-09-19: Edits followed a daemon that had restarted
+
+The owner, on his laptop: the EQ did nothing and the spectrum was dead, with the
+app showing the right output. Two causes, one of them ours.
+
+**EasyEffects had the stream.** It runs there in service mode and moves every
+playback stream into its own sink, then feeds the hardware itself, so Isotone
+was not in the path at all. Two programs that both capture every stream cannot
+share a machine; whichever gets there first wins. Isotone left the stream alone
+because it already carried EasyEffects' target, which is the rule that keeps a
+stream a user has moved where they put it. With EasyEffects stopped, the stream
+still was not taken: nothing re-examines a stream whose target is cleared. Not
+fixed yet, and worth fixing.
+
+**The app kept writing into the region of the daemon that had gone.** A POSIX
+shm object outlives its name: a daemon that restarts unlinks its region and
+creates another, and the old one stays mapped, writable and readable for
+whoever holds it. So every edit went somewhere nothing reads, and the spectrum
+drained a ring nobody fills, while the app looked healthy. `SharedRegion` can
+now say whether its name still leads to the object it holds
+(`still_named()`, the object's device and inode against a fresh shm_open), and
+`DeviceLink` checks that no more than once every 500 ms, the interval it
+already used before trying a region again, and reopens when it does not.
+
+Found by the test that fails without it: a fake daemon, an edit, a second fake
+daemon over the same name, and the next edit must reach the second region and
+not the first. The first attempt at the fix passed that test and did nothing on
+the laptop: the spectrum calls into the same path every frame, and the timestamp
+was updated on every call, so the interval never elapsed and the check never ran.
+Fixed, and measured again on the laptop: with the app running, the daemon
+restarted, and a band added, the band reached the new daemon's region.
+
 ---
 
 # Where things stand (2026-09-19)

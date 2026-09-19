@@ -71,7 +71,22 @@ int SharedRegion::map_fd(int fd) {
     void* base = ::mmap(nullptr, kSharedRegionBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (base == MAP_FAILED) return errno;
     base_ = base;
+    struct stat st {};
+    if (::fstat(fd, &st) == 0) {
+        device_ = st.st_dev;
+        inode_  = st.st_ino;
+    }
     return 0;
+}
+
+bool SharedRegion::still_named() const {
+    if (base_ == nullptr || name_.empty()) return false;
+    const int fd = ::shm_open(name_.c_str(), O_RDONLY, 0600);
+    if (fd < 0) return false;   // unlinked: whatever created it has gone
+    struct stat st {};
+    const bool ok = ::fstat(fd, &st) == 0;
+    ::close(fd);
+    return ok && st.st_dev == device_ && st.st_ino == inode_;
 }
 
 int SharedRegion::create_or_open(const std::string& name, void (*seed)(ParamBlock* block, void* context),
@@ -117,6 +132,7 @@ int SharedRegion::create_or_open(const std::string& name, void (*seed)(ParamBloc
         if (fresh) ::shm_unlink(name.c_str());
         return map_error;
     }
+    name_ = name;
 
     if (fresh) {
         // shm_open zero-fills, so only the headers need writing.
@@ -160,6 +176,7 @@ int SharedRegion::open(const std::string& name) {
     const int map_error = map_fd(fd);
     ::close(fd);
     if (map_error != 0) return map_error;
+    name_ = name;
 
     const int64_t deadline = now_ms() + 50;
     while (params()->hdr.magic == 0 && now_ms() < deadline) {
@@ -179,6 +196,9 @@ void SharedRegion::close() {
         base_ = nullptr;
     }
     created_ = false;
+    name_.clear();
+    device_ = 0;
+    inode_  = 0;
 }
 
 int SharedRegion::unlink_region(const std::string& name) {

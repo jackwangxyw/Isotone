@@ -7,7 +7,10 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <filesystem>
+#include <memory>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -84,6 +87,37 @@ TEST_CASE("a commit reaches the region a daemon would read") {
     // The header stays the daemon's: the format it published must survive an edit.
     CHECK(read.hdr.sample_rate == 48000);
     CHECK(read.hdr.channels == 2);
+}
+
+TEST_CASE("edits follow a daemon that restarted into its new region") {
+    // The owner's laptop, 2026-09-19: the daemon was restarted under a running
+    // app, and every edit after that went into the region the old one had left.
+    // A restart unlinks the region and creates another under the same name, and
+    // the old mapping stays alive and readable for whoever still holds it.
+    const std::string sink = sink_name("restart");
+    auto daemon = std::make_unique<FakeDaemon>(sink);
+
+    DeviceLink link(scratch_dir());
+    link.set_target(target_for(sink));
+    REQUIRE(link.region_open());
+    REQUIRE(link.commit(with_preamp(-4.5)) == kLinkOk);
+
+    posix::SharedRegion* old = &daemon->region;
+    auto restarted = std::make_unique<FakeDaemon>(sink);   // unlinks the first and creates its own
+    REQUIRE(restarted->region.params() != old->params());
+
+    // The link waits a moment before looking again, as it does with no daemon.
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(link.commit(with_preamp(-9.0)) == kLinkOk);
+    ParamBlock read{};
+    REQUIRE(param_block_read(restarted->region.params(), &read));
+    CHECK(read.preamp_db == doctest::Approx(-9.0));
+    CHECK(read.hdr.sample_rate == 48000);   // the new daemon's header, not the old one's
+
+    ParamBlock stale{};
+    REQUIRE(param_block_read(old->params(), &stale));
+    CHECK(stale.preamp_db == doctest::Approx(-4.5));   // nothing more was written there
+    daemon.reset();
 }
 
 TEST_CASE("with no daemon there is no region, and an edit says so") {
