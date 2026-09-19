@@ -2,7 +2,7 @@ import QtQuick
 import Isotone
 
 // "Change <output> to <layout>?" before the Speakers view changes the output's
-// Windows speaker setup, or on Linux, Settings changes Isotone's sink's layout.
+// Windows speaker setup.
 DialogFrame {
     id: root
     property string outputName
@@ -40,8 +40,7 @@ DialogFrame {
     }
 
     Item { width: 1; height: 16 }
-    // Linux: the layout of Isotone's own sink, from Settings, General.
-    DetailRow { label: Qt.platform.os === "linux" ? "Speaker setup" : "Windows speaker setup"; value: root.from + " → " + root.to }
+    DetailRow { label: "Windows speaker setup"; value: root.from + " → " + root.to }
     DetailRow { label: "Channels"; value: root.fromChannels + " → " + root.toChannels }
 
     actions: [

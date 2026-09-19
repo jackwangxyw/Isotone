@@ -16,11 +16,7 @@
 #if defined(_WIN32)
 #include "speaker_layout.h"
 #else
-#include <QProcess>
-
 #include <cerrno>
-
-#include "daemon_config.h"
 #endif
 
 using isotone::ChannelMask;
@@ -50,17 +46,7 @@ Speakers::Speakers(EqSession* session, QObject* parent) : QAbstractListModel(par
         return isotone::devices::set_speaker_layout(isotone::ui::widen_id(output), layout, &change);
     };
 #else
-    // The layout is the daemon's virtual sink's (daemon_config.h): kept where the
-    // daemon reads it, then the user service restarted to lay it out. Streams
-    // playing go back through the new sink as the daemon captures them again.
-    layout_setter_ = [](const std::string&, isotone::SpeakerLayout layout) -> int {
-        const int written = isotone::posix::write_daemon_channels(isotone::posix::daemon_config_path(),
-                                                                  isotone::speaker_layout_spec(layout)->channels);
-        if (written != 0) return written;
-        const int restarted = QProcess::execute(QStringLiteral("systemctl"),
-                                                {QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("isotone-daemon.service")});
-        return restarted == 0 ? 0 : EIO;
-    };
+    layout_setter_ = [](const std::string&, isotone::SpeakerLayout) -> int { return ENOTSUP; };
 #endif
     if (session_) connect(session_, &EqSession::stateChanged, this, &Speakers::sessionChanged);
     reloadOutput();
@@ -204,10 +190,9 @@ void Speakers::refreshSupportedLayouts() {
         for (isotone::devices::SpeakerLayout l : layouts) names << QLatin1String(kLayoutNames[static_cast<int>(l)]);
     }
 #else
-    // The daemon lays out every one of them, whatever the hardware it feeds; a
-    // sink without a position simply does not get that channel.
-    if (!guid_.empty() && channels_ > 0)
-        for (const char* name : kLayoutNames) names << QLatin1String(name);
+    // The daemon's virtual sink has one layout for as long as it runs: it is the
+    // only one there is to offer.
+    if (!guid_.empty() && channels_ > 0) names << speaker_layout_name(channels_, mask_);
 #endif
     if (names == supported_) return;
     supported_ = names;

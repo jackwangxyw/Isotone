@@ -15,8 +15,6 @@
 #   44100     the same, with the graph forced to another rate, which makes the
 #             daemon re-size its processor off the audio thread mid-stream
 #   5.1       a six-channel core into a six-channel sink
-#   2.1 conf  a three-channel core, the count read from daemon.conf (what the UI's
-#             layout picker writes) rather than given as --channels
 #   stale     a daemon killed outright leaves its region and its ring claim
 #             behind; the next one has to adopt the region and take the ring
 #             over, or the UI's spectrum is dead for the whole of that run
@@ -72,19 +70,12 @@ def band_arg():
     return f"{BAND[0]},{BAND[1]},{BAND[2]}"
 
 
-def start_daemon(sink=HW, channels=2, keep_region=False, extra=(), env=None):
-    """`channels` None leaves the count to daemon.conf under `env`'s XDG_CONFIG_HOME."""
-    args = [DAEMON, "--sink", sink, "--state-dir", STATE_DIR]
-    if channels is not None:
-        args += ["--channels", str(channels)]
+def start_daemon(sink=HW, channels=2, keep_region=False, extra=()):
+    args = [DAEMON, "--sink", sink, "--channels", str(channels), "--state-dir", STATE_DIR]
     if keep_region:
         args.append("--keep-region")
     args += list(extra)
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    if channels is None:
-        # The count the daemon was left to find: its sink carries that many ports.
-        with open(os.path.join(env["XDG_CONFIG_HOME"], "isotone", "daemon.conf")) as f:
-            channels = int(f.read().split("=")[1])
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     m.wait_for_ports(VIRT, "-o", channels)
     m.wait_for_ports("isotone-core", "-o", channels)
     deadline = time.time() + 15
@@ -149,11 +140,11 @@ def ring_result(proc, raw, freq):
     return 20.0 * math.log10(amp) if amp > 0 else -999.0
 
 
-def case(freq, sink=HW, channels=2, band=False, cold=False, with_ring=False, env=None):
+def case(freq, sink=HW, channels=2, band=False, cold=False, with_ring=False):
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     if cold and band:
         state_tool("save", "--sink", sink, "--dir", STATE_DIR, "--band", band_arg())
-    proc = start_daemon(sink, channels, env=env)
+    proc = start_daemon(sink, channels)
     ring = None
     try:
         if band and not cold:
@@ -363,18 +354,6 @@ def main():
     flat, _ = case(1000.0, sink=HW51, channels=6)
     got, _ = case(1000.0, sink=HW51, channels=6, band=True)
     report("5.1", 1000.0, flat, got)
-
-    # 2.1 from daemon.conf, as the layout picker leaves it: FL FR LFE, whose front
-    # pair reaches the 5.1 sink's.
-    config_home = os.path.join(m.WORK, "config-home")
-    shutil.rmtree(config_home, ignore_errors=True)
-    os.makedirs(os.path.join(config_home, "isotone"))
-    with open(os.path.join(config_home, "isotone", "daemon.conf"), "w") as f:
-        f.write("channels=3\n")
-    env = dict(os.environ, XDG_CONFIG_HOME=config_home)
-    flat, _ = case(1000.0, sink=HW51, channels=None, env=env)
-    got, _ = case(1000.0, sink=HW51, channels=None, band=True, env=env)
-    report("2.1 conf", 1000.0, flat, got)
 
     # A region and a ring claim left behind by a daemon that was killed.
     leave_stale_region(1000.0)

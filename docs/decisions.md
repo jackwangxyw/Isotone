@@ -4021,6 +4021,26 @@ does not hide a systematic fault in the path, which would glitch both times.
 The captured WAV that read 0.18 dB low is reported as a phase step of 1.002 rad.
 Clean captures read 0.000 rad.
 
+## 2026-09-19: Linux is stereo only
+
+The owner's decision, on "Linux speaker layouts" above: Linux is stereo, as
+EasyEffects is (its sink is FL FR, hard-coded, `src/pw_node_manager.cpp:731`).
+The layout picker in Settings, General is gone, and with it daemon.conf
+(`linux/transport/daemon_config.*`), the daemon reading it, and its 2.1 layout;
+the files are as they were before 7daf8ab. The Speakers view is not offered,
+as on Windows for a stereo output. Kept from that commit: the region publishing
+its layout when it opens, a fresh region reading as the default state, and
+Outputs' probe noticing a fed output come back. The daemon still takes
+`--channels` 1, 2, 4, 6 or 8, which the rig's 5.1 case uses; nothing in the app
+sets it.
+
+On capturing applications' streams, the owner asked whether EasyEffects does
+the same. It does: "Process All Output Streams" (`processAllOutputs`, default
+true, `src/contents/kcfg/easyeffects_db.kcfg:190`) writes `target.node` and
+`target.object` in the default metadata for every playback stream
+(`src/pw_manager.cpp:460-477`), with a switch and per-application and
+per-output exclusion lists that Isotone does not have. Left as it is.
+
 ---
 
 # Where things stand (2026-09-19)
@@ -4034,7 +4054,7 @@ Clean captures read 0.000 rad.
 | 1b. Fork spike (IsoAPO) | complete | measured in audiodg to 0.0002 dB rms |
 | 1c. Linux spike | complete | the PipeWire topology measured at -12.000 against -12.000 (2026-09-17), in CI since 2026-09-18 |
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
-| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux: the daemon, measured in CI (2026-09-17 and 18); capturing applications' streams and layouts from daemon.conf (2026-09-19) | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
+| 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux: the daemon, measured in CI (2026-09-17 and 18); capturing applications' streams (2026-09-19); stereo only | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
 | 4. UI, Linux | complete on Cinnamon under X11; GNOME, KDE and Wayland not checked live | the whole Qt layer on Qt 6.4.2; `measure_linux.py` in CI (the app's edits, saved state and EQ by ear's tone through the daemon, to 0.011 dB); `ui_tests` 40, `ui_model_tests` 91, `ui_qml_tests` 232 (+49 Windows-only skipped), X11 and portal hotkey tests; the desktop checks by hand; the entries of 2026-09-19 |
 | 5. EQ by ear | complete: the sweep, approved by the owner in use; A/B set aside for later (owner) | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
@@ -4086,14 +4106,14 @@ points IntelliSense at `build/compile_commands.json`.
 
 1. **Linux daemon**: done and measured, through "The Linux daemon finished to the
    edge of stage 4" (2026-09-17), and since then capturing applications' streams
-   and reading its layout from daemon.conf (2026-09-19).
+   and stereo only (2026-09-19).
 
 **Stage 4 on Linux is done** as far as one desktop can show it: the Qt layer, the
 tests and the measurements are in CI, and every desktop check passed on Cinnamon
 under X11 (2026-09-19). Left for Linux: GNOME and KDE, and Wayland, which need
 their VMs (docs/notes/linux-vm-setup.md); packaging (a .deb first, then Flatpak).
-Two decisions made on the way wait for the owner: applications captured by the
-daemon, and the layout picker in Settings, General on Linux.
+Applications captured by the daemon, as EasyEffects does, is left as it is; the
+layout picker was dropped for stereo only (2026-09-19).
 
 **Stage 4 is done.** The owner ran the whole list on his machine on 2026-09-16: a
 real install, repair and uninstall from Devices with the Windows prompt;

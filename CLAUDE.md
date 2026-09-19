@@ -73,10 +73,10 @@ windows/devices/      isotone_devices: render endpoints, their format and engine
                       speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
-linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG, daemon.conf (the layout)
+linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG
 linux/daemon/         isotone-daemon: the virtual sink, the core in a PipeWire filter node,
                       links to the sink being fed, the post-EQ ring, following the default sink
-                      through WirePlumber metadata, capturing applications' streams, layouts to 7.1,
+                      through WirePlumber metadata, capturing applications' streams, stereo (--channels to 7.1 for the rig),
                       systemd user unit;
                       isotone-state (show/set/save/capture)
 linux/spike/          stage 1c: the topology spike and the null sinks the rig declares

@@ -47,7 +47,6 @@ struct Layout {
 constexpr Layout kLayouts[] = {
     {1, {{"MONO", kSpeakerFrontCenter}}},
     {2, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight}}},
-    {3, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight}, {"LFE", kSpeakerLowFrequency}}},
     {4, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight},
          {"RL", kSpeakerBackLeft}, {"RR", kSpeakerBackRight}}},
     {6, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight},
