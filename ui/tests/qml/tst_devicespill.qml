@@ -46,6 +46,8 @@ Item {
         function pill() { return findChild(bar, "engineStatus") }
 
         function init() {
+            // devicetool, IsoAPO and Equalizer APO: Linux has none of them (devicesmodel_posix.cpp).
+            if (Qt.platform.os === "linux") skip("Windows only")
             UiState.view = "eq"
             UiState.devicesSelection = ""
         }

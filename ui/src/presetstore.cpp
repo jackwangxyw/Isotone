@@ -215,7 +215,10 @@ void PresetStore::reload() {
 }
 
 void PresetStore::sort() {
-    QCollator collator;
+    // Qt ignores numeric mode under the C locale (C.UTF-8 is what a bare Linux
+    // session, a container or a CI runner has), which puts "Preset 10" before
+    // "Preset 9". English collation orders names the same way otherwise.
+    QCollator collator(QLocale().language() == QLocale::C ? QLocale(QLocale::English) : QLocale());
     collator.setNumericMode(true);
     collator.setCaseSensitivity(Qt::CaseInsensitive);
     std::stable_sort(presets_.begin(), presets_.end(),

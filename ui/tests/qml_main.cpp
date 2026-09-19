@@ -19,7 +19,10 @@
 
 #include "eqsession.h"
 #include "qmlsingleton.h"
+
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 // Offscreen unless the caller picks a platform: on the desktop a window is laid
 // out only while Windows lets it draw, and with the display off (seen
@@ -46,9 +49,18 @@ static const bool kPlatformChosen = [] {
         if (config.open(QIODevice::WriteOnly)) config.write("Preamp: -3 dB\r\nInclude: peace.txt\r\nGraphicEQ: 25 0; 40 -1.5; 100 0\r\n");
         qputenv("ISOTONE_COMPAT_DIR", dir.toUtf8());
     }
-    // Settings: launch at sign-in writes a test key of this run's, never the real Run key.
+    // Settings: launch at sign-in writes a test key of this run's, never the real Run key
+    // (Linux: an autostart directory of this run's, never the real one).
+#if defined(_WIN32)
     if (!qEnvironmentVariableIsSet("ISOTONE_RUN_KEY"))
         qputenv("ISOTONE_RUN_KEY", QStringLiteral("Software\\Isotone-tests\\Run-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+#else
+    if (!qEnvironmentVariableIsSet("ISOTONE_AUTOSTART_DIR")) {
+        const QString dir = QDir::temp().filePath(QStringLiteral("isotone-qml-autostart-%1").arg(QCoreApplication::applicationPid()));
+        QDir(dir).removeRecursively();
+        qputenv("ISOTONE_AUTOSTART_DIR", dir.toUtf8());
+    }
+#endif
     return true;
 }();
 
@@ -89,6 +101,10 @@ class Setup : public QObject {
     Q_OBJECT
 public slots:
     void qmlEngineAvailable(QQmlEngine* engine) {
+#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
+        // As main.cpp: 6.4 does not search qrc:/qt/qml, where the module's qmldir is.
+        engine->addImportPath(QStringLiteral("qrc:/qt/qml"));
+#endif
         engine->rootContext()->setContextProperty(QStringLiteral("TestHooks"), new TestHooks(engine));
     }
     void applicationAvailable() {
@@ -100,10 +116,15 @@ public slots:
     }
     // Settings: the run's test key goes when the tests end.
     void cleanupTestCase() {
+#if defined(_WIN32)
         const std::wstring key = qEnvironmentVariable("ISOTONE_RUN_KEY").toStdWString();
         if (key.rfind(L"Software\\Isotone-tests\\", 0) != 0) return;
         RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
         RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Isotone-tests");   // only when no other run's key is in it
+#else
+        const QString dir = qEnvironmentVariable("ISOTONE_AUTOSTART_DIR");
+        if (dir.startsWith(QDir::tempPath())) QDir(dir).removeRecursively();
+#endif
     }
 };
 

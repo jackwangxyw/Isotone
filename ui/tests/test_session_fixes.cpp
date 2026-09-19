@@ -4,12 +4,10 @@
 // Fixes after the stage 4 review: solo and test tones against output switches,
 // layout changes and preset saves, undo across layouts and of speaker changes,
 // Auto preamp with EQ off, the 64 band limit, the order and place of saved state
-// writes, and removing a preset. Outputs are Local\ regions the test creates and
-// the self test's saved-state directory, never a real output.
+// writes, and removing a preset. Outputs are engine regions the test creates
+// (test_rig.h) and saved state no real engine reads.
 
 #include "doctest.h"
-
-#include <windows.h>
 
 #include <QDir>
 #include <QFile>
@@ -28,8 +26,8 @@
 #include "persisted_state.h"
 #include "presets.h"
 #include "presetstore.h"
-#include "shared_mapping.h"
 #include "speakers.h"
+#include "test_rig.h"
 
 using namespace isotone;
 using isotone::ui::Backend;
@@ -40,11 +38,6 @@ namespace {
 
 constexpr uint32_t k71 = 0x63F, k51 = 0x60F;
 
-std::wstring fixNamespace(const char* what) {
-    return L"Local\\IsotoneFixTest." + std::to_wstring(GetCurrentProcessId()) + L"." +
-           std::wstring(what, what + std::strlen(what)) + L".";
-}
-
 Band peak(uint32_t id, ChannelMask mask, double fc, double gain) {
     Band b;
     b.id = id;
@@ -53,12 +46,6 @@ Band peak(uint32_t id, ChannelMask mask, double fc, double gain) {
     b.width = 1;
     b.channels = mask;
     return b;
-}
-
-EqState region(isotone::win::SharedMapping& m) {
-    EqState s;
-    from_param_block(*m.params(), &s);
-    return s;
 }
 
 int row_of(const Speakers& speakers, const char* code) {
@@ -71,44 +58,44 @@ double distance(const Speakers& speakers, int row) {
     return speakers.data(speakers.index(row), Speakers::DistanceRole).toDouble();
 }
 
-// Two native outputs whose regions the test holds, as a running engine would.
+// Two outputs whose engine regions the test holds, as a running engine would.
 struct NativeRig {
     QTemporaryDir data;
     QTemporaryDir compat;
-    std::wstring space;
+    test_rig::Place place;
     OutputTarget a, b;
-    isotone::win::SharedMapping ra, rb;
+    test_rig::Engine ra, rb;
     std::unique_ptr<EqSession> session;
     std::unique_ptr<Speakers> speakers;
     std::unique_ptr<Presets> presets;
-    explicit NativeRig(const char* name, uint32_t channels = 8, uint32_t mask = k71) : space(fixNamespace(name)) {
-        a = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f001}", Backend::native, OutputLayout{channels, mask, 48000}};
-        b = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f002}", Backend::native, OutputLayout{channels, mask, 48000}};
-        REQUIRE(ra.create_or_open(isotone::win::mapping_name(space.c_str(), isotone::ui::widen_id(a.guid))) == ERROR_SUCCESS);
-        REQUIRE(rb.create_or_open(isotone::win::mapping_name(space.c_str(), isotone::ui::widen_id(b.guid))) == ERROR_SUCCESS);
-        session = std::make_unique<EqSession>(std::make_unique<ui::DeviceLink>(space, compat.path().toStdWString()));
+    explicit NativeRig(const char* name, uint32_t channels = 8, uint32_t mask = k71) : place(std::string("fix.") + name) {
+        a = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f001}", test_rig::kEngine, OutputLayout{channels, mask, 48000}};
+        b = OutputTarget{"{8f4d2a10-0000-4000-8000-00000000f002}", test_rig::kEngine, OutputLayout{channels, mask, 48000}};
+        place.own(a.guid);
+        place.own(b.guid);
+        REQUIRE(ra.open(place, a.guid));
+        REQUIRE(rb.open(place, b.guid));
+        session = std::make_unique<EqSession>(place.link(compat.path()));
         speakers = std::make_unique<Speakers>(session.get());
         speakers->setStore(SpeakerStore(QDir(data.path()).filePath(QStringLiteral("speakers.json"))));
         std::vector<Presets::OutputInfo> outs = {{a, QStringLiteral("A")}, {b, QStringLiteral("B")}};
-        presets = std::make_unique<Presets>(data.path(), session.get(), [outs] { return outs; }, space,
-                                            compat.path().toStdWString());
+        presets = place.presets(data.path(), session.get(), [outs] { return outs; }, compat.path());
     }
     ~NativeRig() {
         presets.reset();
         speakers.reset();
         session.reset();
-        for (const OutputTarget& t : {a, b}) std::filesystem::remove(path(t));
     }
-    static std::wstring path(const OutputTarget& t) {
-        return win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid));
-    }
-    static EqState saved(const OutputTarget& t) {
+    std::filesystem::path path(const OutputTarget& t) const { return place.saved_path(t.guid); }
+    EqState saved(const OutputTarget& t) const {
         ParamBlock block{};
         EqState out;
-        if (win::read_persisted_state(path(t), &block) == win::PersistedRead::Loaded) from_param_block(block, &out);
+        if (place.read_saved(t.guid, &block)) from_param_block(block, &out);
         return out;
     }
 };
+
+EqState region(const test_rig::Engine& e) { return e.state(); }
 
 }  // namespace
 
@@ -132,7 +119,7 @@ TEST_CASE("fixes: switching output leaves no solo or test tones on the old outpu
     CHECK(rig.session->state().speakers.muted == 0);
     CHECK_FALSE(rig.session->state().bypass);
     rig.speakers->setLevel(row_of(*rig.speakers, "L"), -1.0);
-    CHECK(NativeRig::saved(rig.a).speakers.muted == 0);
+    CHECK(rig.saved(rig.a).speakers.muted == 0);
 }
 
 TEST_CASE("fixes: a layout change never writes the old layout's solo mask") {
@@ -168,26 +155,26 @@ TEST_CASE("fixes: saving or loading a preset keeps solo on the output") {
     REQUIRE(rig.presets->saveAs(QStringLiteral("Room")) == QStringLiteral("Room"));
     CHECK(rig.speakers->soloRow() == c);
     CHECK(region(rig.ra).speakers.muted == solo);
-    CHECK(NativeRig::saved(rig.a).speakers.muted == 0);   // the file never has the solo
+    CHECK(rig.saved(rig.a).speakers.muted == 0);   // the file never has the solo
 
     rig.session->addBand(100, -3);
     rig.presets->save();
     CHECK(region(rig.ra).speakers.muted == solo);
-    CHECK(NativeRig::saved(rig.a).speakers.muted == 0);
-    CHECK(NativeRig::saved(rig.a).bands.size() == 1);
+    CHECK(rig.saved(rig.a).speakers.muted == 0);
+    CHECK(rig.saved(rig.a).bands.size() == 1);
 
     {
         PresetStore store(rig.data.path());
         REQUIRE_FALSE(store.add(QStringLiteral("Other"), EqState{}).isEmpty());
     }
     rig.presets.reset();
-    rig.presets = std::make_unique<Presets>(rig.data.path(), rig.session.get(),
-                                            [&] { return std::vector<Presets::OutputInfo>{{rig.a, QStringLiteral("A")}}; },
-                                            rig.space, rig.compat.path().toStdWString());
+    rig.presets = rig.place.presets(rig.data.path(), rig.session.get(),
+                                    [&] { return std::vector<Presets::OutputInfo>{{rig.a, QStringLiteral("A")}}; },
+                                    rig.compat.path());
     rig.presets->load(QStringLiteral("Other"));
     REQUIRE(rig.session->rowCount() == 0);
     CHECK(region(rig.ra).speakers.muted == solo);
-    CHECK(NativeRig::saved(rig.a).speakers.muted == 0);
+    CHECK(rig.saved(rig.a).speakers.muted == 0);
 }
 
 TEST_CASE("fixes: a layout change is not an undo step and clears the history") {
@@ -274,14 +261,14 @@ TEST_CASE("fixes: undoing or redoing a speaker change saves the speaker setup") 
     rig.session->useTarget(rig.a);
     const int c = row_of(*rig.speakers, "C");
     rig.speakers->setLevel(c, -5.0);
-    CHECK(NativeRig::saved(rig.a).channel_gain_db[2] == doctest::Approx(-5.0));
+    CHECK(rig.saved(rig.a).channel_gain_db[2] == doctest::Approx(-5.0));
     rig.session->undo();
     CHECK(rig.session->state().channel_gain_db[2] == 0.0);
     CHECK(region(rig.ra).channel_gain_db[2] == 0.0);
-    CHECK(NativeRig::saved(rig.a).channel_gain_db[2] == 0.0);
+    CHECK(rig.saved(rig.a).channel_gain_db[2] == 0.0);
     rig.session->redo();
     CHECK(region(rig.ra).channel_gain_db[2] == doctest::Approx(-5.0));
-    CHECK(NativeRig::saved(rig.a).channel_gain_db[2] == doctest::Approx(-5.0));
+    CHECK(rig.saved(rig.a).channel_gain_db[2] == doctest::Approx(-5.0));
 }
 
 TEST_CASE("fixes: undo and redo of a distance change are exact") {
@@ -317,8 +304,9 @@ TEST_CASE("fixes: undo and redo of a distance change are exact") {
 TEST_CASE("fixes: import keeps 64 filters and lists the rest as skipped") {
     QTemporaryDir data;
     EqSession s;   // backend none
-    Presets presets(data.path(), &s, [] { return std::vector<Presets::OutputInfo>{}; }, fixNamespace("import"),
-                    data.path().toStdWString());
+    test_rig::Place place("fix.import");
+    std::unique_ptr<Presets> owned = place.presets(data.path(), &s, [] { return std::vector<Presets::OutputInfo>{}; }, data.path());
+    Presets& presets = *owned;
     std::string text = "Preamp: -3 dB\n";
     for (int i = 1; i <= 70; ++i)
         text += "Filter " + std::to_string(i) + ": ON PK Fc " + std::to_string(20 + i * 100) + " Hz Gain -1 dB Q 1\n";
@@ -364,9 +352,9 @@ TEST_CASE("fixes: a native output never gets more than 64 bands") {
         PresetStore store(rig.data.path());
         REQUIRE_FALSE(store.add(QStringLiteral("Big"), eq_part(big, 2, 0x3)).isEmpty());
     }
-    rig.presets = std::make_unique<Presets>(rig.data.path(), rig.session.get(), [&] {
+    rig.presets = rig.place.presets(rig.data.path(), rig.session.get(), [&] {
         return std::vector<Presets::OutputInfo>{{rig.a, QStringLiteral("A")}, {rig.b, QStringLiteral("B")}};
-    }, rig.space, rig.compat.path().toStdWString());
+    }, rig.compat.path());
     rig.presets->load(QStringLiteral("Big"));
     CHECK(rig.session->rowCount() == static_cast<int>(kParamMaxBands));
     CHECK(rig.ra.params()->band_count == kParamMaxBands);
@@ -385,14 +373,14 @@ TEST_CASE("fixes: a speaker change writes the saved state before the region, in 
     NativeRig rig("order");
     rig.session->useTarget(rig.a);
     const int c = row_of(*rig.speakers, "C");
-    std::filesystem::remove(NativeRig::path(rig.a));
+    std::filesystem::remove(rig.path(rig.a));
     std::vector<double> saved_at_commit;
     QObject::connect(rig.session.get(), &EqSession::committed,
-                     [&] { saved_at_commit.push_back(NativeRig::saved(rig.a).channel_gain_db[2]); });
+                     [&] { saved_at_commit.push_back(rig.saved(rig.a).channel_gain_db[2]); });
     rig.speakers->setLevel(c, -2.5);
     REQUIRE(saved_at_commit.size() == 1);
     CHECK(saved_at_commit[0] == doctest::Approx(-2.5));   // the file had it when the region was written
-    CHECK(rig.session->savedStatePath() == NativeRig::path(rig.a));
+    CHECK(rig.session->savedStatePath() == rig.path(rig.a));
 }
 
 TEST_CASE("fixes: removing a preset whose assignments cannot be written still removes it everywhere") {

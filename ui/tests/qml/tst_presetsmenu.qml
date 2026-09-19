@@ -26,7 +26,7 @@ Item {
         function hover(item) { mouseMove(item, item.width / 2, item.height / 2) }
 
         function clearAll() {
-            for (const d of overlay.children) if (d.cardWidth !== undefined) d.close()   // dialogs left open
+            for (const d of Array.from(overlay.children)) if (d.cardWidth !== undefined) d.close()   // dialogs left open
             while (Presets.count > 0) Presets.remove(Presets.names[0])
             while (EqSession.count > 0) EqSession.deleteBand(0)
             Presets.assign("", "")   // untitled, with nothing to save

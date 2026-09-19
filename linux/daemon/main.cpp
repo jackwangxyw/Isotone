@@ -24,6 +24,8 @@ void usage() {
         "  --channels <n>         channels of the virtual sink: 1, 2, 4, 6, 8 (default 2)\n"
         "  --max-frames <n>       frames the processor is sized for (default 8192)\n"
         "  --keep-region          leave the shared region's name behind on exit\n"
+        "  --leave-streams        do not move applications' playback into the virtual\n"
+        "                         sink; only what plays into it is processed\n"
         "  --exit-when-linked     process a few blocks, then exit (for measurement)\n");
 }
 
@@ -60,6 +62,10 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(argv[i], "--exit-when-linked") == 0) {
             options.exit_when_linked = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--leave-streams") == 0) {
+            options.capture_streams = false;
             continue;
         }
         std::fprintf(stderr, "isotone-daemon: unknown argument %s\n", argv[i]);

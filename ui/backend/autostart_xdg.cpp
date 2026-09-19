@@ -66,13 +66,40 @@ std::string autostart_path(const std::string& dir) {
     return dir.empty() ? std::string() : dir + "/" + kAutostartFileName;
 }
 
+namespace {
+
+// The program as one Exec argument (the desktop entry specification, "The Exec
+// key"): quoted whole when it holds a reserved character, with the quote, the
+// backtick, the dollar and the backslash itself backslashed inside the quotes,
+// and that backslash doubled by the string escape rule, which is applied first.
+// A % is doubled either way, or it is a field code.
+std::string exec_argument(const std::string& program) {
+    const bool reserved = program.find_first_of(" \t\"'\\><~|&;$*?#()`") != std::string::npos;
+    std::string out;
+    if (reserved) out += '"';
+    for (const char c : program) {
+        if (c == '%') {
+            out += "%%";
+        } else if (reserved && (c == '"' || c == '`' || c == '$' || c == '\\')) {
+            out += "\\\\";
+            out += c == '\\' ? "\\\\" : std::string(1, c);
+        } else {
+            out += c;
+        }
+    }
+    if (reserved) out += '"';
+    return out;
+}
+
+}  // namespace
+
 std::string autostart_contents(const std::string& exec, bool tray) {
     std::ostringstream out;
     out << "[Desktop Entry]\n"
         << "Type=Application\n"
         << "Name=Isotone\n"
         << "Comment=System-wide equalizer\n"
-        << "Exec=" << exec << (tray ? " --tray" : "") << "\n"
+        << "Exec=" << exec_argument(exec) << (tray ? " --tray" : "") << "\n"
         << "Terminal=false\n"
         // Every desktop this targets reads the directory, but each also honours
         // OnlyShowIn/NotShowIn, so neither is written: the entry is for all of

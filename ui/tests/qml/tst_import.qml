@@ -35,7 +35,7 @@ Item {
             Presets.assign("", "")
         }
         function cleanup() {
-            for (const d of overlay.children) if (d.cardWidth !== undefined) d.close()
+            for (const d of Array.from(overlay.children)) if (d.cardWidth !== undefined) d.close()
             tryVerify(noDialog)
         }
 

@@ -294,7 +294,9 @@ void GlobalHotkeys::unregisterAll() {
         for (const Grab& g : grabs_)
             for (unsigned extra : kLockVariants)
                 xcb_ungrab_key(c, static_cast<xcb_keycode_t>(g.keycode), root, static_cast<uint16_t>(g.modifiers | extra));
-        xcb_flush(c);
+        // A round trip, not a flush: the keys are free for another client only
+        // once the server has processed the ungrabs.
+        free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), nullptr));
     }
     grabs_.clear();
     if (portal_) portal_->close();

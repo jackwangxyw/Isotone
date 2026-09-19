@@ -92,11 +92,15 @@ Item {
             verify(Startup.launchAtSignIn)
             verify(child("launchAtSignIn").checked)
             verify(flag("general/launchAtSignIn"))
+            // Windows: the Run value, the exe quoted. Linux: the autostart entry's Exec.
+            const linux = Qt.platform.os === "linux"
+            const withTray = linux ? /^\/\S*ui_qml_tests --tray$/ : /^".*ui_qml_tests\.exe" --tray$/
+            const withoutTray = linux ? /^\/\S*ui_qml_tests$/ : /^".*ui_qml_tests\.exe"$/
             const command = Startup.command()
-            verify(/^".*ui_qml_tests\.exe" --tray$/.test(command), command)
+            verify(withTray.test(command), command)
 
             mouseClick(child("startInTray"))   // off: the value loses --tray
-            verify(/^".*ui_qml_tests\.exe"$/.test(Startup.command()), Startup.command())
+            verify(withoutTray.test(Startup.command()), Startup.command())
             mouseClick(child("startInTray"))
             verify(Startup.command().endsWith(" --tray"))
 

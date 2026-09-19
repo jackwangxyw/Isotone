@@ -13,7 +13,9 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include <atomic>
 #include <cmath>
@@ -30,7 +32,14 @@
 #include "responsegraph.h"
 #include "shortcutregistry.h"
 #include "singleinstance.h"
+#include "test_rig.h"
 #include "traymenu.h"
+
+// Last: Xlib's macros (Bool, Status, None) collide with names in Qt's headers.
+#if !defined(_WIN32)
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#endif
 
 using namespace isotone;
 
@@ -50,12 +59,6 @@ struct Scratch {
         settings = std::make_unique<AppSettings>();
     }
 };
-
-QAction* find_action(QMenu* menu, const QString& prefix) {
-    for (QAction* a : menu->actions())
-        if (a->text().startsWith(prefix)) return a;
-    return nullptr;
-}
 
 }  // namespace
 
@@ -305,6 +308,7 @@ TEST_CASE("bindings and Global persist") {
     CHECK(s.settings->value(QStringLiteral("shortcuts/mute/global")).toBool() == false);
 }
 
+#if defined(_WIN32)
 TEST_CASE("a global hotkey's keys for RegisterHotKey") {
     UINT mods = 0, vk = 0;
     CHECK(GlobalHotkeys::toNative(QStringLiteral("Ctrl+E"), &mods, &vk));
@@ -377,14 +381,107 @@ TEST_CASE("global hotkeys register for Global actions, report one taken, and act
     other.apply();
     CHECK(other.registered() == QStringList{"eq"});
 }
+#else
+TEST_CASE("a global hotkey's keys for an X grab and for the portal") {
+    unsigned mods = 0;
+    unsigned long sym = 0;
+    CHECK(GlobalHotkeys::toKeysym(QStringLiteral("Ctrl+E"), &mods, &sym));
+    CHECK(mods == ControlMask);
+    CHECK(sym == XK_e);
+    CHECK(GlobalHotkeys::toKeysym(QStringLiteral("Ctrl+Right"), &mods, &sym));
+    CHECK(sym == XK_Right);
+    CHECK(GlobalHotkeys::toKeysym(QStringLiteral("Ctrl+Alt+Shift+F13"), &mods, &sym));
+    CHECK(mods == (ControlMask | Mod1Mask | ShiftMask));
+    CHECK(sym == XK_F13);
+    CHECK(GlobalHotkeys::toKeysym(QStringLiteral("Ctrl+7"), &mods, &sym));
+    CHECK(sym == XK_7);
+    CHECK(GlobalHotkeys::toKeysym(QStringLiteral("Meta+Del"), &mods, &sym));
+    CHECK(mods == Mod4Mask);
+    CHECK(sym == XK_Delete);
+    CHECK_FALSE(GlobalHotkeys::toKeysym(QString(), &mods, &sym));
+
+    // The XDG shortcuts specification's form: modifiers in capitals, then the keysym's name.
+    CHECK(GlobalHotkeys::toPortalTrigger(QStringLiteral("Ctrl+E")) == QStringLiteral("CTRL+e"));
+    CHECK(GlobalHotkeys::toPortalTrigger(QStringLiteral("Ctrl+Alt+Shift+F13")) == QStringLiteral("CTRL+ALT+SHIFT+F13"));
+    CHECK(GlobalHotkeys::toPortalTrigger(QStringLiteral("Meta+Right")) == QStringLiteral("LOGO+Right"));
+    CHECK(GlobalHotkeys::toPortalTrigger(QString()).isEmpty());
+}
+
+TEST_CASE("global hotkeys grab on X11 for Global actions, report one taken, and activate") {
+    // Only under an X server: run with QT_QPA_PLATFORM=xcb (ctest does, as ui_model_tests_x11).
+    // Keys every X keymap has (F13 and up have no keycode in a standard one) and
+    // nothing is expected to hold.
+    const QString rare = QStringLiteral("Ctrl+Alt+Shift+Meta+F12");
+    Scratch s;
+    ShortcutRegistry first(s.settings.get());
+    for (const QString& id : first.ids(QStringLiteral("app"))) first.setGlobal(id, false);
+    first.rebind(QStringLiteral("mute"), rare);
+    first.setGlobal(QStringLiteral("mute"), true);
+
+    auto hotkeys = std::make_unique<GlobalHotkeys>(&first);
+    if (hotkeys->mechanism() != QLatin1String("x11")) {
+        MESSAGE("not an X11 session; skipped");
+        return;
+    }
+    CHECK(hotkeys->registered() == QStringList{"mute"});
+    CHECK_FALSE(first.globalFailed(QStringLiteral("mute")));
+
+    QSignalSpy activated(&first, &ShortcutRegistry::activated);
+    CHECK(hotkeys->simulate(QStringLiteral("mute")));
+    REQUIRE(activated.count() == 1);
+    CHECK(activated.at(0).at(0).toString() == QStringLiteral("mute"));
+
+    // Not while the Shortcuts page waits for keys: they must reach the page.
+    first.setCapturing(true);
+    CHECK(hotkeys->registered().isEmpty());
+    first.setCapturing(false);
+    CHECK(hotkeys->registered() == QStringList{"mute"});
+
+    // Another client holding the keys (as another app would) makes the grab fail, and it says so.
+    Display* other = XOpenDisplay(nullptr);
+    REQUIRE(other != nullptr);
+    const Window root = DefaultRootWindow(other);
+    const KeyCode code = XKeysymToKeycode(other, XK_F11);
+    const unsigned taken = ControlMask | Mod1Mask | ShiftMask | Mod4Mask;
+    XGrabKey(other, code, taken, root, 1 /* owner events */, GrabModeAsync, GrabModeAsync);
+    XSync(other, 0);
+    first.rebind(QStringLiteral("mute"), QStringLiteral("Ctrl+Alt+Shift+Meta+F11"));
+    CHECK(hotkeys->registered().isEmpty());
+    CHECK(first.globalFailed(QStringLiteral("mute")));
+
+    // Released there, the keys are free again.
+    XUngrabKey(other, code, taken, root);
+    XSync(other, 0);
+    hotkeys->apply();
+    CHECK(hotkeys->registered() == QStringList{"mute"});
+    CHECK_FALSE(first.globalFailed(QStringLiteral("mute")));
+
+    // Released on destruction: the other client can take them.
+    hotkeys.reset();
+    static int x_error = 0;
+    XErrorHandler before = XSetErrorHandler([](Display*, XErrorEvent* e) -> int {
+        x_error = e->error_code;
+        return 0;
+    });
+    XGrabKey(other, code, taken, root, 1 /* owner events */, GrabModeAsync, GrabModeAsync);
+    XSync(other, 0);
+    CHECK(x_error == 0);
+    XUngrabKey(other, code, taken, root);
+    XSync(other, 0);
+    XSetErrorHandler(before);
+    XCloseDisplay(other);
+}
+#endif
 
 TEST_CASE("the tray menu") {
     Scratch s;
     ShortcutRegistry shortcuts(s.settings.get());
     EqSession session;
     Outputs outputs;
-    // No output list and a Local\ region namespace: nothing reaches a real output.
-    Presets presets(s.dir.path(), &session, {}, L"Local\\isotone-tray-test.", L"");
+    // No output list and a place of the test's own: nothing reaches a real output.
+    const test_rig::Place place("tray");
+    const std::unique_ptr<Presets> owned = place.presets(s.dir.path(), &session, {});
+    Presets& presets = *owned;
     TrayMenu tray(&session, &outputs, &presets, &shortcuts);
     QMenu* menu = tray.menu();
 
@@ -487,9 +584,16 @@ TEST_CASE("the preview session is a fixed sample with a spectrum, and writes now
 }
 
 TEST_CASE("a second launch finds the running instance and asks for its window") {
-    const QString name = SingleInstance::nameFor(QStringLiteral("C:/isotone-test-%1").arg(GetCurrentProcessId()));
-    CHECK(name == SingleInstance::nameFor(QStringLiteral("c:\\ISOTONE-TEST-%1").arg(GetCurrentProcessId())));
-    CHECK(name != SingleInstance::nameFor(QStringLiteral("C:/isotone-other-%1").arg(GetCurrentProcessId())));
+#if defined(_WIN32)
+    const QString name = SingleInstance::nameFor(QStringLiteral("C:/isotone-test-%1").arg(test_rig::pid()));
+    // Windows paths are one path whatever their case and separators.
+    CHECK(name == SingleInstance::nameFor(QStringLiteral("c:\\ISOTONE-TEST-%1").arg(test_rig::pid())));
+    CHECK(name != SingleInstance::nameFor(QStringLiteral("C:/isotone-other-%1").arg(test_rig::pid())));
+#else
+    const QString name = SingleInstance::nameFor(QStringLiteral("/tmp/isotone-test-%1").arg(test_rig::pid()));
+    CHECK(name != SingleInstance::nameFor(QStringLiteral("/tmp/ISOTONE-TEST-%1").arg(test_rig::pid())));
+    CHECK(name != SingleInstance::nameFor(QStringLiteral("/tmp/isotone-other-%1").arg(test_rig::pid())));
+#endif
 
     SingleInstance nobody(name);
     CHECK_FALSE(nobody.notifyRunning(true));

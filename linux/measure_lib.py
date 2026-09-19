@@ -88,8 +88,8 @@ def install_conf(conf_path):
     time.sleep(2.0)
 
 
-def make_tone(path, freq):
-    t = np.arange(int(RATE * DUR)) / RATE
+def make_tone(path, freq, seconds=DUR):
+    t = np.arange(int(RATE * seconds)) / RATE
     x = AMP * np.sin(2 * math.pi * freq * t)
     pcm = np.clip(x * 32767.0, -32768, 32767).astype("<i2")
     stereo = np.repeat(pcm[:, None], 2, axis=1).tobytes()

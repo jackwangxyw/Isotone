@@ -11,8 +11,9 @@
 #
 #   systemctl --user enable --now isotone-daemon
 #
-# With no arguments the daemon follows the default sink. To pin it to one
-# instead, replace the command in a drop-in:
+# With no arguments the daemon follows the default sink and moves applications'
+# playback into its own, so the default stays the hardware the desktop shows.
+# To pin it to one sink instead, replace the command in a drop-in:
 #
 #   systemctl --user edit isotone-daemon
 #   [Service]

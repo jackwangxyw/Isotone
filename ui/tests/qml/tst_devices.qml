@@ -71,6 +71,8 @@ Item {
 
         function initTestCase() { UiState.overlay = overlay }
         function init() {
+            // devicetool, IsoAPO and Equalizer APO: Linux has none of them (devicesmodel_posix.cpp).
+            if (Qt.platform.os === "linux") skip("Windows only")
             tryVerify(() => !Devicetool.working, 5000)
             closeDialogs()
             wait(0)

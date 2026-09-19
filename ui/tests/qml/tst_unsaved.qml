@@ -25,7 +25,7 @@ Item {
         function dialogButton(name) { return findChild(overlay, name) }
         function noDialog() { return findChild(overlay, "dialogCard") === null }
         function title() {
-            for (const d of overlay.children) if (d.cardWidth !== undefined && d.visible) return d.title
+            for (const d of Array.from(overlay.children)) if (d.cardWidth !== undefined && d.visible) return d.title
             return ""
         }
         function type(text) { for (const c of text) keyClick(c) }
@@ -50,7 +50,7 @@ Item {
             cancelled = 0
         }
         function cleanup() {
-            for (const d of overlay.children) if (d.cardWidth !== undefined) d.close()
+            for (const d of Array.from(overlay.children)) if (d.cardWidth !== undefined) d.close()
             tryVerify(noDialog)
         }
 

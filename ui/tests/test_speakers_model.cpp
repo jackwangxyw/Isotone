@@ -11,19 +11,27 @@
 #include <QDir>
 #include <QSignalSpy>
 
-#include <windows.h>
-
+#include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include "apppaths.h"
 #include "eqsession.h"
 #include "isotone/apo_config.h"
 #include "isotone/param_block.h"
+#if defined(_WIN32)
 #include "isotone_file.h"
+#endif
 #include "persisted_state.h"
 #include "responsegraph.h"
 #include "speakers.h"
+#include "test_rig.h"
 
 using namespace isotone;
 using namespace isotone::ui;
@@ -50,6 +58,15 @@ Band peak(uint32_t id, ChannelMask mask, double fc, double gain) {
 QString temp_path(const char* name) {
     return QDir::temp().filePath(QStringLiteral("isotone-speakers-%1-%2").arg(QCoreApplication::applicationPid()).arg(QLatin1String(name)));
 }
+
+void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+
+// What the platform's calls return: HRESULTs on Windows, errnos on Linux.
+#if defined(_WIN32)
+const int kOk = S_OK, kNotFound = HRESULT_FROM_WIN32(ERROR_NOT_FOUND), kInvalid = E_INVALIDARG;
+#else
+constexpr int kOk = 0, kNotFound = ENOENT, kInvalid = EINVAL;
+#endif
 
 int row_of(const Speakers& speakers, const char* code) {
     for (int row = 0; row < speakers.rowCount(); ++row)
@@ -146,6 +163,7 @@ TEST_CASE("a state written for another layout loads moved to the output's") {
     CHECK(session.state().layout_channels == 8);
 }
 
+#if defined(_WIN32)
 TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state comes back") {
     // What DeviceLink writes, read back from a sandbox Isotone.txt.
     const QString dir = temp_path("compat");
@@ -169,7 +187,7 @@ TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state
                     if (d.endpoint_guid.find("8f4d2a10-0000-4000-8000-0000000c0a7e") != std::string::npos && want(d.state)) return true;
                 }
             }
-            Sleep(30);
+            sleep_ms(30);
         }
         return false;
     };
@@ -196,25 +214,27 @@ TEST_CASE("test tones and solo reach an Equalizer APO output, and the real state
     QDir(dir).removeRecursively();
     QFile::remove(temp_path("compat.json"));
 }
+#endif
 
 TEST_CASE("solo and test tones reach the output and are never saved") {
     const std::string guid = "{8f4d2a10-0000-4000-8000-00000050101e}";   // no such endpoint: no region, no audio
-    // A Local\ link: the saved state is the self test's, never %ProgramData%.
-    EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
+    // Saved state no real engine reads.
+    const test_rig::Place place("speakers.solo");
+    EqSession session(place.link());
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("solo.json")));
-    session.useTarget(surround(8, k71, Backend::native, guid));
+    session.useTarget(surround(8, k71, test_rig::kEngine, guid));
     EqState s;
     s.bands = {peak(1, kAllChannels, 1000, 6)};
     s.speakers.upmix = Upmix::All;
     s.speakers.swap_left_right = true;
     s.speakers.muted = 0x80;
     session.loadState(&s);
-    const std::wstring path = isotone::win::persisted_state_path(isotone::win::persisted_state_dir(true), isotone::ui::widen_id(guid));
+    const std::filesystem::path path = place.saved_path(guid);
     std::filesystem::remove(path);
     const auto saved = [&] {
         ParamBlock block{};
-        REQUIRE(isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded);
+        REQUIRE(place.read_saved(guid, &block));
         EqState out;
         from_param_block(block, &out);
         return out;
@@ -278,10 +298,10 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
         speakers.setTestTones(true);
         for (int i = 0; i < 100 && failed.isEmpty(); ++i) {
             QCoreApplication::processEvents();
-            Sleep(20);
+            sleep_ms(20);
         }
         REQUIRE(failed.size() == 1);
-        CHECK(failed.first().first().toInt() == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+        CHECK(failed.first().first().toInt() == kNotFound);
         CHECK_FALSE(speakers.testTones());
         CHECK_FALSE(session.engineState().bypass);
     }
@@ -290,17 +310,18 @@ TEST_CASE("solo and test tones reach the output and are never saved") {
 }
 
 TEST_CASE("a failure of a tone already stopped does not end test tones") {
-    EqSession session(std::make_unique<DeviceLink>(L"Local\\IsotoneSpeakersTest." + std::to_wstring(GetCurrentProcessId()) + L"."));
+    const test_rig::Place place("speakers.stale");
+    EqSession session(place.link());
     Speakers speakers(&session);
     speakers.setStore(SpeakerStore(temp_path("stale.json")));
-    session.useTarget(surround(8, k71, Backend::native, "{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
+    session.useTarget(surround(8, k71, test_rig::kEngine, "{8f4d2a10-0000-4000-8000-0000005a1e00}"));   // no such endpoint
     QSignalSpy failed(&speakers, &Speakers::toneFailed);
     speakers.setTestTones(true);   // its tone fails on its thread
-    Sleep(1000);                   // the failure is queued by now
+    sleep_ms(1000);                // the failure is queued by now
     speakers.toggleTone(0);        // paused: that tone is stopped
     for (int i = 0; i < 10; ++i) {
         QCoreApplication::processEvents();
-        Sleep(20);
+        sleep_ms(20);
     }
     CHECK(speakers.testTones());
     CHECK(failed.isEmpty());
@@ -475,9 +496,9 @@ TEST_CASE("changing the layout calls the layout setter for the output, with test
         ++calls;
         called_guid = guid;
         called_layout = layout;
-        return S_OK;
+        return kOk;
     });
-    CHECK(speakers.setLayout(QStringLiteral("5.1")) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));   // no output
+    CHECK(speakers.setLayout(QStringLiteral("5.1")) == kNotFound);   // no output
     CHECK(calls == 0);
 
     session.useTarget(surround(8, k71, Backend::none, "{8f4d2a10-0000-4000-8000-00000000cafe}"));
@@ -485,12 +506,12 @@ TEST_CASE("changing the layout calls the layout setter for the output, with test
     CHECK(speakers.layoutChannels(QStringLiteral("5.1")) == 6);
     CHECK(speakers.layoutChannels(QStringLiteral("Stereo")) == 2);
     speakers.setTestTones(true);
-    CHECK(speakers.setLayout(QStringLiteral("5.1")) == S_OK);
+    CHECK(speakers.setLayout(QStringLiteral("5.1")) == kOk);
     CHECK(calls == 1);
     CHECK(called_guid == "{8f4d2a10-0000-4000-8000-00000000cafe}");
     CHECK(called_layout == isotone::SpeakerLayout::five_point_one);
     CHECK_FALSE(speakers.testTones());
-    CHECK(speakers.setLayout(QStringLiteral("9.1")) == E_INVALIDARG);
+    CHECK(speakers.setLayout(QStringLiteral("9.1")) == kInvalid);
     CHECK(calls == 1);
     QFile::remove(temp_path("layout.json"));
 }

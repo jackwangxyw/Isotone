@@ -14,6 +14,10 @@
 class PreviewSession : public EqSession {
     Q_OBJECT
     QML_ELEMENT
+    // Not a singleton, though EqSession is. Qt 6.4 decides by the member type
+    // QML_SINGLETON declares, which a subclass inherits, and would make this
+    // one uncreatable too; this shadows it.
+    enum class QmlIsSingleton { yes = false };
 
 public:
     explicit PreviewSession(QObject* parent = nullptr);

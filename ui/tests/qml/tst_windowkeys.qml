@@ -14,7 +14,7 @@ Item {
     property int quits: 0
     function dialogs() {
         const out = []
-        for (const d of overlay.children) if (d.cardWidth !== undefined) out.push(d)
+        for (const d of Array.from(overlay.children)) if (d.cardWidth !== undefined) out.push(d)
         return out
     }
 

@@ -102,20 +102,6 @@ if(WIN32)
 endif()
 
 if(NOT WIN32)
-    # What the Linux backend can be held to without a Qt layer or a daemon: the
-    # test creates the sink's region and writes its ring the way a daemon does.
-    if(ISOTONE_BUILD_TESTS)
-        set(ISOTONE_UI_POSIX_TESTS tests/test_main.cpp tests/test_devicelink_posix.cpp
-                                   tests/test_autostart_xdg.cpp)
-        if(PIPEWIRE_FOUND)
-            list(APPEND ISOTONE_UI_POSIX_TESTS tests/test_pipewire_outputs.cpp)
-        endif()
-        add_executable(ui_backend_posix_tests ${ISOTONE_UI_POSIX_TESTS})
-        target_link_libraries(ui_backend_posix_tests PRIVATE isotone_ui_backend)
-        target_include_directories(ui_backend_posix_tests PRIVATE
-                                   ${PROJECT_SOURCE_DIR}/core/tests/third_party)
-        add_test(NAME ui_backend_posix_tests COMMAND ui_backend_posix_tests)
-    endif()
     # The Qt layer lists outputs and plays its tones through PipeWire; without
     # it there is no Linux app to build.
     if(NOT PIPEWIRE_FOUND)
@@ -323,22 +309,50 @@ else()
 endif()
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
-if(ISOTONE_BUILD_TESTS AND WIN32)
-    add_executable(ui_tests tests/test_main.cpp tests/test_backend.cpp tests/test_typed_value.cpp
-                   tests/test_speaker_setup.cpp tests/test_config_attach.cpp tests/test_settings_backend.cpp
-                   tests/test_compat_retry.cpp tests/test_sine_tone.cpp)
+if(ISOTONE_BUILD_TESTS)
+    # The backend without Qt. The Windows half drives IsoAPO's mapping, the
+    # compat writer and the registry; the Linux half the daemon's region, XDG
+    # autostart and a running PipeWire (skipped where there is none).
+    if(WIN32)
+        set(ISOTONE_UI_TESTS_PLATFORM tests/test_backend.cpp tests/test_config_attach.cpp
+                                      tests/test_settings_backend.cpp tests/test_compat_retry.cpp)
+    else()
+        set(ISOTONE_UI_TESTS_PLATFORM tests/test_devicelink_posix.cpp tests/test_autostart_xdg.cpp
+                                      tests/test_pipewire_outputs.cpp)
+    endif()
+    add_executable(ui_tests tests/test_main.cpp tests/test_typed_value.cpp tests/test_speaker_setup.cpp
+                   tests/test_sine_tone.cpp ${ISOTONE_UI_TESTS_PLATFORM})
     target_link_libraries(ui_tests PRIVATE isotone_ui_backend)
     target_include_directories(ui_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
-    target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
+    if(MSVC)
+        target_compile_options(ui_tests PRIVATE /wd5285)   # doctest, as in core/tests
+    endif()
     add_test(NAME ui_tests COMMAND ui_tests)
 
+    # Devices is Windows' devicetool and Equalizer APO; the rest is the model on both.
+    if(WIN32)
+        set(ISOTONE_UI_MODEL_TESTS_PLATFORM tests/test_devices.cpp)
+    endif()
     add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp
-                   tests/test_devices.cpp tests/test_settings.cpp tests/test_session_fixes.cpp
-                   tests/test_spectrum_display.cpp tests/test_eqbyear.cpp)
+                   tests/test_settings.cpp tests/test_session_fixes.cpp tests/test_spectrum_display.cpp
+                   tests/test_eqbyear.cpp tests/test_rig.h ${ISOTONE_UI_MODEL_TESTS_PLATFORM})
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)
-    target_compile_options(ui_model_tests PRIVATE /wd5285)   # doctest, as in core/tests
+    if(MSVC)
+        target_compile_options(ui_model_tests PRIVATE /wd5285)   # doctest, as in core/tests
+    endif()
+    add_test(NAME ui_model_tests COMMAND ui_model_tests)
+    # Linux: the global hotkeys' X11 grabs need an X server; the suite above runs
+    # offscreen, where that case skips itself.
+    if(NOT WIN32)
+        find_program(XVFB_RUN xvfb-run)
+        if(XVFB_RUN)
+            add_test(NAME ui_model_tests_x11
+                     COMMAND ${XVFB_RUN} -a env QT_QPA_PLATFORM=xcb $<TARGET_FILE:ui_model_tests>
+                             "-tc=global hotkeys grab on X11*")
+        endif()
+    endif()
 
     # QML tests: Qt Quick Test cases in tests/qml driving the real components.
     qt_add_executable(ui_qml_tests tests/qml_main.cpp)
@@ -346,4 +360,5 @@ if(ISOTONE_BUILD_TESTS AND WIN32)
     target_compile_definitions(ui_qml_tests PRIVATE QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/qml")
     # Devices work package: the outputs and devicetool the QML tests see.
     target_compile_definitions(ui_qml_tests PRIVATE ISOTONE_FAKE_DEVICETOOL_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices/fake-devicetool.json")
+    add_test(NAME ui_qml_tests COMMAND ui_qml_tests)
 endif()

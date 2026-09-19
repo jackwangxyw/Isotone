@@ -80,8 +80,8 @@ jobs:
           sudo apt-get install -y -qq qt6-base-dev qt6-declarative-dev qt6-base-dev-tools
           # The app runs offscreen in the measurement, so the QML modules it
           # imports have to be there at run time too; the X11 and xcb headers are
-          # the global hotkeys'.
-          sudo apt-get install -y -qq libx11-dev libxcb1-dev qml6-module-qtquick qml6-module-qtquick-window \
+          # the global hotkeys', and Xvfb is the X server their grab test runs against.
+          sudo apt-get install -y -qq libx11-dev libxcb1-dev xvfb qml6-module-qtquick qml6-module-qtquick-window \
             qml6-module-qtquick-shapes qml6-module-qtquick-dialogs qml6-module-qtcore qml6-module-qttest \
             qml6-module-qtqml-workerscript qml6-module-qtquick-templates qml6-module-qtquick-controls qml6-module-qtquick-layouts
 
@@ -100,7 +100,7 @@ jobs:
           test -x build/linux/daemon/isotone-daemon || { echo "the daemon was not built"; exit 1; }
           test -x build/linux/spike/isotone-pw-spike || { echo "the spike was not built"; exit 1; }
           test -x build/linux/daemon/isotone-state || { echo "isotone-state was not built"; exit 1; }
-          test -x build/ui/ui_backend_posix_tests || { echo "the UI backend was not built"; exit 1; }
+          test -x build/ui/ui_tests || { echo "the UI tests were not built"; exit 1; }
           test -x build/ui/isotone || { echo "the app was not built"; exit 1; }
 
       - name: Test

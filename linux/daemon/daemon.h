@@ -33,11 +33,11 @@ struct Options {
     //
     // Empty follows the default sink through WirePlumber's "default" metadata,
     // moving the links, the region and the saved state together. The daemon
-    // never targets its own virtual sink, which is what the default becomes once
-    // Isotone is installed, so it keeps feeding whichever real sink it already
-    // had. Starting while Isotone is already the default therefore leaves it
-    // with nothing to feed until a real sink is made default once; --sink is the
-    // way round that until the UI sets the target itself.
+    // never targets its own virtual sink, should someone make that the default
+    // by hand, so it keeps feeding whichever real
+    // sink it already had. Starting while Isotone is already the default
+    // therefore leaves it with nothing to feed until a real sink is made default
+    // once; with capture_streams there is no need to make it the default at all.
     std::string target_sink;
 
     // The virtual sink applications see.
@@ -66,6 +66,16 @@ struct Options {
     // Exit once the graph is linked and one block has been processed. The
     // measurement harness uses this; a service never does.
     bool exit_when_linked = false;
+
+    // Moves every application's playback stream into the virtual sink as it
+    // appears, by giving it a target.object in the default metadata, as a user
+    // moving it in the desktop's sound settings does. The default sink can then
+    // stay the hardware the desktop shows, and choosing another output there
+    // moves the EQ with it (the daemon follows the default), which is how an
+    // output is chosen on Windows too. A stream that names its own target is
+    // left alone, and so is one moved elsewhere later. The targets set are
+    // cleared on exit, so the streams go back to the default sink.
+    bool capture_streams = true;
 };
 
 // Runs until SIGINT or SIGTERM. Returns a process exit code.

@@ -18,6 +18,14 @@
 #   stale     a daemon killed outright leaves its region and its ring claim
 #             behind; the next one has to adopt the region and take the ring
 #             over, or the UI's spectrum is dead for the whole of that run
+#   capture   an application playing to the default sink, which is the hardware:
+#             the daemon moves its stream into the virtual sink, so the band
+#             applies without Isotone being the default
+#   leave     the same with --leave-streams: the stream goes straight to the
+#             hardware and the band does not apply, which is what says the
+#             capture, and nothing else, put the EQ in the path
+#   release   a stream still playing when the daemon exits goes back to the
+#             hardware sink rather than following a sink that is gone
 #
 # Each figure is the difference from the same daemon with nothing written, so a
 # fixed gain anywhere in the chain cancels and what is left is the filter.
@@ -59,10 +67,11 @@ def band_arg():
     return f"{BAND[0]},{BAND[1]},{BAND[2]}"
 
 
-def start_daemon(sink=HW, channels=2, keep_region=False):
+def start_daemon(sink=HW, channels=2, keep_region=False, extra=()):
     args = [DAEMON, "--sink", sink, "--channels", str(channels), "--state-dir", STATE_DIR]
     if keep_region:
         args.append("--keep-region")
+    args += list(extra)
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     m.wait_for_ports(VIRT, "-o", channels)
     m.wait_for_ports("isotone-core", "-o", channels)
@@ -171,6 +180,100 @@ def leave_stale_region(freq):
         play.wait(timeout=10)
 
 
+def set_default_sink(name):
+    # WirePlumber reads the value as JSON only when it is typed as JSON.
+    m.sh(f"pw-metadata 0 default.configured.audio.sink '{{ \"name\": \"{name}\" }}' Spa:String:JSON")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if f'"{name}"' in m.sh("pw-metadata 0 default.audio.sink").stdout:
+            return
+        time.sleep(0.1)
+    sys.exit(f"{name} never became the default sink")
+
+
+def app_level(freq):
+    """Plays as an application does, to the default sink, and captures the hardware.
+
+    No target and no hand-made link: where the stream goes is up to the session
+    manager and the daemon, which is the point.
+    """
+    os.makedirs(m.WORK, exist_ok=True)
+    tone = os.path.join(m.WORK, "app.wav")
+    cap = os.path.join(m.WORK, "app-cap.wav")
+    m.make_tone(tone, freq)
+    rec = subprocess.Popen(
+        ["pw-record", "--target", "0", "-P", "{ node.name = isotone-rec }",
+         "--rate", str(m.RATE), "--channels", "2", "--format", "s16", cap],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        rec_in = m.wait_for_named("isotone-rec", "-i", ["input_FL", "input_FR"])
+        for src, dst in zip(m.wait_for_named(HW, "-o", ["monitor_FL", "monitor_FR"]), rec_in):
+            m.sh(f"pw-link '{src}' '{dst}'")
+        time.sleep(0.6)
+        subprocess.run(["pw-play", "-P", "{ node.name = app-play }", tone], timeout=m.DUR * 4 + 20,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.4)
+    finally:
+        rec.send_signal(2)
+        rec.wait(timeout=10)
+    return m.level_dbfs(cap, freq)
+
+
+def app_case(freq, band, extra=()):
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
+    proc = start_daemon(extra=extra)
+    try:
+        if band:
+            state_tool("set", "--sink", HW, "--band", band_arg())
+        return app_level(freq)
+    finally:
+        stop_daemon(proc)
+
+
+def linked_to(stream):
+    """The sinks a stream's output ports are linked to."""
+    out = m.sh("pw-link -l").stdout.splitlines()
+    sinks = set()
+    for i, line in enumerate(out):
+        if line.startswith(f"{stream}:output_"):
+            for follow in out[i + 1:]:
+                if not follow.startswith(" "):
+                    break
+                if "|->" in follow:
+                    sinks.add(follow.split("|->")[1].strip().split(":")[0])
+    return sinks
+
+
+def wait_linked(stream, sink, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if linked_to(stream) == {sink}:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def released():
+    """A stream playing when the daemon exits goes back to the hardware."""
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
+    os.makedirs(m.WORK, exist_ok=True)
+    tone = os.path.join(m.WORK, "long.wav")
+    m.make_tone(tone, 1000.0, seconds=20.0)   # still playing when the daemon has gone
+    proc = start_daemon()
+    play = subprocess.Popen(["pw-play", "-P", "{ node.name = app-play }", tone],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        moved = wait_linked("app-play", VIRT)
+        stop_daemon(proc)
+        back = wait_linked("app-play", HW)
+        return moved, back
+    finally:
+        if proc.poll() is None:
+            stop_daemon(proc)
+        play.kill()
+        play.wait(timeout=10)
+
+
 def main():
     for path in (DAEMON, STATE_TOOL):
         if not os.path.exists(path):
@@ -237,6 +340,23 @@ def main():
     else:
         print(f"{'stale ring':>10}  {1000.0:6.0f}  {'':>9}  {ring:10.3f}  "
               f"{'':>9}  {'vs sink':>9}  {ring - got:+8.3f}")
+
+    # Applications playing to the default sink, which is the hardware.
+    set_default_sink(HW)
+    flat = app_case(1000.0, band=False)
+    got = app_case(1000.0, band=True)
+    report("capture", 1000.0, flat, got)
+    left = app_case(1000.0, band=True, extra=["--leave-streams"])
+    left_error = left - flat
+    if abs(left_error) > 0.05:
+        failures += 1
+    print(f"{'leave':>10}  {1000.0:6.0f}  {flat:9.3f}  {left:10.3f}  "
+          f"{left_error:9.3f}  {0.0:9.3f}  {left_error:+8.3f}")
+    moved, back = released()
+    if not (moved and back):
+        failures += 1
+    print(f"{'release':>10}  stream into {VIRT}: {'yes' if moved else 'NO'}, "
+          f"back to {HW} after exit: {'yes' if back else 'NO'}")
 
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     print()

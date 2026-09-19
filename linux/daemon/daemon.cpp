@@ -67,6 +67,7 @@ const Layout* layout_for(uint32_t channels) {
 struct NodeInfo {
     std::string name;
     std::string media_class;
+    bool        capture = false;   // an application's playback (capture_streams)
 };
 
 struct PortInfo {
@@ -115,6 +116,10 @@ struct Daemon {
 
     std::map<uint32_t, NodeInfo> nodes;
     std::map<uint32_t, PortInfo> ports;
+
+    // Playback streams given a target.object (capture_streams), so exit can
+    // clear exactly those.
+    std::vector<uint32_t> moved_streams;
 
     // The sink being fed. With --sink this never changes; without it, it follows
     // the default sink.
@@ -527,11 +532,45 @@ std::string default_sink_name(const char* value) {
 int on_metadata_property(void* data, uint32_t subject, const char* key, const char* /*type*/,
                          const char* value) {
     auto* d = static_cast<Daemon*>(data);
-    if (subject != PW_ID_CORE || key == nullptr) return 0;
+    if (key == nullptr) return 0;
+    // A stream someone has since moved elsewhere is theirs: exit must not undo it.
+    if (subject != PW_ID_CORE && std::strcmp(key, "target.object") == 0 &&
+        (value == nullptr || d->options.sink_name != value)) {
+        std::erase(d->moved_streams, subject);
+        return 0;
+    }
+    if (subject != PW_ID_CORE) return 0;
     if (std::strcmp(key, "default.audio.sink") != 0) return 0;
+    // Only when following: with --sink the target is the owner's choice and the
+    // session manager does not get a vote.
+    if (!d->options.target_sink.empty()) return 0;
     set_target(*d, default_sink_name(value));
     return 0;
 }
+
+// ------------------------------------------------------------------ streams
+
+// A stream the desktop would play straight to the default sink: an
+// application's playback, not one that named its own target (pw-play --target,
+// Isotone's own tones, the measurement rig) and not one of ours.
+bool should_capture(const spa_dict* props) {
+    const char* media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+    if (media_class == nullptr || std::strcmp(media_class, "Stream/Output/Audio") != 0) return false;
+    if (spa_dict_lookup(props, PW_KEY_TARGET_OBJECT) != nullptr) return false;
+    if (spa_dict_lookup(props, PW_KEY_NODE_TARGET) != nullptr) return false;
+    const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+    return name == nullptr || std::strncmp(name, "isotone", 7) != 0;
+}
+
+// WirePlumber reads target.object from the default metadata and, finding no
+// number there, matches it against node.name.
+void capture_stream(Daemon& d, uint32_t id) {
+    if (d.metadata == nullptr) return;   // done for every stream once it is bound
+    pw_metadata_set_property(d.metadata, id, "target.object", "Spa:String", d.options.sink_name.c_str());
+    d.moved_streams.push_back(id);
+}
+
+
 
 const pw_metadata_events kMetadataEvents = {
     .version = PW_VERSION_METADATA_EVENTS,
@@ -549,7 +588,9 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
         NodeInfo info;
         if (const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME)) info.name = name;
         if (const char* mc = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS)) info.media_class = mc;
+        info.capture = d->options.capture_streams && should_capture(props);
         d->nodes[id] = info;
+        if (info.capture) capture_stream(*d, id);
         try_link(*d);
         return;
     }
@@ -568,9 +609,8 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
         return;
     }
 
-    // Only when following: with --sink the target is the owner's choice and the
-    // session manager does not get a vote.
-    if (d->options.target_sink.empty() && d->metadata == nullptr &&
+    // Following the default reads it; capturing streams writes it.
+    if ((d->options.target_sink.empty() || d->options.capture_streams) && d->metadata == nullptr &&
         std::strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
         const char* name = spa_dict_lookup(props, "metadata.name");
         if (name == nullptr || std::strcmp(name, "default") != 0) return;
@@ -579,6 +619,11 @@ void on_global(void* data, uint32_t id, uint32_t /*permissions*/, const char* ty
         if (d->metadata != nullptr) {
             d->metadata_id = id;
             pw_metadata_add_listener(d->metadata, &d->metadata_hook, &kMetadataEvents, d);
+            // Streams that arrived first, or all of them again after a
+            // WirePlumber restart, which forgets every target it held.
+            d->moved_streams.clear();
+            for (const auto& [node_id, node] : d->nodes)
+                if (node.capture) capture_stream(*d, node_id);
         }
     }
 }
@@ -610,6 +655,7 @@ void on_global_remove(void* data, uint32_t id) {
     }
     d->nodes.erase(id);
     d->ports.erase(id);
+    std::erase(d->moved_streams, id);
 }
 
 const pw_registry_events kRegistryEvents = {
@@ -617,6 +663,42 @@ const pw_registry_events kRegistryEvents = {
     .global = on_global,
     .global_remove = on_global_remove,
 };
+
+// Runs the loop until the server has answered everything sent so far, or a
+// second has passed (a server that is itself going away answers nothing).
+void roundtrip(Daemon& d) {
+    struct Wait {
+        pw_main_loop* loop;
+        int seq;
+    } wait{d.loop, 0};
+    pw_core_events events{};
+    events.version = PW_VERSION_CORE_EVENTS;
+    events.done = [](void* data, uint32_t id, int seq) {
+        auto* w = static_cast<Wait*>(data);
+        if (id == PW_ID_CORE && seq == w->seq) pw_main_loop_quit(w->loop);
+    };
+    spa_hook hook{};
+    pw_core_add_listener(d.core, &hook, &events, &wait);
+    wait.seq = pw_core_sync(d.core, PW_ID_CORE, 0);
+
+    pw_loop* loop = pw_main_loop_get_loop(d.loop);
+    spa_source* timeout = pw_loop_add_timer(
+        loop, [](void* data, uint64_t) { pw_main_loop_quit(static_cast<pw_main_loop*>(data)); }, d.loop);
+    timespec second{1, 0};
+    pw_loop_update_timer(loop, timeout, &second, nullptr, false);
+    pw_main_loop_run(d.loop);
+    pw_loop_destroy_source(loop, timeout);
+    spa_hook_remove(&hook);
+}
+
+// The targets this run set go, so the streams return to the default sink rather
+// than following a sink that is about to disappear.
+void release_streams(Daemon& d) {
+    if (d.metadata == nullptr || d.moved_streams.empty()) return;
+    for (uint32_t id : d.moved_streams) pw_metadata_set_property(d.metadata, id, "target.object", nullptr, nullptr);
+    d.moved_streams.clear();
+    roundtrip(d);
+}
 
 // -------------------------------------------------------------------- setup
 
@@ -741,6 +823,8 @@ int run(const Options& options) {
     pw_registry_add_listener(d.registry, &d.registry_hook, &kRegistryEvents, &d);
 
     pw_main_loop_run(d.loop);
+
+    release_streams(d);
 
     // Teardown. The filter goes first: while it is connected the audio thread is
     // still being scheduled, and unmapping the region before that is a read of

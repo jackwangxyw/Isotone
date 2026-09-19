@@ -7,7 +7,13 @@
 
 #include "doctest.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
+
+#include <cerrno>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -293,15 +299,21 @@ TEST_CASE("the saved state takes the speaker part and keeps its own bands") {
     CHECK(fresh.speakers.crossover_hz == 100);
 
     SUBCASE("written to the file") {
-        wchar_t temp[MAX_PATH];
-        REQUIRE(GetTempPathW(MAX_PATH, temp) > 0);
+#if defined(_WIN32)
+        namespace transport = isotone::win;
         const std::filesystem::path dir =
-            std::filesystem::path(temp) / (L"isotone-ui-speakers-" + std::to_wstring(GetCurrentProcessId()));
+            std::filesystem::temp_directory_path() / (L"isotone-ui-speakers-" + std::to_wstring(GetCurrentProcessId()));
+        const std::wstring path = transport::persisted_state_path(dir.wstring(), L"{8f4d2a10-0000-4000-8000-0000005bea4e}");
+#else
+        namespace transport = isotone::posix;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / ("isotone-ui-speakers-" + std::to_string(getpid()));
+        const std::string path = transport::persisted_state_path(dir.string(), "{8f4d2a10-0000-4000-8000-0000005bea4e}");
+#endif
         std::filesystem::remove_all(dir);
-        const std::wstring path = isotone::win::persisted_state_path(dir.wstring(), L"{8f4d2a10-0000-4000-8000-0000005bea4e}");
-        REQUIRE(save_speaker_setup(path, live) == ERROR_SUCCESS);
+        REQUIRE(save_speaker_setup(path, live) == 0);
         ParamBlock block{};
-        REQUIRE(isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded);
+        REQUIRE(transport::read_persisted_state(path, &block) == transport::PersistedRead::Loaded);
         EqState back;
         from_param_block(block, &back);
         CHECK(back.bands.empty());   // no saved state was flat
@@ -311,10 +323,10 @@ TEST_CASE("the saved state takes the speaker part and keeps its own bands") {
         // A saved preset's bands stay.
         ParamBlock with_bands{};
         to_param_block(saved, &with_bands);
-        REQUIRE(isotone::win::write_persisted_state(path, with_bands) == ERROR_SUCCESS);
+        REQUIRE(transport::write_persisted_state(path, with_bands) == 0);
         live.speakers.lip_sync_ms = 45;
-        REQUIRE(save_speaker_setup(path, live) == ERROR_SUCCESS);
-        REQUIRE(isotone::win::read_persisted_state(path, &block) == isotone::win::PersistedRead::Loaded);
+        REQUIRE(save_speaker_setup(path, live) == 0);
+        REQUIRE(transport::read_persisted_state(path, &block) == transport::PersistedRead::Loaded);
         from_param_block(block, &back);
         REQUIRE(back.bands.size() == 1);
         CHECK(back.bands[0].gain_db == doctest::Approx(-6));
@@ -425,11 +437,11 @@ TEST_CASE("distances and delays are typed in metres and milliseconds") {
     CHECK_FALSE(parse_typed_value("3 dB", TypedUnit::Metres).has_value());
 }
 
-TEST_CASE("a test tone on an endpoint that does not exist reports it and plays nothing") {
+TEST_CASE("a test tone on an output that does not exist reports it and plays nothing") {
     TestTone tone;
     std::mutex m;
     std::condition_variable cv;
-    HRESULT failed = S_OK;
+    int32_t failed = 0;
     tone.start("{8f4d2a10-0000-4000-8000-00000000dead}", 0, [&](int32_t hr, const char*) {
         std::lock_guard<std::mutex> lock(m);
         failed = hr;
@@ -437,9 +449,13 @@ TEST_CASE("a test tone on an endpoint that does not exist reports it and plays n
     });
     {
         std::unique_lock<std::mutex> lock(m);
-        cv.wait_for(lock, std::chrono::seconds(5), [&] { return failed != S_OK; });
+        cv.wait_for(lock, std::chrono::seconds(5), [&] { return failed != 0; });
     }
+#if defined(_WIN32)
     CHECK(failed == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+#else
+    CHECK(failed == ENOENT);   // no daemon feeds it: no region
+#endif
     tone.stop();
     CHECK(tone.frames() == 0);
     CHECK_FALSE(tone.playing());

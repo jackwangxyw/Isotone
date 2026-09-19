@@ -40,6 +40,8 @@ Item {
         readonly property string sandboxConfig: "Preamp: -3 dB\r\nInclude: peace.txt\r\nGraphicEQ: 25 0; 40 -1.5; 100 0\r\n"
 
         function init() {
+            // devicetool, IsoAPO and Equalizer APO: Linux has none of them (devicesmodel_posix.cpp).
+            if (Qt.platform.os === "linux") skip("Windows only")
             tryVerify(() => !Devicetool.working, 5000)
             script({ started: false })
             // What Now and the engine choices read is on disk and in the model:

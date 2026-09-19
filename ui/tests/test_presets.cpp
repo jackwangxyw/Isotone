@@ -2,11 +2,10 @@
 // Copyright (C) 2026 The Isotone authors
 //
 // Presets: the files, the assignments, and loading and saving on outputs that
-// are Local\ regions and a sandbox Equalizer APO directory, never a real output.
+// are engine regions the test holds and saved state no real engine reads
+// (test_rig.h), and a sandbox Equalizer APO directory, never a real output.
 
 #include "doctest.h"
-
-#include <windows.h>
 
 #include <QDir>
 #include <QFile>
@@ -25,7 +24,7 @@
 #include "persisted_state.h"
 #include "presets.h"
 #include "presetstore.h"
-#include "shared_mapping.h"
+#include "test_rig.h"
 
 using namespace isotone;
 using isotone::ui::Backend;
@@ -62,23 +61,6 @@ void writeFile(const QString& path, const QByteArray& bytes) {
     f.write(bytes);
 }
 
-// A namespace of our own, so no real IsoAPO region is reached.
-std::wstring testNamespace(const char* what) {
-    return L"Local\\IsotonePresetTest." + std::to_wstring(GetCurrentProcessId()) + L"." +
-           std::wstring(what, what + std::strlen(what)) + L".";
-}
-
-std::unique_ptr<ui::DeviceLink> link(const std::wstring& ns, const QString& compat) {
-    return std::make_unique<ui::DeviceLink>(ns, compat.toStdWString());
-}
-
-// What a region holds.
-EqState regionState(isotone::win::SharedMapping& m) {
-    EqState s;
-    from_param_block(*m.params(), &s);
-    return s;
-}
-
 EqState peq(std::vector<Band> bands, double preamp = 0.0, bool autoPreamp = false) {
     EqState s;
     s.bands = std::move(bands);
@@ -106,7 +88,10 @@ TEST_CASE("presets: a preset's file keeps every field of every band exactly") {
     uint32_t id = 7;
     for (FilterType t : types) {
         for (WidthMode m : modes) {
-            Band b = band(id++, t, 1000.0 / 3.0 + id, -2.0 / 3.0 * id, 0.1 + 1.0 / 7.0, m);
+            // The increment on its own: in one call's arguments its order against the
+            // other uses of id is unspecified, and MSVC and GCC differ.
+            Band b = band(id, t, 1000.0 / 3.0 + id, -2.0 / 3.0 * id, 0.1 + 1.0 / 7.0, m);
+            ++id;
             b.shelf_corner = (id % 2) == 0;
             b.channels = id % 3 == 0 ? kAllChannels : (0x80000000u | id);
             b.enabled = (id % 4) != 0;
@@ -303,34 +288,27 @@ namespace {
 struct Rig {
     QTemporaryDir data;
     QTemporaryDir compat;
-    std::wstring ns;
+    test_rig::Place place;
     OutputTarget a, b, c;
     std::vector<Presets::OutputInfo> outputs;
     std::unique_ptr<EqSession> session;
     std::unique_ptr<Presets> presets;
 
-    explicit Rig(const char* name) : ns(testNamespace(name)) {
-        a = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000a1}", Backend::native, OutputLayout{2, 0x3, 48000}};
-        b = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000b2}", Backend::native, OutputLayout{2, 0x3, 48000}};
-        c = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000c3}", Backend::equalizer_apo, OutputLayout{8, 0x63F, 48000}};
+    explicit Rig(const char* name) : place(std::string("preset.") + name) {
+        a = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000a1}", test_rig::kEngine, OutputLayout{2, 0x3, 48000}};
+        b = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000b2}", test_rig::kEngine, OutputLayout{2, 0x3, 48000}};
+        c = OutputTarget{"{8f4d2a10-0000-4000-8000-0000000000c3}", test_rig::kOtherEngine, OutputLayout{8, 0x63F, 48000}};
         outputs = {{a, QStringLiteral("Headphones")}, {b, QStringLiteral("Monitor")}, {c, QStringLiteral("Living room")}};
-        session = std::make_unique<EqSession>(link(ns, compat.path()));
+        for (const OutputTarget& t : {a, b, c}) place.own(t.guid);
+        session = std::make_unique<EqSession>(place.link(compat.path()));
         makePresets();
     }
-    void makePresets() {
-        presets = std::make_unique<Presets>(
-            data.path(), session.get(), [this] { return outputs; }, ns, compat.path().toStdWString());
-    }
+    void makePresets() { presets = place.presets(data.path(), session.get(), [this] { return outputs; }, compat.path()); }
     ~Rig() {
         presets.reset();
         session.reset();
-        for (const OutputTarget& t : {a, b, c}) {
-            std::filesystem::remove(win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid)));
-        }
     }
-    static std::wstring savedPath(const OutputTarget& t) {
-        return win::persisted_state_path(win::persisted_state_dir(true), isotone::ui::widen_id(t.guid));
-    }
+    std::filesystem::path savedPath(const OutputTarget& t) const { return place.saved_path(t.guid); }
 };
 
 EqState hd650() {
@@ -370,8 +348,8 @@ TEST_CASE("presets: an unassigned output is untitled and not modified until it i
 
 TEST_CASE("presets: loading a preset replaces the EQ, keeps what is the output's, and writes its saved state") {
     Rig rig("load");
-    isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
+    test_rig::Engine engine;
+    REQUIRE(engine.open(rig.place, rig.a.guid));
 
     rig.session->useTarget(rig.a);
     EqState own;
@@ -392,7 +370,7 @@ TEST_CASE("presets: loading a preset replaces the EQ, keeps what is the output's
     rig.makePresets();
     REQUIRE(rig.presets->names() == QStringList({QStringLiteral("HD 650"), QStringLiteral("Scratch")}));
     CHECK(rig.presets->currentName() == QStringLiteral("Scratch"));
-    std::filesystem::remove(Rig::savedPath(rig.a));
+    std::filesystem::remove(rig.savedPath(rig.a));
 
     QSignalSpy current(rig.presets.get(), &Presets::currentChanged);
     rig.presets->load(QStringLiteral("HD 650"));
@@ -409,13 +387,13 @@ TEST_CASE("presets: loading a preset replaces the EQ, keeps what is the output's
     CHECK(rig.session->state().speakers.lip_sync_ms == 12);
 
     // What the output plays, and the saved state it starts with, both.
-    EqState played = regionState(engine);
+    EqState played = engine.state();
     REQUIRE(played.bands.size() == 3);
     CHECK(played.bands[0].fc == doctest::Approx(105));
     CHECK(played.mute);
     CHECK(played.channel_gain_db[1] == doctest::Approx(-6.0206).epsilon(1e-4));
     ParamBlock saved{};
-    REQUIRE(win::read_persisted_state(Rig::savedPath(rig.a), &saved) == win::PersistedRead::Loaded);
+    REQUIRE(rig.place.read_saved(rig.a.guid, &saved));
     EqState file;
     from_param_block(saved, &file);
     REQUIRE(file.bands.size() == 3);
@@ -513,8 +491,8 @@ TEST_CASE("presets: next and previous go round the list in order") {
 
 TEST_CASE("presets: the preset an output plays is recognised when the output is shown again") {
     Rig rig("recognise");
-    isotone::win::SharedMapping engine;
-    REQUIRE(engine.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
+    test_rig::Engine engine;
+    REQUIRE(engine.open(rig.place, rig.a.guid));
     rig.session->useTarget(rig.a);
     {
         PresetStore store(rig.data.path());
@@ -527,7 +505,7 @@ TEST_CASE("presets: the preset an output plays is recognised when the output is 
 
     // The app starts again: the output plays the preset from its region.
     rig.presets.reset();
-    rig.session = std::make_unique<EqSession>(link(rig.ns, rig.compat.path()));
+    rig.session = std::make_unique<EqSession>(rig.place.link(rig.compat.path()));
     rig.makePresets();
     rig.session->useTarget(rig.a);
     CHECK(rig.presets->currentName() == QStringLiteral("HD 650"));
@@ -536,11 +514,11 @@ TEST_CASE("presets: the preset an output plays is recognised when the output is 
     CHECK(rig.session->bandAt(1)->fc == 180.123456789);   // the preset's values, not float32's
 
     // Something else changed it meanwhile: modified.
-    EqState other = regionState(engine);
+    EqState other = engine.state();
     other.bands[0].gain_db = 9;
     param_block_write(engine.params(), [&](ParamBlock* blk) { to_param_block(other, blk); });
     rig.presets.reset();
-    rig.session = std::make_unique<EqSession>(link(rig.ns, rig.compat.path()));
+    rig.session = std::make_unique<EqSession>(rig.place.link(rig.compat.path()));
     rig.makePresets();
     rig.session->useTarget(rig.a);
     CHECK(rig.presets->currentName() == QStringLiteral("HD 650"));
@@ -549,9 +527,9 @@ TEST_CASE("presets: the preset an output plays is recognised when the output is 
 
 TEST_CASE("presets: a saved preset reaches every other output assigned it, and unsaved edits do not") {
     Rig rig("propagate");
-    isotone::win::SharedMapping engineA, engineB;
-    REQUIRE(engineA.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.a.guid))) == ERROR_SUCCESS);
-    REQUIRE(engineB.create_or_open(isotone::win::mapping_name(rig.ns.c_str(), isotone::ui::widen_id(rig.b.guid))) == ERROR_SUCCESS);
+    test_rig::Engine engineA, engineB;
+    REQUIRE(engineA.open(rig.place, rig.a.guid));
+    REQUIRE(engineB.open(rig.place, rig.b.guid));
     // B has a balance of its own.
     EqState bOwn;
     bOwn.channel_gain_db[0] = -3.0103;
@@ -568,33 +546,34 @@ TEST_CASE("presets: a saved preset reaches every other output assigned it, and u
     rig.presets->assign(QString::fromStdString(rig.b.guid), QStringLiteral("HD 650"));
     rig.presets->assign(QString::fromStdString(rig.c.guid), QStringLiteral("HD 650"));
     CHECK(rig.presets->assignedName(QString::fromStdString(rig.c.guid)) == QStringLiteral("HD 650"));
-    REQUIRE(regionState(engineB).bands.size() == 3);
-    CHECK(regionState(engineB).channel_gain_db[0] == doctest::Approx(-3.0103));
+    REQUIRE(engineB.state().bands.size() == 3);
+    CHECK(engineB.state().channel_gain_db[0] == doctest::Approx(-3.0103));
     // A preset is for every output until it is narrowed (owner, 2026-09-15).
     CHECK(rig.presets->data(rig.presets->index(0), Presets::AssignedRole).toString().isEmpty());
 
     // An unsaved edit stays on A.
     rig.session->setGain(0, -9);
     rig.session->finishEdit();
-    CHECK(regionState(engineA).bands[0].gain_db == doctest::Approx(-9));
-    CHECK(regionState(engineB).bands[0].gain_db == doctest::Approx(5.5));
+    CHECK(engineA.state().bands[0].gain_db == doctest::Approx(-9));
+    CHECK(engineB.state().bands[0].gain_db == doctest::Approx(5.5));
 
-    // Saved, it reaches B (region and saved state, its balance kept) and C (Isotone.txt, for 7.1).
+    // Saved, it reaches B (region and saved state, its balance kept) and C (Isotone.txt on
+    // Windows, its saved state on Linux; for 7.1).
     rig.presets->save();
-    EqState onB = regionState(engineB);
+    EqState onB = engineB.state();
     REQUIRE(onB.bands.size() == 3);
     CHECK(onB.bands[0].gain_db == doctest::Approx(-9));
     CHECK(onB.channel_gain_db[0] == doctest::Approx(-3.0103));
     ParamBlock saved{};
-    REQUIRE(win::read_persisted_state(Rig::savedPath(rig.b), &saved) == win::PersistedRead::Loaded);
+    REQUIRE(rig.place.read_saved(rig.b.guid, &saved));
     EqState fileB;
     from_param_block(saved, &fileB);
     CHECK(fileB.bands[0].gain_db == doctest::Approx(-9));
 
-    ui::DeviceLink reader(rig.ns, rig.compat.path().toStdWString());
-    reader.set_target(rig.c);
+    const std::unique_ptr<ui::DeviceLink> reader = rig.place.link(rig.compat.path());
+    reader->set_target(rig.c);
     EqState onC;
-    REQUIRE(reader.load_current(&onC));
+    REQUIRE(reader->load_current(&onC));
     REQUIRE(onC.bands.size() == 3);
     CHECK(onC.bands[0].gain_db == doctest::Approx(-9));
     CHECK(onC.layout_channels == 8);

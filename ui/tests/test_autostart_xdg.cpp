@@ -60,6 +60,19 @@ TEST_CASE("the file is a desktop entry, and --tray is part of the command") {
     CHECK(tray.find("Exec=/usr/bin/isotone --tray\n") != std::string::npos);
 }
 
+TEST_CASE("a command the desktop would split or expand is quoted and escaped") {
+    // The desktop entry specification: arguments are split at spaces, one with
+    // a reserved character is quoted whole, and inside the quotes " ` $ and \ take
+    // a backslash, which the string escape rule then doubles. A % is a field
+    // code unless doubled.
+    CHECK(autostart_contents("/home/j/My Apps/isotone", true).find(R"(Exec="/home/j/My Apps/isotone" --tray)" "\n") !=
+          std::string::npos);
+    CHECK(autostart_contents("/opt/a$b/isotone", false).find(R"(Exec="/opt/a\\$b/isotone")" "\n") != std::string::npos);
+    CHECK(autostart_contents(R"(/opt/a"b\c/isotone)", false).find(R"(Exec="/opt/a\\"b\\\\c/isotone")" "\n") !=
+          std::string::npos);
+    CHECK(autostart_contents("/opt/100%/isotone", false).find("Exec=/opt/100%%/isotone\n") != std::string::npos);
+}
+
 TEST_CASE("writing then removing is on then off") {
     const std::string path = autostart_path(scratch());
     std::filesystem::remove_all(scratch());
