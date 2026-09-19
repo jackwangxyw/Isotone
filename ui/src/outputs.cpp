@@ -336,10 +336,24 @@ void Outputs::probe() {
 // Reading the header is a map and a copy, so it stays on this thread.
 void Outputs::probe() {
     isotone::ui::DaemonRegion region;
-    const bool fed_now = !fed_.empty() && isotone::ui::read_daemon_region(fed_, &region) == 0;
-    if (!fed_now) {
-        // The daemon let it go, or started feeding another: the list is stale.
-        if (!fed_.empty()) refresh();
+    if (fed_.empty()) {
+        // A daemon that has just started feeding an output: its region comes a
+        // moment after the sinks the registry reported, with nothing to announce it.
+        for (const Output& o : outputs_) {
+            if (isotone::ui::read_daemon_region(o.guid, &region) != 0) continue;
+            refresh();
+            return;
+        }
+        return;
+    }
+    const Output* fed = nullptr;
+    for (const Output& o : outputs_)
+        if (o.guid == fed_) fed = &o;
+    if (isotone::ui::read_daemon_region(fed_, &region) != 0 || !fed || region.channels != fed->layout.channels ||
+        region.speaker_mask != fed->layout.speaker_mask) {
+        // The daemon let it go, started feeding another, or came back with
+        // another layout (Settings, General, Layout restarts it): the list is stale.
+        refresh();
         return;
     }
     const QString activity = region.heartbeat != heartbeat_ ? QStringLiteral("running") : QStringLiteral("idle");

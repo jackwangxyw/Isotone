@@ -53,6 +53,34 @@ Item {
             }
         }
 
+        // Linux: the layout is Isotone's own sink's, one for every output, and is
+        // chosen here, where Windows chooses an output's in its sound settings.
+        SettingsSection { visible: Qt.platform.os === "linux"; text: "Speakers" }
+        SettingsRow {
+            visible: Qt.platform.os === "linux"
+            label: "Layout"
+            Segmented {
+                objectName: "speakerLayout"
+                options: ["Stereo", "2.1", "5.1", "7.1"]
+                current: options.indexOf(Speakers.layoutName)
+                enabled: Outputs.count > 0
+                onPicked: (index) => {
+                    const to = options[index]
+                    if (to === Speakers.layoutName) return
+                    UiState.openDialog(layoutDialog, {
+                        outputName: "Isotone", from: Speakers.layoutName, to: to,
+                        fromChannels: Speakers.channels, toChannels: Speakers.layoutChannels(to)
+                    })
+                }
+            }
+        }
+        Component {
+            id: layoutDialog
+            LayoutDialog {
+                onConfirmed: if (Speakers.setLayout(to) !== 0) UiState.toast("Speaker setup not changed")
+            }
+        }
+
         SettingsSection { text: "Presets" }
         SettingsRow {
             label: "Switch preset when the default output changes"

@@ -34,6 +34,32 @@ Band peaking(double fc, double gain_db, double q) {
 
 }  // namespace
 
+TEST_CASE("a fresh block reads back as the default state, not as zeros") {
+    // A region the engine creates for an output never saved, and what a UI then
+    // loads from it: bass management's frequencies are the defaults, since a
+    // crossover of 0 Hz is no crossover at all once bass management is turned on.
+    ParamBlock b{};
+    init_param_block(&b);
+    EqState read;
+    read.speakers.crossover_hz = -1;
+    read.speakers.lfe_lowpass_hz = -1;
+    from_param_block(b, &read);
+    const EqState defaults;
+    CHECK(read.speakers.crossover_hz == defaults.speakers.crossover_hz);
+    CHECK(read.speakers.lfe_lowpass_hz == defaults.speakers.lfe_lowpass_hz);
+    CHECK(read.bands.empty());
+    CHECK(read.preamp_db == 0.0);
+    CHECK_FALSE(read.bypass);
+    CHECK_FALSE(read.speakers.bass_management);
+
+    // And as the default state writes it.
+    ParamBlock written{};
+    init_param_block(&written);
+    REQUIRE(to_param_block(defaults, &written));
+    CHECK(written.speakers.crossover_hz == b.speakers.crossover_hz);
+    CHECK(written.speakers.lfe_lowpass_hz == b.speakers.lfe_lowpass_hz);
+}
+
 TEST_CASE("the layout is fixed and self-describing") {
     ParamBlock b{};
     init_param_block(&b);

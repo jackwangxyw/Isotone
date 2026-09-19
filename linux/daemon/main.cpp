@@ -8,6 +8,7 @@
 #include <string>
 
 #include "daemon.h"
+#include "daemon_config.h"
 
 namespace {
 
@@ -21,7 +22,8 @@ void usage() {
         "  --description <text>   how the virtual sink is shown (default Isotone)\n"
         "  --state-dir <dir>      saved state directory; default is\n"
         "                         $XDG_CONFIG_HOME/isotone/devices\n"
-        "  --channels <n>         channels of the virtual sink: 1, 2, 4, 6, 8 (default 2)\n"
+        "  --channels <n>         channels of the virtual sink: 1, 2, 3, 4, 6, 8 (default\n"
+        "                         daemon.conf's, else 2)\n"
         "  --max-frames <n>       frames the processor is sized for (default 8192)\n"
         "  --keep-region          leave the shared region's name behind on exit\n"
         "  --leave-streams        do not move applications' playback into the virtual\n"
@@ -74,11 +76,13 @@ int main(int argc, char** argv) {
 
     if (!channels.empty()) {
         options.channels = static_cast<uint32_t>(std::strtoul(channels.c_str(), nullptr, 10));
-        if (options.channels != 1 && options.channels != 2 && options.channels != 4 &&
-            options.channels != 6 && options.channels != 8) {
-            std::fprintf(stderr, "isotone-daemon: --channels must be 1, 2, 4, 6 or 8\n");
+        if (!isotone::posix::daemon_channels_supported(options.channels)) {
+            std::fprintf(stderr, "isotone-daemon: --channels must be 1, 2, 3, 4, 6 or 8\n");
             return 2;
         }
+    } else if (const uint32_t chosen = isotone::posix::read_daemon_channels(isotone::posix::daemon_config_path())) {
+        // The layout the UI's picker chose, when no flag overrides it.
+        options.channels = chosen;
     }
     if (!max_frames.empty()) {
         options.max_frames = static_cast<uint32_t>(std::strtoul(max_frames.c_str(), nullptr, 10));

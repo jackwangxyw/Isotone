@@ -16,6 +16,11 @@ void init_param_block(ParamBlock* block) {
     block->hdr.version = kParamVersion;
     block->hdr.size    = static_cast<uint32_t>(sizeof(ParamBlock));
     block->hdr.host_state = static_cast<uint32_t>(HostState::NotLoaded);
+    // The rest reads back as the default state: zero is right for everything
+    // but bass management's frequencies, where 0 Hz is no frequency.
+    const SpeakerSetup defaults;
+    block->speakers.crossover_hz   = static_cast<float>(defaults.crossover_hz);
+    block->speakers.lfe_lowpass_hz = static_cast<float>(defaults.lfe_lowpass_hz);
 }
 
 void init_shared_region(void* base, void (*seed)(ParamBlock* block, void* context), void* context) {

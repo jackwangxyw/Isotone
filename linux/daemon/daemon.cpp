@@ -47,6 +47,7 @@ struct Layout {
 constexpr Layout kLayouts[] = {
     {1, {{"MONO", kSpeakerFrontCenter}}},
     {2, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight}}},
+    {3, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight}, {"LFE", kSpeakerLowFrequency}}},
     {4, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight},
          {"RL", kSpeakerBackLeft}, {"RR", kSpeakerBackRight}}},
     {6, {{"FL", kSpeakerFrontLeft}, {"FR", kSpeakerFrontRight},
@@ -479,6 +480,10 @@ bool open_region_for(Daemon& d, const std::string& sink) {
                  d.region.created() ? "created" : "adopted", have_saved ? "loaded" : "none");
 
     d.ring.attach(d.region.ring(), kRingCapacityFrames);
+    // The layout is fixed for the run, so the UI learns it now rather than at the
+    // first processed block, which a suspended sink may not see for a long time.
+    // The rate is the graph's and comes with that block.
+    host_publish_format(d.region.params(), 0, d.channels, d.speaker_mask, HostState::NotLoaded);
     return true;
 }
 

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "daemon_config.h"
 #include "doctest.h"
 #include "persisted_state.h"
 #include "shared_region.h"
@@ -244,4 +245,51 @@ TEST_CASE("the write is atomic: no temporary file is left behind") {
     CHECK(::stat((path + ".tmp").c_str(), &st) != 0);
 
     remove_tree(dir);
+}
+
+TEST_CASE("the daemon's channel count is kept in its config, and only counts it lays out") {
+    const std::string dir = temp_dir() + "-config";
+    remove_tree(dir);
+    const std::string path = dir + "/isotone/daemon.conf";
+
+    CHECK(read_daemon_channels(path) == 0);   // no file: the daemon's default
+    REQUIRE(write_daemon_channels(path, 6) == 0);
+    CHECK(read_daemon_channels(path) == 6);
+    REQUIRE(write_daemon_channels(path, 3) == 0);   // 2.1
+    CHECK(read_daemon_channels(path) == 3);
+
+    // A count the daemon cannot lay out is refused, and the file keeps the last.
+    CHECK(write_daemon_channels(path, 5) == EINVAL);
+    CHECK(write_daemon_channels(path, 0) == EINVAL);
+    CHECK(read_daemon_channels(path) == 3);
+
+    // Other lines survive a write; a bad value reads as none.
+    {
+        FILE* f = std::fopen(path.c_str(), "w");
+        REQUIRE(f != nullptr);
+        std::fputs("# kept\nchannels=7\n", f);
+        std::fclose(f);
+    }
+    CHECK(read_daemon_channels(path) == 0);
+    REQUIRE(write_daemon_channels(path, 8) == 0);
+    CHECK(read_daemon_channels(path) == 8);
+    {
+        FILE* f = std::fopen(path.c_str(), "r");
+        REQUIRE(f != nullptr);
+        char text[128] = {};
+        const size_t n = std::fread(text, 1, sizeof(text) - 1, f);
+        std::fclose(f);
+        CHECK(std::string(text, n) == "# kept\nchannels=8\n");
+    }
+    remove_tree(dir);
+}
+
+TEST_CASE("the daemon's config sits beside its saved state") {
+    const char* saved = std::getenv("XDG_CONFIG_HOME");
+    const std::string keep = saved != nullptr ? saved : "";
+    ::setenv("XDG_CONFIG_HOME", "/somewhere/config", 1);
+    CHECK(daemon_config_path() == "/somewhere/config/isotone/daemon.conf");
+    CHECK(persisted_state_dir() == "/somewhere/config/isotone/devices");
+    if (saved != nullptr) ::setenv("XDG_CONFIG_HOME", keep.c_str(), 1);
+    else ::unsetenv("XDG_CONFIG_HOME");
 }

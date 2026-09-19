@@ -165,9 +165,12 @@ void TestTone::run(std::string output, uint32_t channel_mask, Source source, Fai
     if (const int error = region.open(posix::region_name(output)); error != 0) return fail(error, "region");
     const uint32_t channels = region.params()->hdr.channels;
     const uint32_t speaker_mask = region.params()->hdr.speaker_mask;
-    const uint32_t rate = region.params()->hdr.sample_rate;
+    // The daemon publishes the rate with its first processed block, which a
+    // suspended sink has not had yet: the tone then goes at 48 kHz and PipeWire
+    // converts it to whatever the graph runs at.
+    const uint32_t rate = region.params()->hdr.sample_rate != 0 ? region.params()->hdr.sample_rate : 48000;
     region.close();
-    if (channels == 0 || channels > kMaxChannels || rate == 0) return fail(ENODATA, "format");
+    if (channels == 0 || channels > kMaxChannels) return fail(ENODATA, "format");
     if (channel_mask == 0 || (channel_mask >> channels) != 0) return fail(EINVAL, "channel");
     uint32_t positions[kMaxChannels] = {};
     if (!positions_for(channels, speaker_mask, positions)) return fail(EINVAL, "layout");
