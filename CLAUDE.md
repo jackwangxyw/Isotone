@@ -6,8 +6,9 @@ through its config files (the compat backend). Stages 0 to 4 are done: the Qt 6
 Quick UI is in `ui/`, every screen of the prototype except EQ by ear, and the
 owner has used it on his own outputs. EQ by ear (stage 5) is done: the sweep; A/B
 is set aside for later. On Linux the daemon (`linux/`) hosts the same core and the
-same UI runs against it, checked on Cinnamon under X11 (decisions.md, the entries
-of 2026-09-19). Left: packaging (stage 6), and GNOME, KDE and Wayland checked live.
+same UI runs against it, checked on Cinnamon under X11 in a VM and on the owner's
+own laptop (decisions.md, the entries of 2026-09-19). Left: packaging (stage 6),
+which is next, and after it GNOME, KDE and Wayland checked live.
 
 Read first:
 - `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
@@ -132,6 +133,19 @@ ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # all three, under a P
   with Windows' 6.11.
 - The app runs offscreen in WSL (`QT_QPA_PLATFORM=offscreen`); anything that needs
   a desktop (the tray, global hotkeys, windows) is checked in the Mint VM below.
+
+## The owner's laptop (the second desktop)
+
+`ssh isotone-laptop` over Tailscale (docs/notes/linux-vm-setup.md, local): his
+own Linux Mint 22.3 Cinnamon machine on X11, where he watches the screen while
+a check runs. The tree is copied to `~/Isotone` (git ls-files over tar), built
+into `~/Isotone/build`, and everything else lives in `~/Isotone/.work`:
+`show.sh <name> <cmd>` runs a command in a terminal window on his screen,
+`rig-up.sh`/`rig-down.sh` make and remove a test sink in the running PipeWire
+(nothing written to his config), `x.py` clicks, presses keys and captures the
+Isotone window through XTEST. Capture the window or the panel, never the whole
+screen: his desktop is his. sudo there needs his password, always: hand him the
+command. The daemon runs from the build directory, never installed.
 
 ## The Mint VM (the desktop)
 

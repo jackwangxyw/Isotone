@@ -4152,7 +4152,7 @@ restarted, and a band added, the band reached the new daemon's region.
 | 2. Core | complete | 212 cases green on MSVC 19.51 and GCC 16.1.0 (curve import added 2026-09-15) |
 | 3. Hosts on shared memory | Windows: transport measured in audiodg; devicetool installed IsoAPO on CABLE Input; delay, polarity and mute measured in audiodg; compat backend merged and measured against the installed Equalizer APO; every speaker feature measured live at 7.1 in both backends. Windows side complete. Linux: the daemon, measured in CI (2026-09-17 and 18); capturing applications' streams (2026-09-19); stereo only | live curve matched scipy to 0.0001 dB rms through the region; ring exact; the final review's compat changes matched the core live within 0.0004 dB |
 | 4. UI | complete | every screen of the prototype except EQ by ear, in Qt 6 Quick (`ui/`); reviewed and fixed over 2026-09-15 and 16 from the owner's own use, on his real output as well as the cable. `ui_tests` 42, `ui_model_tests` 110, `ui_qml_tests` 267; `docs/notes/stage4-*.md`; the entries of 2026-09-14, 15 and 16 |
-| 4. UI, Linux | complete on Cinnamon under X11; GNOME, KDE and Wayland not checked live | the whole Qt layer on Qt 6.4.2; `measure_linux.py` in CI (the app's edits, saved state and EQ by ear's tone through the daemon, to 0.011 dB); `ui_tests` 40, `ui_model_tests` 91, `ui_qml_tests` 232 (+49 Windows-only skipped), X11 and portal hotkey tests; the desktop checks by hand; the entries of 2026-09-19 |
+| 4. UI, Linux | complete on Cinnamon under X11, in the VM and on the owner's own laptop; GNOME, KDE and Wayland not checked live, and after packaging (owner, 2026-09-19) | the whole Qt layer on Qt 6.4.2; `measure_linux.py` in CI (the app's edits, saved state and EQ by ear's tone through the daemon, to 0.011 dB); `ui_tests` 42, `ui_model_tests` 91, `ui_qml_tests` 232 (+49 Windows-only skipped), X11 and portal hotkey tests; the desktop checks by hand on both machines, and the fixes they turned up (the entries of 2026-09-19) |
 | 5. EQ by ear | complete: the sweep, approved by the owner in use; A/B set aside for later (owner) | the tone measured through IsoAPO live (level to 0.004 dB, no step past the sine's own slope, a band gain drag without a click, the sweep at 1.0001 oct/s); `ui_tests` 50, `ui_model_tests` 119, `ui_qml_tests` 290; the entries of 2026-09-16 from "Stage 5 begins" |
 
 CI is green on GitHub for all three jobs: `core (windows-latest)`,
@@ -4232,7 +4232,21 @@ short windows (Settings, General, Short window), always on top, the graph repain
 only the spectrum on each frame (the maximized lag), the frequency grid's three
 weights, and the placeholder icon. **A/B is set aside for later** (owner): plan 8.4
 and the `EqByEarAB` board are its design if it is wanted.
-**Stage 6** (packaging) is not started.
+**Stage 6** (packaging) is not started, and is next: the owner starts it in a
+session of its own (2026-09-19). A Windows installer first, then a .deb and
+Flatpak. Launch at sign-in on Windows waits on it: what is left to see is
+Windows running the Run value at sign-in, and that wants the installed app
+rather than a build directory (owner, 2026-09-19).
+
+Left for Linux after packaging: GNOME, KDE and Wayland, one VM each
+(docs/notes/linux-vm-setup.md). Two smaller things, neither started:
+
+- A stream another program has aimed elsewhere is left alone, and nothing looks
+  at it again when that program lets go: EasyEffects quit and Isotone still did
+  not take the stream back (2026-09-19).
+- Two programs that both capture every stream cannot share a machine. Isotone
+  has no setting for its capture, where EasyEffects has one, a per-application
+  blocklist and a per-output one.
 
 ## State of the owner's machine
 
