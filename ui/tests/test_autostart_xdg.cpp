@@ -151,8 +151,10 @@ TEST_CASE("in a Flatpak the entry is the host's, and named for the application i
     // And outside one, the same two are XDG's.
     ::unsetenv("FLATPAK_ID");
     CHECK(autostart_dir() == "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart");
+    // The same name either way: the application ID is what a desktop file is
+    // called, in a Flatpak or out of one.
     CHECK(autostart_path(autostart_dir()) ==
-          "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart/isotone.desktop");
+          "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart/io.github.isotone.Isotone.desktop");
 
     // An empty FLATPAK_ID is not a Flatpak.
     ::setenv("FLATPAK_ID", "", 1);
@@ -162,4 +164,17 @@ TEST_CASE("in a Flatpak the entry is the host's, and named for the application i
     if (saved_xdg != nullptr) ::setenv("XDG_CONFIG_HOME", keep_xdg.c_str(), 1);
     else ::unsetenv("XDG_CONFIG_HOME");
     if (saved_home != nullptr) ::setenv("HOME", keep_home.c_str(), 1);
+}
+
+TEST_CASE("the entry is named for the application id, and the old name is known") {
+    // The GlobalShortcuts portal takes the application ID from the systemd unit
+    // the desktop started the app in and looks for a desktop file of that name.
+    // "isotone.desktop" gives the ID "isotone", which resolves to nothing,
+    // because what a package installs is io.github.isotone.Isotone.desktop.
+    CHECK(std::string(kAutostartFileName) == "io.github.isotone.Isotone.desktop");
+    CHECK(autostart_path("/c/autostart") == "/c/autostart/io.github.isotone.Isotone.desktop");
+    // The old name is still known, so an entry under it can be removed.
+    CHECK(std::string(kLegacyAutostartFileName) == "isotone.desktop");
+    CHECK(legacy_autostart_path("/c/autostart") == "/c/autostart/isotone.desktop");
+    CHECK(legacy_autostart_path("").empty());
 }

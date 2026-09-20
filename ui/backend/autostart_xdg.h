@@ -23,8 +23,20 @@
 
 namespace isotone::ui {
 
-// The file's name outside a sandbox, which is also its desktop entry id.
-inline constexpr char kAutostartFileName[] = "isotone.desktop";
+// The file's name, which is also its desktop entry ID, and the ID has to be the
+// application's: the GlobalShortcuts portal takes the ID from the systemd unit
+// the desktop started the app in, looks for a desktop file of that name, and
+// refuses the app its keys when it finds none. An entry called isotone.desktop
+// gives the ID "isotone", and the installed desktop file is
+// io.github.isotone.Isotone.desktop, so nothing resolved and global hotkeys
+// were refused at every sign-in (decisions.md, "An application ID is what the
+// portal wants").
+inline constexpr char kAutostartFileName[] = "io.github.isotone.Isotone.desktop";
+
+// What it was called before 2026-09-20. Only ever removed: an entry left under
+// the old name would go on starting the app with an ID that resolves to
+// nothing.
+inline constexpr char kLegacyAutostartFileName[] = "isotone.desktop";
 
 // $XDG_CONFIG_HOME/autostart, or $HOME/.config/autostart when XDG_CONFIG_HOME is
 // unset or not absolute, as the base directory specification requires. Empty
@@ -34,10 +46,14 @@ inline constexpr char kAutostartFileName[] = "isotone.desktop";
 // desktop reads the host's directory, and the sandbox's own is not it.
 std::string autostart_dir();
 
-// "<dir>/isotone.desktop", or "<dir>/<FLATPAK_ID>.desktop" in a Flatpak, which
-// is what the Background portal names the entry it writes. Empty when `dir` is
-// empty.
+// "<dir>/io.github.isotone.Isotone.desktop", or "<dir>/<FLATPAK_ID>.desktop" in
+// a Flatpak, which is what the Background portal names the entry it writes and
+// is the same name anywhere the ID is the usual one. Empty when `dir` is empty.
 std::string autostart_path(const std::string& dir);
+
+// "<dir>/isotone.desktop": the entry as older versions wrote it, so it can be
+// cleaned up. Empty when `dir` is empty.
+std::string legacy_autostart_path(const std::string& dir);
 
 // The file's contents: `exec` is the command, with --tray appended when `tray`.
 // A value in a desktop entry cannot carry a newline, so one in `exec` would

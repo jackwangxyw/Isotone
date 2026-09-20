@@ -564,6 +564,40 @@ TEST_CASE("global hotkeys bind through the GlobalShortcuts portal, report one re
     CHECK(wait_until([&] { return read_all(log).contains(QStringLiteral("Close ")); }));
 }
 
+TEST_CASE("an autostart entry under the old name is read, then replaced") {
+    // Upgrading from a version that wrote isotone.desktop. That entry starts the
+    // app with an application ID of "isotone", which resolves to no desktop file
+    // and costs the app its global hotkeys, so it is read once and then gone.
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    qputenv("ISOTONE_AUTOSTART_DIR", dir.path().toLocal8Bit());
+    const QString legacy = dir.path() + QStringLiteral("/isotone.desktop");
+    const QString current = dir.path() + QStringLiteral("/io.github.isotone.Isotone.desktop");
+
+    QFile old_entry(legacy);
+    REQUIRE(old_entry.open(QIODevice::WriteOnly));
+    old_entry.write("[Desktop Entry]\nType=Application\nName=Isotone\nExec=/usr/bin/isotone --tray\n");
+    old_entry.close();
+
+    Startup startup;
+    // The toggle shows it on, because it is: that file does start the app.
+    CHECK(startup.launchAtSignIn());
+    CHECK(startup.command() == QStringLiteral("/usr/bin/isotone --tray"));
+
+    // Turning it on again writes the new name and takes the old one away.
+    REQUIRE(startup.setLaunchAtSignIn(true, true));
+    CHECK(QFile::exists(current));
+    CHECK_FALSE(QFile::exists(legacy));
+    CHECK(startup.launchAtSignIn());
+
+    // And turning it off leaves neither.
+    REQUIRE(startup.setLaunchAtSignIn(false, false));
+    CHECK_FALSE(QFile::exists(current));
+    CHECK_FALSE(QFile::exists(legacy));
+    CHECK_FALSE(startup.launchAtSignIn());
+    qunsetenv("ISOTONE_AUTOSTART_DIR");
+}
+
 TEST_CASE("a desktop that refuses the shortcuts session marks every key refused") {
     // Only against tests/mock_portal.py started with REFUSE_SESSION, which
     // answers CreateSession with an error and no Response, as GNOME and Plasma

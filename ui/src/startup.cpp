@@ -57,12 +57,23 @@ QString Startup::runKey() {
 namespace {
 
 std::string entry_path() { return isotone::ui::autostart_path(Startup::runKey().toStdString()); }
+std::string legacy_path() { return isotone::ui::legacy_autostart_path(Startup::runKey().toStdString()); }
+
+// The entry this version writes, or the one an older version left behind. Both
+// start the app; only the first gets it an application ID the GlobalShortcuts
+// portal will accept, so the old one is read but never written.
+std::string live_path() {
+    const std::string current = entry_path();
+    if (isotone::ui::autostart_enabled(current)) return current;
+    const std::string legacy = legacy_path();
+    return isotone::ui::autostart_enabled(legacy) ? legacy : current;
+}
 
 }  // namespace
 
-bool Startup::launchAtSignIn() const { return isotone::ui::autostart_enabled(entry_path()); }
+bool Startup::launchAtSignIn() const { return isotone::ui::autostart_enabled(live_path()); }
 
-QString Startup::command() const { return QString::fromStdString(isotone::ui::autostart_command(entry_path())); }
+QString Startup::command() const { return QString::fromStdString(isotone::ui::autostart_command(live_path())); }
 
 bool Startup::setLaunchAtSignIn(bool on, bool tray) {
     // In a Flatpak the entry is the Background portal's to write: the directory
@@ -82,6 +93,10 @@ bool Startup::setLaunchAtSignIn(bool on, bool tray) {
 
     const std::string exe = QCoreApplication::applicationFilePath().toStdString();
     const int error = on ? isotone::ui::write_autostart(entry_path(), exe, tray) : isotone::ui::remove_autostart(entry_path());
+    // Either way the old name goes: on, it would start the app a second time
+    // under an ID that resolves to nothing; off, it would go on starting it at
+    // all.
+    isotone::ui::remove_autostart(legacy_path());
     emit changed();
     return error == 0;
 }

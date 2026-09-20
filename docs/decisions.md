@@ -4823,12 +4823,49 @@ is every way this was launched during the first night's checks. The lesson is
 narrower and more annoying than "Wayland cannot": *this cannot be tested from a
 shell*.
 
-**Left to check, and it is the one that matters for shipping:** whether the
-`.deb`'s launch at sign-in lands in an app scope. The XDG autostart entry is
-started by the session rather than by a launcher, and whether gnome-session and
-ksmserver wrap it in `app-*.scope` is not measured yet. If they do not, the app
-could put itself in one (re-exec through `systemd-run --scope` when it finds it
-is not in an app scope), which is small and self-contained.
+### An application ID is what the portal wants
+
+Measured to the end on both VMs, and the rule turns out to have two halves. The
+portal reads the systemd unit the app is running in and wants:
+
+1. **One of the two shapes the XDG specification defines.**
+   `app-<id>-<random>.scope`, which a launcher makes, and
+   `app-<id>@autostart.service`, which systemd's xdg-autostart generator makes
+   for an entry in `~/.config/autostart`. Both are accepted. A
+   `app-<id>-<random>.**service**` is not a shape anything defines, and it is
+   refused: that was the first attempt, and it is why the entry above once said
+   there was no way out at all.
+2. **An `<id>` that resolves to an installed desktop file.** This is the half
+   that was actually wrong in Isotone.
+
+`write_autostart` named the entry `isotone.desktop`, so every sign-in gave the
+desktop an application ID of `isotone`, and what a package installs is
+`io.github.isotone.Isotone.desktop`. Nothing resolved, and the keys were refused
+on GNOME and on Plasma alike. Renaming the entry to the application ID fixes it
+on both, and nothing else had to change. The trace either way, from a full
+`dbus-monitor` across a reboot:
+
+| | unit at sign-in | CreateSession |
+|---|---|---|
+| GNOME, `isotone.desktop` | `app-gnome-isotone-2073.scope` | `NotAllowed` |
+| Plasma, `isotone.desktop` | `app-isotone@autostart.service` | `NotAllowed` |
+| GNOME, `io.github.isotone.Isotone.desktop` | `app-gnome-io.github.isotone.Isotone-2081.scope` | answered, BindShortcuts follows to `org.gnome.Settings.GlobalShortcutsProvider` |
+| Plasma, same | `app-io.github.isotone.Isotone@autostart.service` | answered, BindShortcuts follows |
+
+**And the key fires at a real sign-in**, which is the check this was all for: on
+both VMs, rebooted, autologin, no window open and nobody touching anything, the
+tray menu's EQ item read `toggle-state 1`; one `Ctrl+Alt+Shift+E` at the virtual
+machine's keyboard controller took it to `0`, and another took it back to `1`.
+
+`kAutostartFileName` is now the application ID. The old name is kept as
+`kLegacyAutostartFileName`, and only ever removed: an entry left under it would
+go on starting the app with an ID that resolves to nothing, so the toggle reads
+it when it is the only one there, and writing or clearing the toggle takes it
+away. Mutation-checked both ways, the name and the cleanup.
+
+**Not needed after all:** the app re-executing itself into a scope. Both
+desktops already put it somewhere the portal accepts; they just needed to be
+told who it was.
 
 **What was ours, and is fixed: the refusal was invisible.** `bind()` sent
 CreateSession with `asyncCall` and threw the reply away, so an error reply
@@ -5034,10 +5071,12 @@ copies files and calls it.
    systemd 259. Two are open:
    - ~~The Flatpak has no tray icon.~~ Fixed: it wanted a `--talk-name` and an
      `--own-name`, and verified on Plasma with the shipped manifest.
-   - **Global hotkeys on Wayland want an app scope.** They work outside a
-     Flatpak when the app runs in `app-<id>-<random>.scope`, as a desktop
-     launcher starts it, and are refused when it does not, as a shell starts
-     it. Left to measure: whether launch at sign-in lands in one.
+   - ~~Global hotkeys on Wayland want an app scope.~~ Fixed: the autostart
+     entry is named for the application ID, which is what the portal resolves
+     to a desktop file. Measured firing at a real sign-in on both desktops.
+     What is still refused, correctly, is an app started from a shell, which
+     lands in `session-N.scope` and has no application ID at all; that now says
+     so on the Shortcuts page instead of showing a live-looking key.
 
    Plasma on X11 no longer exists to test: Kubuntu 26.04 ships a Wayland
    session only.

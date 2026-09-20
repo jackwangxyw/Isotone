@@ -75,6 +75,10 @@ std::string autostart_dir() {
     return under_home;
 }
 
+std::string legacy_autostart_path(const std::string& dir) {
+    return dir.empty() ? std::string() : dir + "/" + kLegacyAutostartFileName;
+}
+
 std::string autostart_path(const std::string& dir) {
     if (dir.empty()) return {};
     // The Background portal names the entry after the application ID, so that is
