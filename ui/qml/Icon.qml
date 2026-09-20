@@ -1,8 +1,14 @@
 import QtQuick
 import QtQuick.Shapes
 
-// A 24 x 24 stroked icon from the generator's set (gen_mockups3.py, ICONS),
-// scaled to `size` with its stroke, as the SVG viewBox did.
+// A 24 x 24 stroked icon, scaled to `size` with its stroke, as the SVG viewBox
+// did.
+//
+// A path is either an SVG string at `strokeWidth`, or { d, w } with a width of
+// its own. The second is what lets an icon borrow the mark's vocabulary: the
+// logo is five pill bars, drawn as round-capped segments at width 3, so a
+// segment at a heavy width inside a hairline outline reads as the same family
+// rather than as a stock outline set (docs/decisions.md, "The icons").
 Item {
     id: root
     property string name
@@ -22,7 +28,12 @@ Item {
         chevronRight: ["M9 6l6 6-6 6"],
         chevronLeft: ["M15 6l-6 6 6 6"],
         plus: ["M12 5v14M5 12h14"],
-        panel: ["M6 4h12a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z", "M9 4v16"],
+        // The rail is a pill bar, as the mark's bars are, not the hairline
+        // division every outline set draws: that one was Lucide's panel-left
+        // stroke for stroke, and it is the icon the owner's reviewer picked out
+        // as identical to ChatGPT's and Claude's.
+        panel: ["M6 4.5h12a3.2 3.2 0 0 1 3.2 3.2v8.6a3.2 3.2 0 0 1 -3.2 3.2h-12a3.2 3.2 0 0 1 -3.2 -3.2v-8.6a3.2 3.2 0 0 1 3.2 -3.2z",
+                { d: "M7.7 9.1V14.9", w: 2.9 }],
         output: ["M4 9v6h4l5 4V5L8 9H4z", "M16.5 8.5a5 5 0 0 1 0 7"],
         // The mark (docs/design/logo, locked 2026-09-19): five bars about the
         // zero line, centred on the ink rather than on the line. Stroked at width
@@ -54,7 +65,9 @@ Item {
     Repeater {
         model: root.paths[root.name] || []
         delegate: Shape {
-            required property string modelData
+            required property var modelData
+            readonly property string d: typeof modelData === "string" ? modelData : modelData.d
+            readonly property real w: typeof modelData === "string" ? root.strokeWidth : modelData.w
             width: 24
             height: 24
             // Shape.CurveRenderer (Qt 6.6) where there is one; Qt 6.4, as Linux distributions
@@ -66,11 +79,11 @@ Item {
             transform: Scale { xScale: root.size / 24; yScale: root.size / 24 }
             ShapePath {
                 strokeColor: root.colour
-                strokeWidth: root.strokeWidth
+                strokeWidth: w
                 fillColor: "transparent"
                 capStyle: ShapePath.RoundCap
                 joinStyle: ShapePath.RoundJoin
-                PathSvg { path: modelData }
+                PathSvg { path: d }
             }
         }
     }

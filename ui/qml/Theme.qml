@@ -73,8 +73,13 @@ QtObject {
     readonly property color pop: custom && !dark ? plot : between(0.033, pick("#191c20", "#fcfdff"))
     readonly property color border: between(pick(0.116, 0.13), pick("#2a2e33", "#d6dadf"))
     readonly property color scrim: pick(Qt.rgba(0, 0, 0, 0.55), Qt.rgba(30 / 255, 36 / 255, 44 / 255, 0.28))
-    readonly property real fillEdgeAlpha: pick(0.30, 0.20)
-    readonly property real fillMidAlpha: pick(0.04, 0.02)
+    // The curve's fill: the accent at the top and bottom of the plot, nearly
+    // gone through the middle. Toned down from 0.30 and 0.20 (owner,
+    // 2026-09-20): at that strength a boosted band read as a glow around the
+    // curve rather than as a fill under it, which is the single most
+    // "generated" thing on the main screen.
+    readonly property real fillEdgeAlpha: pick(0.17, 0.11)
+    readonly property real fillMidAlpha: pick(0.03, 0.015)
 
     readonly property var accents: pick(["#6aa7f4", "#a495f0", "#00bcc5", "#62bb78", "#d8953d", "#ea808a"],
                                         ["#3072c1", "#7260bd", "#008892", "#1c8742", "#a45f00", "#b44957"])
