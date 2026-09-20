@@ -182,6 +182,21 @@ Isotone window through XTEST. Capture the window or the panel, never the whole
 screen: his desktop is his. sudo there needs his password, always: hand him the
 command. The daemon runs from the build directory, never installed.
 
+## The GNOME and KDE VMs (Wayland)
+
+`ssh isotone-gnome` (Ubuntu 26.04.1, GNOME on Wayland) and `ssh isotone-kde`
+(Kubuntu 26.04.1, Plasma 6 on Wayland), both VirtualBox, both left powered off;
+start them with `VBoxManage startvm "Isotone GNOME" --type headless`. They carry
+the tree in `~/Isotone`, a build in `~/build`, the daemon's user unit pointing
+at it, the rig's null sinks and the 0.1.0 Flatpak. `~/desk.sh <cmd>` runs a
+command in the logged-in session on either.
+
+They are for the desktop, not for audio: keys go in with
+`VBoxManage controlvm <vm> keyboardputscancode` (XTEST does not reach a Wayland
+compositor) and screenshots with `VBoxManage controlvm <vm> screenshotpng`.
+docs/notes/linux-vm-setup.md has how they were built and what it costs to build
+another. Measure audio in WSL.
+
 ## The Mint VM (the desktop)
 
 `ssh isotone-vm` (docs/notes/linux-vm-setup.md, local). Linux Mint 22.3 Cinnamon

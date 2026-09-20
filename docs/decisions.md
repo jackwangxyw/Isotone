@@ -5016,8 +5016,16 @@ copies files and calls it.
 the Background portal in it), the KDE 6.11 runtime installed, screen blanking
 and lock turned off with `~/Isotone/.work/power-restore.sh` ready to put them
 back. **The Flatpak's launch at sign-in was left on**, so his next sign-in is
-the end-to-end check of it: an Isotone tray icon he did not put there is this,
-and the toggle in Settings, General turns it off. Mint VM: the `.deb`
+the end-to-end check of it: an Isotone he did not start is this, and the toggle
+in Settings, General turns it off. Note the open tray bug above, which means it
+will start with no icon and may only show as a process.
+
+Mint VM: the `.deb` installed, powered off. **Two new VMs**, *Isotone GNOME*
+and *Isotone KDE*, built on 2026-09-20 and left powered off; `ssh isotone-gnome`
+and `ssh isotone-kde` start working as soon as they are started. Both carry the
+tree, a build, the daemon's unit pointing at it, the rig's null sinks and the
+0.1.0 Flatpak. Nothing on them is installed system-wide except the desktop
+itself. Mint VM: the `.deb`
 installed, powered off, and a build-directory user unit moved aside to
 `~/isotone-daemon.service.build-dir.bak`.
 
