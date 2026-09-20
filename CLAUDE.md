@@ -7,8 +7,14 @@ Quick UI is in `ui/`, every screen of the prototype except EQ by ear, and the
 owner has used it on his own outputs. EQ by ear (stage 5) is done: the sweep; A/B
 is set aside for later. On Linux the daemon (`linux/`) hosts the same core and the
 same UI runs against it, checked on Cinnamon under X11 in a VM and on the owner's
-own laptop (decisions.md, the entries of 2026-09-19). Left: packaging (stage 6),
-which is next, and after it GNOME, KDE and Wayland checked live.
+own laptop (decisions.md, the entries of 2026-09-19).
+
+Packaging (stage 6) is built and measured on all three targets (2026-09-20): an
+NSIS installer, a `.deb` and a Flatpak, each run for real and measured against
+the analytic filter rather than declared working. **0.1.0 is not tagged yet.**
+Left in stage 6: the Flatpak does not start at login, Windows' launch at sign-in
+needs one sign-out to confirm, and GNOME, KDE and Wayland have no VMs. See
+decisions.md, "Where things stand", which lists them in order.
 
 Read first:
 - `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
@@ -30,6 +36,7 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\ctest.ex
 Push-Location build\windows\apo; .\isotone-apo-selftest.exe; Pop-Location      # IsoAPO hosted in-process
 python tools\check_shm_transport.py build                                       # cross-process transport
 python tools\gen_reference.py --check                                          # scipy reference data
+python tools\gen_icons.py --check                                              # icons still match the mark
 ```
 
 The UI builds separately (Qt 6.11.2 MSVC kit in `C:\Qt\6.11.2\msvc2022_64`), off by default so CI is unchanged:
@@ -40,6 +47,16 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.ex
 $env:PATH = "C:\Qt\6.11.2\msvc2022_64\bin;$env:PATH"
 .\build-ui\ui\ui_tests.exe; .\build-ui\ui\ui_model_tests.exe
 .\build-ui\ui\ui_qml_tests.exe -o "$env:TEMP\qml.txt,txt"    # read the file; add -input ui\tests\qml\tst_x.qml for one
+```
+
+The installer is NSIS 3.12 (`winget install NSIS.NSIS`), built from a staged
+install tree rather than from the build directory. `cmake --install` runs
+windeployqt, which stages the Qt runtime:
+
+```powershell
+$stage = "$env:TEMP\isotone-stage"
+cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" --install build-ui --prefix `"$stage`""
+& "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /DSTAGE="$stage" /DVERSION=0.1.0 windows\setup\isotone.nsi
 ```
 
 - Run the app for checks only with `--data-dir <scratch> --compat-dir <scratch>
@@ -90,7 +107,10 @@ ui/src/               EqSession (the edited state, undo), Outputs, Presets, Devi
 ui/qml/               the screens; Main.qml is the window, Theme.qml the tokens
 ui/tests/             ui_tests, ui_model_tests (doctest), qml/ (Qt Quick Test); test_rig.h (an engine region of the
                       test's own, either platform); measure_linux.py; mock_portal.py (GlobalShortcuts)
-tools/                gen_reference.py, check_shm_transport.py
+windows/setup/        isotone.nsi (NSIS), and the welcome and header bitmaps
+linux/packaging/      the .deb's maintainer scripts, desktop entry, AppStream
+                      metadata, icon theme, man pages, and flatpak/ with the manifest
+tools/                gen_reference.py, check_shm_transport.py, gen_icons.py
 docs/design/          approved screens, the prototype's source, their generator; gitignored, this machine only
 docs/notes/           the stage 4 work packages' records (force-added: docs/* is gitignored)
 ```
@@ -119,6 +139,20 @@ python3 linux/spike/measure.py                            # stage 1c, in the ses
 python3 linux/daemon/measure.py                           # stage 3, the daemon
 python3 ui/tests/measure_linux.py                         # the app through the daemon
 ISOTONE_BUILD_DIR=~/build-linux bash linux/ci-audio.sh    # all three, under a PipeWire of its own
+```
+
+The `.deb` and the Flatpak, both built in WSL, both unelevated apart from the
+`.deb`'s install:
+
+```bash
+cd ~/build-linux && cpack -G DEB && lintian --tag-display-limit 0 isotone-0.1.0-Linux.deb
+# The Flatpak wants the source in the Linux filesystem: flatpak-builder copies
+# the tree, and doing that across /mnt/c is very slow.
+rm -rf ~/flat-src && mkdir ~/flat-src
+cd /mnt/c/Users/jackw/OneDrive/Documents/GitHub/Isotone && git ls-files -z | tar --null -T - -cf - | tar -xf - -C ~/flat-src
+cd ~/flat-src
+flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=$HOME/flat-repo \n    ~/flat-build linux/packaging/flatpak/io.github.isotone.Isotone.yml
+flatpak build-bundle $HOME/flat-repo $HOME/isotone-0.1.0.flatpak io.github.isotone.Isotone master
 ```
 
 - `linux/spike` and `linux/daemon` are added only when pkg-config finds
@@ -162,6 +196,11 @@ the host is off in VirtualBox.
 ## Rules
 
 - **Commits and pushes only when the owner says so, each time.**
+- **Installers change the owner's machines.** The Windows installer, the `.deb`
+  and the Flatpak are all installed on his real machines now (decisions.md,
+  "Where things stand"). Running one again, or uninstalling, changes what he is
+  listening through: ask first, and never run `machine-uninstall` without
+  saying which outputs it will take IsoAPO off, which it lists in its dry run.
 - **Audio and registry safety.** Live audio tests use only the VB-Cable pair:
   render CABLE Input `{798436d2-8c71-4834-9248-00ccbaaca00a}`, capture CABLE
   Output `{16d43645-3380-4055-9de6-f7349761051d}`. Never change the owner's live
