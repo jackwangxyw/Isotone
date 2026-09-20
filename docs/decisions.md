@@ -4816,32 +4816,48 @@ no ID, which is how this was found.
 | `ctest` | 7 of 7 | 7 of 7 |
 | the Background portal | writes the same entry as Cinnamon's, no dialog | the same |
 
-**And one thing that did not work on either, and is still not working: the
-Flatpak's tray icon.** Asking the watcher for
-`RegisteredStatusNotifierItems` lists the item when the same build runs outside
+**And one thing that did not work on either, until it was fixed the same day:
+the Flatpak's tray icon.** Asking the watcher for
+`RegisteredStatusNotifierItems` listed the item when the same build ran outside
 the sandbox, on both desktops, with `GetConnectionUnixProcessID` pointing back
-at the app; with the Flatpak it lists only kded6's on Plasma and only the
+at the app; with the Flatpak it listed only kded6's on Plasma and only the
 update notifier's on GNOME. Found only because the tray was checked by asking
 the watcher rather than by looking at a panel, which is the lesson.
 
-The manifest was missing `--talk-name=org.kde.StatusNotifierWatcher`, which
-EasyEffects has and which the protocol needs, and that line is now in. **It did
-not fix it**, and the rest is not diagnosed. What was measured on the way:
+**It takes two lines in the manifest and the manifest had neither.** Qt's
+QSystemTrayIcon publishes the item under a bus name of its own,
+`org.kde.StatusNotifierItem-<pid>-<n>`, and then hands that name to the
+watcher. So a sandbox needs to reach the watcher *and* to own that name:
 
-- The sandbox cannot own the name Qt publishes the item under,
-  `org.kde.StatusNotifierItem-<pid>-<n>`. `RequestName` for one comes back
-  `org.freedesktop.DBus.Error.ServiceUnknown`, which is how xdg-dbus-proxy
-  refuses.
-- No `--own-name` pattern covers that shape:
-  `org.kde.StatusNotifierItem.*` is refused, because `-<pid>-<n>` is not a
-  `.` subtree; `org.kde.*` is granted and is far too broad to ship.
-- With both `--talk-name=org.kde.StatusNotifierWatcher` and
-  `--own-name=org.kde.*` in place, the item still does not appear, so the name
-  is not the whole of it.
+```
+- --talk-name=org.kde.StatusNotifierWatcher
+- --own-name=org.kde.StatusNotifierItem-2-1
+```
 
-**Open, and it blocks calling the Flatpak's launch at sign-in finished**,
-because that starts the app with `--tray` and an app in the tray with no icon
-cannot be reached at all.
+The pid is 2 because the sandbox has a pid namespace of its own and the app is
+the first thing in it (`flatpak run --command=sh ... -c 'echo $$'` prints 2),
+and the counter is 1 because there is one tray icon. No wildcard covers that
+shape: `org.kde.StatusNotifierItem.*` is refused, since `-2-1` is not a `.`
+subtree, and `org.kde.*` is granted but is far too broad to ship. Without the
+`own-name`, `RequestName` comes back
+`org.freedesktop.DBus.Error.ServiceUnknown`, which is how xdg-dbus-proxy
+refuses, and Qt carries on and hands the watcher a name it does not own.
+
+**Worth recording the wrong turn**, because it cost an hour and a commit that
+had to be taken back. The first fix was the `talk-name` alone; the check said
+it had not worked, so it was written up as not fixed. The check was the thing
+that was wrong: Isotone is single-instance, so every "restart the app and look
+again" was quietly measuring the same old process from before the change. The
+rule that came out of it is to `flatpak kill` before every one of these, and
+the one that should have applied already is that a negative result from a
+measurement needs the measurement checked as hard as a positive one.
+
+Verified on both desktops with the shipped manifest and no overrides: a fresh
+install and a fresh launch register an item whose owner is the sandboxed
+process, with `Isotone
+<output> · <preset>` on it and the whole menu behind
+it. On Plasma the owner is pid 5030 of `bwrap ... isotone`, on GNOME pid 3268
+of the same.
 
 **The Flatpak follows the desktop's light and dark on Plasma and not on GNOME**,
 which is not a contradiction of the entry of 2026-09-20 that made it dark: the
@@ -4978,10 +4994,8 @@ copies files and calls it.
    on Wayland"). Four things came out of it. Two are fixed and tested: the UI
    backend not compiling on PipeWire 1.6, and the daemon's unit not starting on
    systemd 259. Two are open:
-   - **The Flatpak has no tray icon**, on GNOME or on Plasma. One missing
-     `--talk-name` was found and added and did not fix it; the rest is
-     undiagnosed. This is the one to pick up first, because launch at sign-in
-     starts the app with `--tray`.
+   - ~~The Flatpak has no tray icon.~~ Fixed: it wanted a `--talk-name` and an
+     `--own-name`, and verified on Plasma with the shipped manifest.
    - **Global hotkeys do not work outside a Flatpak on Wayland**, because the
      portal refuses an app it has no application ID for, on GNOME and Plasma
      alike. A decision rather than a patch; the entry says what the options are.

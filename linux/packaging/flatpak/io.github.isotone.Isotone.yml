@@ -64,26 +64,27 @@ finish-args:
   - --talk-name=org.freedesktop.portal.Desktop
   - --talk-name=org.freedesktop.portal.GlobalShortcuts
 
-  # The tray icon. Qt's QSystemTrayIcon is a StatusNotifierItem, and an item
-  # only exists once it has registered with the watcher, so the sandbox has to
-  # be able to reach it. EasyEffects' manifest carries the same line.
+  # The tray icon, which takes two lines and had neither until 2026-09-20.
   #
-  # **This is necessary and it is not sufficient: the Flatpak still has no tray
-  # icon** (2026-09-20, measured on GNOME and on Plasma by asking the watcher
-  # for RegisteredStatusNotifierItems rather than by looking at a panel; the
-  # same build outside the sandbox registers an item on both, the Flatpak
-  # registers none, with this line in place and with --own-name=org.kde.* as
-  # well). What is known: the sandbox cannot own the name Qt publishes the item
-  # under, org.kde.StatusNotifierItem-<pid>-<n>, because the proxy answers
-  # RequestName with ServiceUnknown, and no --own-name pattern covers it
-  # (org.kde.StatusNotifierItem.* does not, the suffix is not a subtree;
-  # org.kde.* does and is far too broad). Why it still does not register with
-  # both granted is not diagnosed. decisions.md, "GNOME and KDE, on Wayland".
+  # Qt's QSystemTrayIcon is a StatusNotifierItem: the app publishes it under
+  # the bus name org.kde.StatusNotifierItem-<pid>-<n> and then hands that name
+  # to the watcher. So the sandbox has to be able to reach the watcher *and* to
+  # own that name; with only the first, RequestName comes back
+  # org.freedesktop.DBus.Error.ServiceUnknown, which is how xdg-dbus-proxy
+  # refuses, and the icon is simply absent with nothing said anywhere.
+  #
+  # The pid is 2 because the sandbox has a pid namespace of its own and the
+  # app is the first thing in it (measured: `flatpak run --command=sh ... -c
+  # 'echo $$'` prints 2), and the counter is 1 because there is one tray icon.
+  # No wildcard covers the name: --own-name=org.kde.StatusNotifierItem.* is
+  # refused, because -2-1 is not a subtree, and org.kde.* is granted but is far
+  # too broad to ship.
   #
   # It matters more than a missing icon usually would, because launch at
   # sign-in starts the app with --tray, and an app in the tray with no tray
   # icon cannot be opened at all.
   - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.StatusNotifierItem-2-1
 
   # Launch at sign-in, read side. The Background portal writes the autostart
   # entry on the host and gives no way to ask what it wrote, so the toggle in
