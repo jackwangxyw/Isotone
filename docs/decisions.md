@@ -4621,18 +4621,34 @@ Left for Linux after packaging: GNOME, KDE and Wayland, one VM each
 
 ## State of the owner's machine
 
-**IsoAPO is installed on CABLE Input only**, by devicetool with
-`--replace-equalizerapo`, in MFX (`,6`). SFX (`,5`) is empty: Equalizer APO no
-longer runs on CABLE Input (its pre-mix class there had been applying
-`peace.txt`). CABLE Output, the capture side, still has Equalizer APO. Every
-other endpoint is untouched. Nothing the owner listens to routes through the
-cable. The staged `C:\Program Files\Isotone\IsoAPO.dll` is the final backend
-review's build (SHA-256 EE9AECEE…8567, param block v5); the owner deleted the
-previous DLL's backup. `%ProgramData%\IsoAPO\devices` holds CABLE
-Input's saved state from the owner's use of the app on it (2026-09-15) and the
-headphones'. CABLE Input's
-install record predates `Isotone.InstallMode`; `status` derives MFX from the
-slot, and a repair after a detach needs `--mode mfx`.
+**IsoAPO is installed on two outputs** (2026-09-20, after the installer was run
+for real):
+
+- **CABLE Input**, MFX (`,6`), by devicetool with `--replace-equalizerapo`. SFX
+  (`,5`) is empty: Equalizer APO no longer runs on CABLE Input (its pre-mix
+  class there had been applying `peace.txt`). Nothing the owner listens to
+  routes through the cable.
+- **Headphones** (Anker USB Audio), EFX, mode `SFX_EFX`. The two vendor APOs it
+  came with are still in SFX and MFX. This is the owner's real output, from his
+  own use of the app during stages 4 and 5.
+
+Until 2026-09-20 this section said CABLE Input only, which was true when it was
+written and had stopped being true: the headphones were added by the owner's own
+use, and the stale note was caught by `machine-uninstall` enumerating the
+endpoints rather than by anyone reading it. CABLE Output, the capture side,
+still has Equalizer APO. Every other endpoint is untouched.
+
+`C:\Program Files\Isotone` is now a **real install**, put there by
+`isotone-0.1.0-setup.exe`: the whole staged tree, `IsoAPO.dll` at 0.1.0 with the
+static CRT, an Add/Remove Programs entry in the 64-bit view, and
+`%ProgramData%\IsoAPO` carrying the installer's ACL, so the app can write a
+saved state unelevated whichever account wrote it last. It is no longer the
+hand-staged DLL of the backend review.
+
+`%ProgramData%\IsoAPO\devices` holds both outputs' saved state, neither touched
+by the install and uninstall. CABLE Input's install record predates
+`Isotone.InstallMode`; `status` derives MFX from the slot, and a repair after a
+detach needs `--mode mfx`.
 
 **CABLE Input and CABLE Output are stereo again** (2 channels, 24-bit, 48 kHz,
 `0x3`; float32 stereo mix format), set back on 2026-09-14 by the owner with the
