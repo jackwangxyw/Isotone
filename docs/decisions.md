@@ -4854,8 +4854,13 @@ copies files and calls it.
   output; EasyEffects has both, and two programs that capture every stream
   cannot share a machine. The owner has EasyEffects installed.
 - **One unexplained flake**: `ui_model_tests` failed once in six runs on
-  2026-09-20 and passed five more; which case failed was not captured. Not
-  reproduced, not diagnosed.
+  2026-09-20 and passed five more; which case failed was not captured. Hunted on
+  2026-09-20 and **not reproduced**: 150 runs of `ui_model_tests` offscreen on
+  Linux, 150 on Windows, and 60 more of all three ctest variants (offscreen, the
+  X11 one under Xvfb and the portal one on its own bus) while two VMs were
+  installing on the same machine, which is the loaded case a timing flake would
+  like. 570 runs, no failure. Still open, and now with the search recorded so
+  the next attempt starts somewhere else.
 - **The QtQuick.Controls styles**, about 9 MB, ship in the Windows installer and
   are probably unused: they arrive through QtQuick.Dialogs, whose FileDialog is
   native on Windows. The owner's call was to leave them.

@@ -6,6 +6,10 @@
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/raw.h>
+// spa_pod_get_array, which parser.h pulled in up to PipeWire 1.4 and does not
+// in 1.6: without this the UI backend stops building on Ubuntu 26.04
+// (measured on the GNOME VM, pipewire 1.6.2).
+#include <spa/pod/iter.h>
 #include <spa/pod/parser.h>
 #include <spa/utils/json.h>
 

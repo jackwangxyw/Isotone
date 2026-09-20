@@ -45,8 +45,17 @@ RestartSec=2
 LimitRTPRIO=95
 LimitNICE=-19
 # It talks to PipeWire and writes one directory. Nothing else.
+#
+# PrivateDevices= is deliberately not here, and the reason is measured rather
+# than guessed (2026-09-20, the GNOME VM on Ubuntu 26.04, systemd 259.5). It
+# implies dropping CAP_MKNOD from the capability bounding set, PR_CAPBSET_DROP
+# needs CAP_SETPCAP, and a user manager has none: every start failed with
+# "Failed to drop capabilities: Operation not permitted", status 218/CAPABILITIES,
+# then restarted and failed again. Taking it out is what starts the daemon;
+# taking out any of the three below does not. The three are namespace settings,
+# which a user manager can do. The daemon opens no device node, so what is lost
+# is a second lock on a door it never goes through.
 NoNewPrivileges=true
-PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
 # The leading dash: the namespace is built before ExecStart runs, so on a fresh
