@@ -4709,14 +4709,55 @@ short windows (Settings, General, Short window), always on top, the graph repain
 only the spectrum on each frame (the maximized lag), the frequency grid's three
 weights, and the placeholder icon. **A/B is set aside for later** (owner): plan 8.4
 and the `EqByEarAB` board are its design if it is wanted.
-**Stage 6** (packaging) is under way (2026-09-19). The owner's order is to fix
-the bugs and explore for more first, then package: a Windows installer, then a
-.deb, then Flatpak. Versions are `x.y.z` and the first release is **0.1.0**.
-Done so far: the claimed-stream bug below, the CRT under audiodg settled at
-`/MT`, and a version resource on every shipped Windows binary. Launch at sign-in
-on Windows still waits on the installer: what is left to see is Windows running
-the Run value at sign-in, and that wants the installed app rather than a build
-directory (owner, 2026-09-19).
+**Stage 6** (packaging) is built and measured on all three targets
+(2026-09-20). Versions are `x.y.z`; the first release is **0.1.0**, not yet
+tagged.
+
+| | State |
+|---|---|
+| Windows installer | NSIS 3.12, six pages, no output page (first run picks outputs). Run for real on the owner's machine: registered, ACL set, ARP entry, uninstaller. Measured through the installed engine at 0.0001 dB |
+| `.deb` | 1.6 MB, lintian clean but for three deliberate warnings. Daemon enabled on install. Measured on the owner's laptop through `/usr/bin/isotone-daemon` at -0.0000 dB |
+| Flatpak | `io.github.isotone.Isotone`, needs `--device=shm` (plan question 5, answered below). Measured across the sandbox boundary at -0.0000 dB |
+
+All HKLM and ACL work is in `isotone-devicetool` (`machine-install`,
+`machine-uninstall`), each with `--dry-run` and tests, so the NSIS script only
+copies files and calls it.
+
+**Left in stage 6, in the order they matter:**
+
+1. **The Flatpak does not start at login.** The `.deb` enables a user unit; a
+   Flatpak cannot install one, and the app's launch-at-sign-in writes into
+   `~/.var/app`, which the desktop does not read. Wants the Background portal
+   (`org.freedesktop.portal.Background`, `RequestBackground` with autostart).
+2. **Launch at sign-in on Windows** still needs one sign-out to confirm Windows
+   runs the Run value. The value itself is right and the app is installed now.
+3. **GNOME, KDE and Wayland**, one VM each; none built
+   (docs/notes/linux-vm-setup.md). The only desktops tested are Cinnamon under
+   X11, on the VM and the owner's laptop.
+4. **`v0.1.0`**, when the owner says. The repository should be public first: the
+   AppStream metadata points at it, and `appstreamcli` warns the URLs are
+   unreachable until it is.
+
+**Open, not stage 6:**
+
+- **The capture blocklist** is 0.2.0 (owner, 2026-09-20). The daemon moves every
+  application's playback into its sink and there is no way to exclude one, or an
+  output; EasyEffects has both, and two programs that capture every stream
+  cannot share a machine. The owner has EasyEffects installed.
+- **One unexplained flake**: `ui_model_tests` failed once in six runs on
+  2026-09-20 and passed five more; which case failed was not captured. Not
+  reproduced, not diagnosed.
+- **The QtQuick.Controls styles**, about 9 MB, ship in the Windows installer and
+  are probably unused: they arrive through QtQuick.Dialogs, whose FileDialog is
+  native on Windows. The owner's call was to leave them.
+
+**State of the owner's machines.** Windows: Isotone installed at
+`C:\Program Files\Isotone` by the installer, on two outputs (below). Laptop: the
+`.deb` installed and enabled, the Flatpak installed, the KDE 6.11 runtime
+installed, screen blanking and lock turned off with
+`~/Isotone/.work/power-restore.sh` ready to put them back. Mint VM: the `.deb`
+installed, powered off, and a build-directory user unit moved aside to
+`~/isotone-daemon.service.build-dir.bak`.
 
 Left for Linux after packaging: GNOME, KDE and Wayland, one VM each
 (docs/notes/linux-vm-setup.md). Two smaller things, neither started:
