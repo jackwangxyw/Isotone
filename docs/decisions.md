@@ -4506,6 +4506,36 @@ what was wanted, and the test asserts the state it has made is the right one
 (an open refused, and refused with ERROR_ACCESS_DENIED) before testing anything
 else. Mutating the 50 ms to 0 fails it; restoring it passes.
 
+## The .deb on real hardware
+
+Installed on the owner's own laptop (Mint 22.3, PipeWire 1.0.5, Intel SOF HDA
+DSP), which is the only place the package could be shown to work on real
+hardware: WSL's rig is two null sinks and the Mint VM has no audio out at all.
+The owner ran the one command that needs a password; everything after it was
+unelevated.
+
+**Measured through the packaged binary**, `/usr/bin/isotone-daemon`, not a build
+directory: flat -6.021 dBFS, with a -12 dB peaking band at 1 kHz -18.021, so
+-12.000 dB against -12.000 analytic, error -0.0000 dB. Through a null test sink
+made by `rig-up.sh` in the running PipeWire, so nothing was audible, the default
+sink never changed and nothing was written to his configuration.
+
+The app runs from `/usr/bin` on his Cinnamon desktop and shows what it should:
+"Daemon stopped" with a Start button, because the package's global enable takes
+effect at the next login and his session predates it.
+
+**The unit trap the VM hid.** On the VM the daemon appeared to start from the
+package and was in fact running `~/build/linux/daemon/isotone-daemon`, from a
+user unit at `~/.config/systemd/user/` left over from earlier testing, which
+shadows `/usr/lib/systemd/user/`. That would have been a false pass for the one
+requirement the package has to meet. It was caught by reading the `Loaded:` line
+rather than trusting `is-active`, and the check is now to ask systemd for
+`FragmentPath` and to move the build tree out of the way entirely. The laptop
+has no such override, so its result stands on its own.
+
+Left installed and enabled at the owner's choice: from his next login his audio
+goes through Isotone. `sudo apt-get purge isotone` removes it.
+
 # Where things stand (2026-09-19)
 
 ## Done
