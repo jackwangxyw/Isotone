@@ -4796,25 +4796,39 @@ that looks like, because it is the shipping path on a Wayland desktop:
 
 So global hotkeys on Wayland are a Flatpak feature, not a `.deb` feature, and
 the `.deb` should say so rather than leave a toggle that silently does nothing.
-**The systemd-unit way out does not work, which was worth testing rather than
-assuming.** xdg-desktop-portal derives a host application ID from the systemd
-unit an app runs in, so the obvious answer was to launch the `.deb`'s app the
-way a desktop launcher does. Done exactly, and confirmed by reading the
-process's own cgroup:
+**It is a scope, not a service, and that one word is the whole thing.**
+xdg-desktop-portal derives a host application ID from the systemd unit an app
+runs in, and the XDG specification says a launcher starts an app in
+`app-<application id>-<random>.**scope**`. The first attempt used
+`systemd-run --user --unit=...`, which makes a *service*, and the portal
+answered `NotAllowed`; that is what the first version of this entry concluded
+from, wrongly. With `--scope`, and the cgroup read back to prove it:
 
 ```
-systemd-run --user --unit=app-io.github.isotone.Isotone-888 ... isotone
-  /user.slice/user-1000.slice/user@1000.service/app.slice/app-io.github.isotone.Isotone-888.service
+systemd-run --user --scope --unit=app-io.github.isotone.Isotone-5151 ... isotone
+  /user.slice/user-1000.slice/user@1000.service/app.slice/app-io.github.isotone.Isotone-5151.scope
 ```
 
-and the portal still answered `NotAllowed`. On reflection that is the right
-answer from its side: a unit name is chosen by whoever creates the unit, so it
-is not evidence of anything, and only a sandbox gives an identity the portal
-can check. **So global hotkeys on Wayland are a Flatpak feature and there is no
-`.deb` fix short of shipping sandboxed.** That is the platform's position
-rather than a gap in Isotone, and it is the answer to "is this an OS
-limitation": not that Wayland cannot deliver the key, but that it will not
-deliver it to someone it cannot name.
+`CreateSession` is answered, `BindShortcuts` follows with all four shortcuts
+and their triggers, and **the key fires**: with Dolphin raised and focused, one
+`Ctrl+Alt+Shift+E` took the EQ toggle from (48, 114, 193) to (100, 105, 112),
+and Dolphin's title bar is in both frames so there is no question about which
+window had focus.
+
+So global hotkeys on Wayland are **not** a Flatpak-only feature. An app gets
+them when it runs where a desktop launcher would have put it, which is what
+happens when someone opens it from the menu. What refuses is an app started
+from a terminal or an ssh session, which lands in `session-N.scope`, and that
+is every way this was launched during the first night's checks. The lesson is
+narrower and more annoying than "Wayland cannot": *this cannot be tested from a
+shell*.
+
+**Left to check, and it is the one that matters for shipping:** whether the
+`.deb`'s launch at sign-in lands in an app scope. The XDG autostart entry is
+started by the session rather than by a launcher, and whether gnome-session and
+ksmserver wrap it in `app-*.scope` is not measured yet. If they do not, the app
+could put itself in one (re-exec through `systemd-run --scope` when it finds it
+is not in an app scope), which is small and self-contained.
 
 **What was ours, and is fixed: the refusal was invisible.** `bind()` sent
 CreateSession with `asyncCall` and threw the reply away, so an error reply
@@ -5020,9 +5034,10 @@ copies files and calls it.
    systemd 259. Two are open:
    - ~~The Flatpak has no tray icon.~~ Fixed: it wanted a `--talk-name` and an
      `--own-name`, and verified on Plasma with the shipped manifest.
-   - **Global hotkeys do not work outside a Flatpak on Wayland**, because the
-     portal refuses an app it has no application ID for, on GNOME and Plasma
-     alike. A decision rather than a patch; the entry says what the options are.
+   - **Global hotkeys on Wayland want an app scope.** They work outside a
+     Flatpak when the app runs in `app-<id>-<random>.scope`, as a desktop
+     launcher starts it, and are refused when it does not, as a shell starts
+     it. Left to measure: whether launch at sign-in lands in one.
 
    Plasma on X11 no longer exists to test: Kubuntu 26.04 ships a Wayland
    session only.
