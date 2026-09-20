@@ -20,8 +20,10 @@
 #include <thread>
 #include <vector>
 
+#include "acl.h"
 #include "session.h"
 
+using isotone::devicetool::dacl_grants;
 using isotone::devicetool::DevicetoolSession;
 
 namespace {
@@ -873,4 +875,83 @@ TEST_CASE("machine-install and machine-uninstall refuse bad arguments") {
         const Direct d = run_direct(args);
         CHECK(d.exit == 2);
     }
+}
+
+TEST_CASE("machine-uninstall names exactly the outputs status calls installed") {
+    // The installer uninstalls per endpoint by asking this, rather than reading
+    // `list`'s JSON in NSIS, so the two views have to agree.
+    const Direct d = run_direct({L"machine-uninstall", L"--dry-run"});
+    REQUIRE(d.exit == 0);
+    const Json j = parsed(d.out);
+    REQUIRE(j["ok"].b);
+
+    std::vector<std::string> named;
+    for (const Json& guid : j["outputs"].items) named.push_back(guid.s);
+
+    std::vector<std::string> installed;
+    for (const std::string& guid : render_endpoints()) {
+        const Direct s = run_direct({L"status", widen(guid)});
+        if (s.exit != 0) continue;
+        const Json status = parsed(s.out);
+        const std::string state = status["isoapo"]["state"].s;
+        // The states that leave something to undo. "not_installed" is the
+        // endpoint having neither a record nor a slot; "interrupted" is a
+        // journal with no record yet, which `repair` owns rather than this.
+        if (state == "installed" || state == "detached" || state == "replaced_by_equalizerapo") {
+            installed.push_back(guid);
+        }
+    }
+    std::sort(named.begin(), named.end());
+    std::sort(installed.begin(), installed.end());
+    INFO("machine-uninstall: " << named.size() << ", status: " << installed.size());
+    CHECK(named == installed);
+}
+
+TEST_CASE("machine-uninstall says it will clear the outputs before unregistering") {
+    const Direct d = run_direct({L"machine-uninstall", L"--dry-run"});
+    const Json j = parsed(d.out);
+    REQUIRE(j["ok"].b);
+
+    // Order matters: unregistering the class while a slot still names it leaves
+    // an endpoint pointing at a CLSID that no longer resolves.
+    int take_off = -1, unregister = -1;
+    for (size_t i = 0; i < j["would"].items.size(); ++i) {
+        const std::string step = j["would"].items[i].s;
+        if (step.rfind("take IsoAPO off ", 0) == 0) take_off = static_cast<int>(i);
+        if (step == "call DllUnregisterServer in the DLL") unregister = static_cast<int>(i);
+    }
+    CHECK(unregister >= 0);
+    if (!j["outputs"].items.empty()) {
+        CHECK(take_off >= 0);
+        CHECK(take_off < unregister);
+    } else {
+        CHECK(take_off == -1);
+    }
+}
+
+TEST_CASE("the ACL check survives what Windows hands back") {
+    // The real install of 2026-09-19 applied the ACL correctly and then failed
+    // its own verification, because the check compared SDDL as a string.
+    // Windows adds AI to the flags and returns the ACEs in an order of its own.
+    // These two are the exact strings from that run.
+    const std::wstring want = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)"
+                              L"(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;S-1-5-80-2676549577-1911656217-"
+                              L"2625096541-4178041876-1366760775)";
+    const std::wstring got = L"D:PAI(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;LS)"
+                             L"(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-2676549577-1911656217-"
+                             L"2625096541-4178041876-1366760775)";
+    CHECK(dacl_grants(got, want));
+
+    // And it still refuses an ACL that is actually different.
+    CHECK_FALSE(dacl_grants(L"D:PAI(A;OICI;FA;;;SY)", want));                  // ACEs missing
+    CHECK_FALSE(dacl_grants(L"", want));                                       // unreadable
+    // Unprotected: ProgramData's "Users may read and create" would apply too,
+    // which is the thing the ACL exists to stop.
+    std::wstring unprotected = got;
+    unprotected.replace(0, 5, L"D:AI");
+    CHECK_FALSE(dacl_grants(unprotected, want));
+    // One right taken away.
+    std::wstring weaker = got;
+    weaker.replace(weaker.find(L"0x1301bf"), 8, L"0x1200a9");
+    CHECK_FALSE(dacl_grants(weaker, want));
 }

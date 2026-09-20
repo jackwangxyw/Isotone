@@ -63,12 +63,14 @@
 #include <vector>
 
 #include "DeviceAPOInfo.h"
+#include "acl.h"
 #include "dry_run.h"
 #include "helpers/PrecisionTimer.h"
 #include "helpers/RegistryHelper.h"
 #include "speaker_layout.h"
 #include "helpers/ServiceHelper.h"
 
+using isotone::devicetool::dacl_grants;
 using isotone::devicetool::DryRunRegistry;
 using isotone::devicetool::OperationLog;
 using isotone::devicetool::RegistryOperation;
@@ -2411,8 +2413,8 @@ int cmd_machine_install(const std::wstring& dll, bool dry_run) {
     value_type(kAudioSettingsKey, kProtectedAudioValue, &present_now);
     done += "," + check_json("DisableProtectedAudioDG is 1",
                              present_now && read_dword(kAudioSettingsKey, kProtectedAudioValue) == 1, &after_failed);
-    done += "," + check_json("the data directory carries the ACL", read_dacl(data_dir + L"\\devices") == sddl,
-                             &after_failed);
+    done += "," + check_json("the data directory carries the ACL",
+                             dacl_grants(read_dacl(data_dir + L"\\devices"), sddl), &after_failed);
     done += "]";
     const std::string outcome = facts + ",\"after\":" + done + ",\"registration\":" + after.json;
     if (!after_failed.empty()) {
@@ -2420,6 +2422,27 @@ int cmd_machine_install(const std::wstring& dll, bool dry_run) {
     }
     std::printf("{%s,\"ok\":true}\n", outcome.c_str());
     return 0;
+}
+
+// Every render endpoint IsoAPO is on, by its install record or by an effect
+// slot. The installer would otherwise have to read `list`'s JSON to find them,
+// and NSIS is a bad place to put a JSON reader.
+std::vector<std::wstring> endpoints_with_isoapo() {
+    std::vector<std::wstring> out;
+    std::vector<std::wstring> guids;
+    try {
+        guids = RegistryHelper::enumSubKeys(std::wstring(kMMDevices) + L"\\Render");
+    } catch (RegistryException&) {
+        return out;
+    }
+    for (const std::wstring& guid : guids) {
+        const Endpoint e{guid, false, std::wstring(kMMDevices) + L"\\Render\\" + guid};
+        bool found = false;
+        // A broken endpoint must not stop the rest being cleaned up.
+        error_text([&] { found = read_record(kIsoChildApos, guid).exists || read_slots(e).isoapo; });
+        if (found) out.push_back(guid);
+    }
+    return out;
 }
 
 int cmd_machine_uninstall(bool remove_data, bool dry_run) {
@@ -2432,7 +2455,15 @@ int cmd_machine_uninstall(bool remove_data, bool dry_run) {
     const bool ours = ours_present && read_dword(kIsotoneKey, kProtectedAudioOursValue) == 1;
     const bool equalizerapo = RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO");
     const bool restore_protected_audio = ours && !equalizerapo;
+    // Taken off every endpoint before the class is unregistered: leaving a slot
+    // pointing at a CLSID that no longer resolves is how an endpoint ends up
+    // with no audio at all.
+    const std::vector<std::wstring> outputs = endpoints_with_isoapo();
+    std::string outputs_json = "[";
+    for (size_t i = 0; i < outputs.size(); ++i) outputs_json += (i ? "," : "") + quote(outputs[i]);
+    outputs_json += "]";
     const std::string facts = std::string("\"command\":\"machine-uninstall\",\"dry_run\":") + boolean(dry_run) +
+                              ",\"outputs\":" + outputs_json +
                               ",\"dll\":" + (before.dll.empty() ? "null" : quote(before.dll)) +
                               ",\"protected_audiodg_set_by_isotone\":" + boolean(ours) +
                               ",\"equalizerapo_installed\":" + boolean(equalizerapo) +
@@ -2441,7 +2472,12 @@ int cmd_machine_uninstall(bool remove_data, bool dry_run) {
                               (data_dir.empty() ? "null" : quote(data_dir));
 
     if (dry_run) {
-        std::string would = "[\"call DllUnregisterServer in the DLL\"";
+        std::string would = "[";
+        if (!outputs.empty()) {
+            would += quote("take IsoAPO off " + std::to_string(outputs.size()) +
+                           (outputs.size() == 1 ? " output" : " outputs")) + ",";
+        }
+        would += "\"call DllUnregisterServer in the DLL\"";
         if (restore_protected_audio) would += ",\"remove DisableProtectedAudioDG\"";
         else if (ours) would += ",\"leave DisableProtectedAudioDG: Equalizer APO is installed and needs it\"";
         else would += ",\"leave DisableProtectedAudioDG: this install did not set it\"";
@@ -2449,6 +2485,20 @@ int cmd_machine_uninstall(bool remove_data, bool dry_run) {
                              : ",\"leave the data directory and the saved state in it\"]";
         std::printf("{%s,\"ok\":true,\"would\":%s}\n", facts.c_str(), would.c_str());
         return 0;
+    }
+
+    // The endpoints first, through the same journalled, rolled-back path
+    // `uninstall` uses; the class is only unregistered once no slot names it.
+    for (const std::wstring& guid : outputs) {
+        const Endpoint e{guid, false, std::wstring(kMMDevices) + L"\\Render\\" + guid};
+        CommandScope scope(dry_run);
+        std::string rollback;
+        if (const std::string error = error_text([&] { recover_interrupted(e); }); !error.empty()) {
+            return fail("machine-uninstall", utf8(guid) + ": " + error, "," + facts);
+        }
+        if (!read_record(kIsoChildApos, guid).exists) continue;   // a slot with no record: `uninstall` explains why
+        const std::string error = scope.run(e, "uninstall", &rollback, [&] { uninstall_isoapo(e); });
+        if (!error.empty()) return fail("machine-uninstall", utf8(guid) + ": " + error, "," + rollback + facts);
     }
 
     if (!before.dll.empty() && before.dll_exists) {
@@ -2477,6 +2527,8 @@ int cmd_machine_uninstall(bool remove_data, bool dry_run) {
     value_type(kAudioSettingsKey, kProtectedAudioValue, &present_now);
     done += "," + check_json("DisableProtectedAudioDG is as it should be",
                              restore_protected_audio ? !present_now : true, &after_failed);
+    done += "," + check_json("no output is left with IsoAPO in a slot", endpoints_with_isoapo().empty(),
+                             &after_failed);
     done += "]";
     const std::string outcome = facts + ",\"after\":" + done + ",\"registration\":" + after.json;
     if (!after_failed.empty()) {
