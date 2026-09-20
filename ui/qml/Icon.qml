@@ -32,8 +32,14 @@ Item {
         // division every outline set draws: that one was Lucide's panel-left
         // stroke for stroke, and it is the icon the owner's reviewer picked out
         // as identical to ChatGPT's and Claude's.
-        panel: ["M6 4.5h12a3.2 3.2 0 0 1 3.2 3.2v8.6a3.2 3.2 0 0 1 -3.2 3.2h-12a3.2 3.2 0 0 1 -3.2 -3.2v-8.6a3.2 3.2 0 0 1 3.2 -3.2z",
-                { d: "M7.7 9.1V14.9", w: 2.9 }],
+        //
+        // The proportions are Phosphor's sidebar-simple, which the owner picked
+        // out of three (2026-09-20): a wider panel than Lucide's and a rail set
+        // in about a third of the way. The two weights are the part he wanted
+        // kept, so the panel is hairline and the rail is a bar, full height
+        // inside it rather than a short pill.
+        panel: ["M4.4 4.6h15.2a2.6 2.6 0 0 1 2.6 2.6v9.6a2.6 2.6 0 0 1 -2.6 2.6h-15.2a2.6 2.6 0 0 1 -2.6 -2.6v-9.6a2.6 2.6 0 0 1 2.6 -2.6z",
+                { d: "M7.5 6.2V17.8", w: 3.1 }],
         output: ["M4 9v6h4l5 4V5L8 9H4z", "M16.5 8.5a5 5 0 0 1 0 7"],
         // The mark (docs/design/logo, locked 2026-09-19): five bars about the
         // zero line, centred on the ink rather than on the line. Stroked at width

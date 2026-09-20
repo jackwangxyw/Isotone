@@ -23,7 +23,8 @@ Column {
             color: current ? Theme.surface : rowArea.containsMouse ? Qt.alpha(Theme.surface, 0.5) : "transparent"
             StatusDot {
                 x: 10
-                y: 16
+                // The mark is 14 tall now, not 6; its centre stays where it was.
+                y: 12
                 status: row.activity === "running" ? "ok" : row.activity === "stalled" ? "warn" : ""
             }
             Column {

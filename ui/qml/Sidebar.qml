@@ -155,8 +155,11 @@ Rectangle {
                 color: outputsArea.containsMouse ? Theme.surface : "transparent"
                 Icon { name: "output"; size: 20; anchors.centerIn: parent }
                 StatusDot {
-                    x: 34 - 10 + 4
-                    y: 11
+                    // Clear of the 20 px icon and centred against it, rather
+                    // than the corner badge the 6 px dot was: a 14 px bar
+                    // hanging off the icon's top corner reads as a stray mark.
+                    x: 34
+                    y: (parent.height - height) / 2
                     status: Outputs.currentActivity === "running" ? "ok" : Outputs.currentActivity === "stalled" ? "warn" : ""
                 }
                 MouseArea {
