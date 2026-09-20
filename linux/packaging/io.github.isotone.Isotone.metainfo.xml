@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- Copyright (C) 2026 The Isotone authors -->
+<component type="desktop-application">
+  <id>io.github.isotone.Isotone</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+
+  <name>Isotone</name>
+  <summary>System-wide parametric EQ</summary>
+
+  <description>
+    <p>
+      Isotone equalises everything the computer plays. It runs as a PipeWire
+      filter, so applications need no setting up: their audio goes through it on
+      the way to the output.
+    </p>
+    <p>
+      Parametric bands with the usual filter types, a response graph with a live
+      spectrum, per-channel bands, speaker setup with bass management and delay,
+      and presets that follow the output they were made for.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">isotone.desktop</launchable>
+
+  <developer id="io.github.jackwangxyw">
+    <name>The Isotone authors</name>
+  </developer>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <keywords>
+    <keyword>equalizer</keyword>
+    <keyword>equaliser</keyword>
+    <keyword>EQ</keyword>
+    <keyword>filter</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/jackwangxyw/Isotone</url>
+  <url type="bugtracker">https://github.com/jackwangxyw/Isotone/issues</url>
+
+  <provides>
+    <binary>isotone</binary>
+  </provides>
+
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-19">
+      <description>
+        <p>First packaged release. Beta.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

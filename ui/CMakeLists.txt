@@ -311,6 +311,64 @@ else()
 endif()
 target_link_libraries(isotone PRIVATE isotone_ui isotone_uiplugin)
 
+# ---------------------------------------------------------------------------
+# Installing (stage 6)
+
+install(TARGETS isotone RUNTIME DESTINATION "${ISOTONE_INSTALL_BINDIR}" COMPONENT app)
+
+if(WIN32)
+    # The Qt runtime, staged by windeployqt into the install directory rather
+    # than listed here: which DLLs and QML modules an isotone.exe needs is a
+    # question about the binary, and windeployqt reads it from the binary.
+    #
+    # --qmldir is what makes it stage the Qt QML modules this app imports; without
+    # it the app starts and shows an empty window, because QtQuick's own plugins
+    # are missing. --no-translations and --no-system-d3d-compiler keep about
+    # 20 MB out of the installer that nothing here uses.
+    find_program(ISOTONE_WINDEPLOYQT windeployqt HINTS "${QT6_INSTALL_PREFIX}" "${Qt6_DIR}/../../../bin"
+                 DOC "Qt's Windows deployment tool, which stages the Qt runtime")
+    if(ISOTONE_WINDEPLOYQT)
+        # The CRT beside the app rather than windeployqt's vc_redist.x64.exe,
+        # which is 18 MB of installer for 1.5 MB of DLLs. isotone.exe needs them
+        # (it links Qt, which is /MD); IsoAPO.dll does not, because it links the
+        # CRT statically for audiodg (core/CMakeLists.txt).
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "${ISOTONE_INSTALL_BINDIR}")
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_NO_WARNINGS TRUE)
+        include(InstallRequiredSystemLibraries)
+
+        install(CODE "
+            set(exe \"\${CMAKE_INSTALL_PREFIX}/isotone.exe\")
+            message(STATUS \"windeployqt \${exe}\")
+            execute_process(
+                COMMAND \"${ISOTONE_WINDEPLOYQT}\" --release --no-translations
+                        --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime
+                        --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/qml\" \"\${exe}\"
+                RESULT_VARIABLE failed)
+            if(failed)
+                message(FATAL_ERROR \"windeployqt failed (\${failed}): the install has no Qt runtime\")
+            endif()
+            # Qt's runtime HLSL compiler, 15.5 MB, for shaders this app does not
+            # have: nothing in qml/ is a ShaderEffect and nothing calls
+            # qt_add_shaders, so these are only ever loaded to compile nothing.
+            # windeployqt has no flag for them.
+            foreach(unused dxcompiler.dll dxil.dll)
+                file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/\${unused}\")
+            endforeach()
+        " COMPONENT app)
+    else()
+        message(WARNING "windeployqt not found: `cmake --install` will lay out an app with no Qt runtime")
+    endif()
+else()
+    # The desktop's half of an installed app: the launcher, the icon theme and
+    # the AppStream metadata GNOME Software and KDE Discover read.
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/isotone.desktop"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/applications" COMPONENT app)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/io.github.isotone.Isotone.metainfo.xml"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo" COMPONENT app)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/icons/"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons" COMPONENT app)
+endif()
+
 if(ISOTONE_BUILD_TESTS)
     # The backend without Qt. The Windows half drives IsoAPO's mapping, the
     # compat writer and the registry; the Linux half the daemon's region, XDG
@@ -337,7 +395,7 @@ if(ISOTONE_BUILD_TESTS)
     endif()
     add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp
                    tests/test_settings.cpp tests/test_session_fixes.cpp tests/test_spectrum_display.cpp
-                   tests/test_eqbyear.cpp tests/test_rig.h ${ISOTONE_UI_MODEL_TESTS_PLATFORM})
+                   tests/test_eqbyear.cpp tests/test_logomark.cpp tests/test_rig.h ${ISOTONE_UI_MODEL_TESTS_PLATFORM})
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)

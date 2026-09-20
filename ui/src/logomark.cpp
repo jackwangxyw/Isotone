@@ -7,6 +7,50 @@
 #include <QPainterPath>
 #include <QPixmap>
 
+namespace {
+
+// The mark, in the 24 x 24 box it is specified in (docs/design/logo, locked
+// 2026-09-19). Five bars hung from the zero line at y = 12, then shifted so the
+// ink is centred: the bars are not symmetric about that line, so centring on it
+// sits the mark high in a tile.
+//
+// These are the same numbers tools/gen_icons.py cuts every shipped icon from,
+// and test_logomark.cpp fails if the two disagree.
+constexpr double kBox = 24.0;
+constexpr double kBarWidth = 3.0;
+constexpr double kTileRadius = 0.22;   // of the tile's side
+constexpr double kGlyphInset = 0.14;   // the glyph's margin inside the tile
+
+struct Bar {
+    double x, top, width, height;
+};
+
+constexpr Bar kBars[] = {
+    {3.10, 11.61, kBarWidth, 4.83},
+    {6.80, 5.71, kBarWidth, 8.90},
+    {10.50, 11.61, kBarWidth, 6.68},
+    {14.20, 7.93, kBarWidth, 6.68},
+    {17.90, 11.61, kBarWidth, 4.83},
+};
+
+}  // namespace
+
+void paint_logo_mark(QPainter* p, const QRectF& box, const QColor& glyph, double inset) {
+    const double scale = box.width() / kBox * (1.0 - inset);
+    const double offset = box.width() * inset / 2.0;
+    p->save();
+    p->setRenderHint(QPainter::Antialiasing, true);
+    p->setPen(Qt::NoPen);
+    p->setBrush(glyph);
+    for (const Bar& bar : kBars) {
+        const QRectF r(box.x() + offset + bar.x * scale, box.y() + offset + bar.top * scale,
+                       bar.width * scale, bar.height * scale);
+        const double radius = kBarWidth / 2.0 * scale;
+        p->drawRoundedRect(r, radius, radius);
+    }
+    p->restore();
+}
+
 QIcon logo_mark_icon() {
     QIcon icon;
     for (int size : {16, 20, 24, 32, 40, 48, 64, 96, 128, 256}) {
@@ -14,25 +58,11 @@ QIcon logo_mark_icon() {
         pixmap.fill(Qt::transparent);
         QPainter p(&pixmap);
         p.setRenderHint(QPainter::Antialiasing, true);
+        // The light plate, so the mark reads on a dark taskbar and on a light one.
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(0xf3, 0xf5, 0xf8));
-        p.drawRoundedRect(QRectF(0, 0, size, size), size * 0.25, size * 0.25);
-        // "M3 14c3 0 3-6 6-6s3 8 6 8 3-4 6-4" in absolute points, drawn in the
-        // middle 16/28 of the square as the sidebar's mark is.
-        QPainterPath wave(QPointF(3, 14));
-        wave.cubicTo(6, 14, 6, 8, 9, 8);
-        wave.cubicTo(12, 8, 12, 16, 15, 16);
-        wave.cubicTo(18, 16, 18, 12, 21, 12);
-        const double scale = size * (16.0 / 28.0) / 24.0;
-        p.translate(size / 2.0, size / 2.0);
-        p.scale(scale, scale);
-        p.translate(-12, -12);
-        QPen pen(QColor(0x12, 0x15, 0x19), size >= 32 ? 2.2 : 2.8);
-        pen.setCapStyle(Qt::RoundCap);
-        pen.setJoinStyle(Qt::RoundJoin);
-        p.setPen(pen);
-        p.setBrush(Qt::NoBrush);
-        p.drawPath(wave);
+        p.drawRoundedRect(QRectF(0, 0, size, size), size * kTileRadius, size * kTileRadius);
+        paint_logo_mark(&p, QRectF(0, 0, size, size), QColor(0x1b, 0x20, 0x25), kGlyphInset);
         p.end();
         icon.addPixmap(pixmap);
     }

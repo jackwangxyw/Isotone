@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Isotone
+GenericName=Equalizer
+Comment=System-wide parametric EQ
+Exec=isotone
+Icon=isotone
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=equalizer;equaliser;EQ;audio;sound;filter;
+StartupWMClass=isotone

@@ -22,7 +22,7 @@ Item {
                 height: 56
                 radius: 14
                 color: Theme.knob
-                Icon { name: "logo"; size: 30; strokeWidth: 2.2; colour: "#121519"; anchors.centerIn: parent }
+                Icon { name: "logo"; size: 30; strokeWidth: 3; colour: "#121519"; anchors.centerIn: parent }
             }
             Column {
                 anchors.left: mark.right

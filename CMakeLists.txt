@@ -47,6 +47,25 @@ if(WIN32 AND MSVC)
     include(windows/version.cmake)
 endif()
 
+# ---------------------------------------------------------------------------
+# Installing (stage 6)
+#
+# `cmake --install build --prefix <dir>` lays out everything a package ships,
+# and nothing it does not: the diagnostics tools (isotone-shm, isotone-measure,
+# isotone-compat), the self tests and the spike are for this repository, not for
+# a machine Isotone is installed on.
+#
+# Windows is flat in the install directory, because that is where the APO must
+# be found by full path and where isotone.exe looks for the devicetool beside
+# it. Linux follows the usual prefix layout, so a .deb is the same tree under
+# /usr (GNUInstallDirs).
+include(GNUInstallDirs)
+if(WIN32)
+    set(ISOTONE_INSTALL_BINDIR ".")
+else()
+    set(ISOTONE_INSTALL_BINDIR "${CMAKE_INSTALL_BINDIR}")
+endif()
+
 add_subdirectory(core)
 
 # The Windows hosts need the MSVC toolchain: the APO links SDK libraries that

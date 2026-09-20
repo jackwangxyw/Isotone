@@ -13,3 +13,21 @@ target_link_libraries(isotone-daemon PRIVATE isotone_daemon)
 # PipeWire, only the transport, so it can inspect a sink with no daemon running.
 add_executable(isotone-state state_tool.cpp)
 target_link_libraries(isotone-state PRIVATE isotone_core isotone_transport_posix)
+
+# ---------------------------------------------------------------------------
+# Installing (stage 6)
+#
+# isotone-state ships with the daemon: it is how a sink's saved state is read
+# or written with nothing running, which is the first thing to reach for when
+# the EQ is not being applied.
+install(TARGETS isotone-daemon isotone-state
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT engine)
+
+# A user unit, not a system one, and left disabled: starting the daemon moves
+# every application's audio through Isotone, which is not something a package
+# does to a machine on its own (decisions.md). The app offers to start it.
+#
+# /usr/lib/systemd/user rather than ${CMAKE_INSTALL_LIBDIR}: that expands to
+# lib/x86_64-linux-gnu on Debian, where systemd does not look.
+install(FILES isotone-daemon.service
+        DESTINATION "lib/systemd/user" COMPONENT engine)

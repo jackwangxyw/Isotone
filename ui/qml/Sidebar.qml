@@ -70,7 +70,7 @@ Rectangle {
             height: 28
             radius: 7
             color: Theme.dark ? Theme.knob : "#1b2025"
-            Icon { name: "logo"; size: 16; strokeWidth: 2.2; colour: Theme.dark ? "#121519" : "#fcfdff"; anchors.centerIn: parent }
+            Icon { name: "logo"; size: 16; strokeWidth: 3; colour: Theme.dark ? "#121519" : "#fcfdff"; anchors.centerIn: parent }
         }
         Text {
             visible: root.open

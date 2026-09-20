@@ -24,7 +24,11 @@ Item {
         plus: ["M12 5v14M5 12h14"],
         panel: ["M6 4h12a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z", "M9 4v16"],
         output: ["M4 9v6h4l5 4V5L8 9H4z", "M16.5 8.5a5 5 0 0 1 0 7"],
-        logo: ["M3 14c3 0 3-6 6-6s3 8 6 8 3-4 6-4"],
+        // The mark (docs/design/logo, locked 2026-09-19): five bars about the
+        // zero line, centred on the ink rather than on the line. Stroked at width
+        // 3 with the round caps this renderer already uses, each segment is one
+        // pill bar; the call sites pass strokeWidth 3.
+        logo: ["M4.6 13.11V14.94M8.3 7.21V13.11M12 13.11V16.79M15.7 9.43V13.11M19.4 13.11V14.94"],
         // The prototype's set (docs/design/prototype/views-eq.js, IC), circles and rects as paths.
         speakers: ["M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2z",
                    "M15 14a3 3 0 1 1 -6 0a3 3 0 1 1 6 0", "M13 7.5a1 1 0 1 1 -2 0a1 1 0 1 1 2 0"],

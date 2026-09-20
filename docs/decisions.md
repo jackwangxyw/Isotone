@@ -4302,6 +4302,119 @@ now reported even when the DLL checks fail, which is what a dry run should do
 anyway, and the test no longer depends on what is installed on the machine
 running it.
 
+## The logo, and the mark it ended up being
+
+Six rounds, and the useful part is what was rejected.
+
+Round one put nine marks up across the three briefs the owner asked for (evolve
+the wave, fresh, fresh but still audio). He picked **Bands**, five bars about a
+zero line, and said the rest looked like ass. Round two opened Bands out to
+sixteen variants and shotgunned seventeen more fresh ideas; nothing beat the
+original. Round three refined that one mark, one measure at a time: bar width,
+spacing, reach, cap shape, six height profiles.
+
+**Round three's profile was a middle finger.** Short, short, tall, short, short:
+the owner spotted it immediately. Round four therefore took it as a structural
+constraint rather than something to nudge, and tried six ways of never having a
+lone tall bar: peak off centre, two tall together, a ramp, a valley, two peaks,
+and even bar counts (no middle bar to be the tall one). Worth recording that
+moving the peak sideways does **not** fix it, which round four's sheet showed and
+said: the silhouette is the same, just shifted.
+
+The owner picked the off-centre-peak and two-peak families, round five expanded
+both to fourteen each, and he asked for more below the zero line. Round six is
+that: two axes kept apart, deeper (the same bars reaching further down) and wider
+(bars pushed under the line that were above it). **m4-w2** won: two peaks with the
+bar between them well under, cuts at both ends.
+
+**Centring is on the ink, not the zero line** (owner). The bars hang from y = 12
+but are not symmetric about it: the ink spans 4.60 to 17.18, whose middle is
+10.89. Centring on the line left 56 px above and 75 px below on a 240 px tile.
+Everything is shifted +1.11 down, which gives 5.71 units of margin above and
+below, and 3.10 left and right. Horizontally it was already right.
+
+The geometry, which is now the specification:
+
+| bar | centre x | gain | top | height |
+|---|---|---|---|---|
+| 1 | 4.60 | -0.45 | 11.61 | 4.83 |
+| 2 | 8.30 | +1.00 | 5.71 | 8.90 |
+| 3 | 12.00 | -0.70 | 11.61 | 6.68 |
+| 4 | 15.70 | +0.70 | 7.93 | 6.68 |
+| 5 | 19.40 | -0.45 | 11.61 | 4.83 |
+
+24 x 24 box, bar width 3.00, pill caps, padding 4.60, bars 3.70 apart. Tile
+radius 22% of the side, glyph inset 14%.
+
+**The bar heights are designed, not a filter response.** The curve marks of round
+one did trace real responses, computed with the same RBJ peaking formula
+`core/biquad.cpp` uses. A bar mark cannot: a two-band response over three decades
+is within a decibel of flat at most of the five points a five-bar mark samples,
+so tracing one gives a tall bar and four stubs. Said here because round one's
+sheet claimed otherwise before the bars existed.
+
+**Four copies of the geometry, one test.** `tools/gen_icons.py` cuts
+`ui/res/isotone.ico` and `.svg`, the installer's two bitmaps and eight Linux
+hicolor PNGs; `ui/src/logomark.cpp` draws the tray and window icon;
+`ui/qml/Icon.qml` strokes it as five round-capped segments at width 3 (the
+renderer already used round caps, so a segment is a pill bar). Nothing shares the
+numbers at build time, so `ui/tests/test_logomark.cpp` measures them back out of
+a rendered pixmap: five bars at the spec's positions, equal margins on the ink,
+the ink 17.80 x 12.58, and the inset leaving 86%. Mutation-checked three ways:
+reverting the centring, a bar 0.4 units short, and width 3.0 to 2.7 each fail it.
+`gen_icons.py --check` reports any asset that no longer matches.
+
+## Install rules, and 31 MB of Qt that was not needed
+
+`cmake --install build --prefix <dir>` now lays out exactly what ships, on both
+platforms. Nothing in the tree had an `install()` rule before this.
+
+Windows is flat in the install directory, because that is where the APO is
+registered by full path and where `devicetoolPath()` looks for the devicetool
+beside `isotone.exe`. Linux follows GNUInstallDirs, so the `.deb` is the same
+tree under `/usr`:
+
+```
+bin/isotone  bin/isotone-daemon  bin/isotone-state
+lib/systemd/user/isotone-daemon.service
+share/applications/isotone.desktop
+share/icons/hicolor/{16,22,24,32,48,64,128,256}x*/apps/isotone.png, and scalable
+share/metainfo/io.github.isotone.Isotone.metainfo.xml
+```
+
+What is **not** installed: `isotone-compat`, `isotone-shm`, `isotone-measure`, the
+self tests and the spike. They are for this repository. The app shells out to
+`isotone-devicetool` and nothing else, which is what decided the list.
+
+The Qt runtime is staged by `windeployqt` rather than listed, because which DLLs
+and QML modules an `isotone.exe` needs is a question about the binary. Its first
+answer was **120.9 MB**, and two thirds of the excess was junk:
+
+| | |
+|---|---|
+| `vc_redist.x64.exe` | 18 MB of installer for 1.5 MB of DLLs. `--no-compiler-runtime` plus `InstallRequiredSystemLibraries` ships MSVCP140, VCRUNTIME140 and VCRUNTIME140_1 instead. `isotone.exe` needs them because it links Qt, which is /MD; `IsoAPO.dll` does not, being /MT |
+| `dxcompiler.dll`, `dxil.dll` | 15.5 MB of runtime HLSL compiler. Nothing in `qml/` is a ShaderEffect and nothing calls `qt_add_shaders`, so they are only ever loaded to compile nothing. windeployqt has no flag for them, so the install removes them |
+
+**89.6 MB**, and the app runs from the staged tree. The QtQuick.Controls styles
+(Imagine, Material, Universal, Fusion, FluentWinUI3, about 9 MB) are still
+there: they arrive through QtQuick.Dialogs, whose FileDialog is native on
+Windows, so they are probably unused, but an attempt to test that was
+inconclusive and they stay until it is not. Worth noting the attempt failed
+usefully: the pruned and unpruned trees produced byte-identical behaviour on the
+same command, so the blank screenshot that looked like a pruning failure was an
+invalid `--click` argument, which takes `x,y` and not an object name.
+
+The desktop half is new: `linux/packaging/isotone.desktop` and an AppStream
+`metainfo.xml`. `appstreamcli validate` is clean apart from `url-not-reachable`
+on the GitHub URLs, which is the repository being private rather than anything
+in the file.
+
+The systemd user unit installs to `lib/systemd/user`, written out rather than
+through CMAKE_INSTALL_LIBDIR, which expands to `lib/x86_64-linux-gnu` on Debian
+where systemd does not look. It is installed **disabled**: starting the daemon
+moves every application's audio through Isotone, which is not something a
+package does to a machine on its own.
+
 # Where things stand (2026-09-19)
 
 ## Done

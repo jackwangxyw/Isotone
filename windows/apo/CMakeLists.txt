@@ -44,6 +44,11 @@ endfunction()
 
 isoapo_dll(IsoAPO)
 
+# The installer registers this by full path, so it ships beside isotone.exe.
+# IsoAPO-selftest.dll never does: its region is in Local\ and its saved state
+# under LOCALAPPDATA, so the UI could not reach it.
+install(TARGETS IsoAPO RUNTIME DESTINATION "${ISOTONE_INSTALL_BINDIR}" COMPONENT engine)
+
 # The same sources built so an unelevated test process can host them. It differs
 # from IsoAPO.dll in four ways (isoapo.cpp, persisted_state.cpp), and must never
 # be installed: the UI could not reach its region.
