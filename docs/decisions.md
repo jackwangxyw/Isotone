@@ -4616,6 +4616,113 @@ app cannot read the host's theme, the portal reports no preference, and
 (`systemDark: Qt.styleHints.colorScheme !== Qt.ColorScheme.Light`). Not a
 Flatpak quirk: the same would happen anywhere the scheme is unknown.
 
+## Launch at sign-in in a Flatpak
+
+The toggle in Settings wrote `$XDG_CONFIG_HOME/autostart/isotone.desktop`, and
+in a sandbox `XDG_CONFIG_HOME` is `~/.var/app/io.github.isotone.Isotone/config`.
+Measured inside the installed Flatpak: `$HOME` is the real home and
+`XDG_CONFIG_HOME` is that one, so the file went somewhere no desktop reads and
+the toggle then read it back and reported success. The whole feature was a
+file written to itself.
+
+**The Background portal is the way in, and the machine already had the
+precedent.** `~/.config/autostart/com.github.wwmm.easyeffects.desktop` on the
+owner's laptop was written by it, and says exactly what to expect:
+
+```
+[Desktop Entry]
+Type=Application
+Name=com.github.wwmm.easyeffects
+X-XDP-Autostart=com.github.wwmm.easyeffects
+Exec=flatpak run --command=easyeffects com.github.wwmm.easyeffects --service-mode --hide-window
+X-Flatpak=com.github.wwmm.easyeffects
+```
+
+Everything below was measured in the installed Flatpak on the laptop before any
+of it was written, with `gdbus` in the sandbox against the real
+xdg-desktop-portal 1.20 (backend: xdg-desktop-portal-xapp, which is what
+provides `org.freedesktop.impl.portal.Background` on Cinnamon; the gtk backend
+does not):
+
+- `org.freedesktop.portal.Background` answers for version 2 from inside the
+  sandbox. **No `--talk-name` was needed for it**: one bus name,
+  `org.freedesktop.portal.Desktop`, carries every portal interface, and the
+  manifest already had it. The `--talk-name=org.freedesktop.portal.GlobalShortcuts`
+  line beside it has always been granting nothing for the same reason.
+- `RequestBackground` with `autostart: true` and
+  `commandline: ['isotone', '--tray']` wrote
+  `~/.config/autostart/io.github.isotone.Isotone.desktop` on the host, with
+  `Exec=flatpak run --command=isotone io.github.isotone.Isotone --tray`. No
+  dialog, no interaction: the permission store already said
+  `background background io.github.isotone.Isotone yes`, which
+  xdg-desktop-portal's own background monitor had put there.
+- The same call with `autostart: false` removed the file.
+
+**Reading the state back is what cost a permission.** The portal has no getter:
+`RequestBackground` is a setter that answers with `background` and `autostart`
+in its Response, and there is nothing to ask afterwards. EasyEffects does not
+read it back at all, which is why its manifest has no autostart filesystem
+permission; that leaves a toggle that goes stale the moment someone unticks the
+entry in the desktop's own Startup Applications. Since `autostart_xdg.h` has
+said since stage 4 that the file is the whole of the state, the file is what is
+read, and that needs `--filesystem=xdg-config/autostart:ro`.
+
+**A directory, not the one file.** `--filesystem=xdg-config/autostart/io.github.isotone.Isotone.desktop:ro`
+is narrower and does not work, measured both ways: a file bound that way is
+bound at sandbox start, so an entry created afterwards is invisible, which is
+every first time the toggle is turned on. The same test with the directory shows
+a file the host created while the sandbox was running. Read-only either way; a
+write inside fails with `Read-only file system`, which is right, because the
+entry is the portal's.
+
+**The call is synchronous and the entry is the answer.** The toggle is
+synchronous, so `request_autostart` waits for the Request object's Response in a
+nested event loop, which keeps the window alive if a desktop decides to ask
+first; 30 seconds is a backstop against a portal that takes the call and never
+answers, not a normal path. Nothing is decided on the Response results, because
+what a portal puts in them is its own business: `setLaunchAtSignIn` reports
+`launchAtSignIn()` read back off the entry. For the record, the real portal
+answers `autostart=true background=true`.
+
+**Measured end to end on the laptop**, in the installed Flatpak on the owner's
+real Cinnamon desktop, driving the app's own window rather than a test:
+
+| | |
+|---|---|
+| before | no entry; the toggle's track grey (144, 150, 157) |
+| `--view settings/general --click 1030,194` | `accepted (autostart=true background=true)`; `~/.config/autostart/io.github.isotone.Isotone.desktop` appears with the `flatpak run` line; the track blue (106, 167, 244) |
+| a second, fresh `flatpak run` | still blue: the entry is read back through the read-only mount, which is the restart case |
+| `flatpak run --command=isotone io.github.isotone.Isotone --tray`, the entry's own command | the app comes up, `isotone --tray` in `ps` |
+
+The tests are `ui_tests`' Flatpak case for the directory and the file's name, and
+a new `ui_model_tests` case against `mock_portal.py`, which grew the Background
+interface and writes the entry the real portal writes.
+`run_portal_test.sh` runs it in a second run of the binary with `FLATPAK_ID`
+set, so the variable reaches nothing else. Mutation-checked three ways, each
+failing: the sandbox branch skipped, the directory left as `XDG_CONFIG_HOME`'s,
+and the entry left named `isotone.desktop`.
+
+### The Flatpak starts at sign-in, and its EQ still does not
+
+Worth being exact about what this fixes, because it is half of what the `.deb`
+gives. The `.deb` enables a user unit, so **the daemon** runs from sign-in and
+the EQ is on whether or not the app is opened. This makes **the app** run from
+sign-in. The daemon in a Flatpak is started by the app, on the Devices page, by
+hand (2026-09-20, "Starting the daemon from inside the sandbox"), and nothing
+presses that at login.
+
+Measured, rather than reasoned: the entry's own command was run, the app came up
+in the tray, `ps` showed `isotone --tray` and no daemon, and the default sink
+was still the laptop's hardware. So a Flatpak-only machine signs in to an app
+with no EQ behind it.
+
+The obvious fix, the app starting the daemon when it was launched by the
+autostart entry, is **not done, and is the owner's call**, because of what it
+would do on a machine that has both packages: his laptop has the `.deb` with its
+unit enabled *and* the Flatpak. Two daemons would race for the same virtual
+sink at sign-in. A "start it only if none is running" check is a race at exactly
+the moment both start. It wants deciding, not guessing.
+
 # Where things stand (2026-09-19)
 
 ## Done
@@ -4725,10 +4832,12 @@ copies files and calls it.
 
 **Left in stage 6, in the order they matter:**
 
-1. **The Flatpak does not start at login.** The `.deb` enables a user unit; a
-   Flatpak cannot install one, and the app's launch-at-sign-in writes into
-   `~/.var/app`, which the desktop does not read. Wants the Background portal
-   (`org.freedesktop.portal.Background`, `RequestBackground` with autostart).
+1. ~~The Flatpak does not start at login.~~ Done through the Background portal
+   (2026-09-20; "Launch at sign-in in a Flatpak"), measured in the installed
+   Flatpak on the owner's laptop. **Left open, and the owner's call: the app
+   starts at sign-in, the daemon does not**, so a Flatpak-only machine signs in
+   with no EQ until Devices is opened. Making the app start it would race the
+   `.deb`'s unit on a machine with both, which his laptop is.
 2. **Launch at sign-in on Windows** still needs one sign-out to confirm Windows
    runs the Run value. The value itself is right and the app is installed now.
 3. **GNOME, KDE and Wayland**, one VM each; none built
@@ -4753,9 +4862,12 @@ copies files and calls it.
 
 **State of the owner's machines.** Windows: Isotone installed at
 `C:\Program Files\Isotone` by the installer, on two outputs (below). Laptop: the
-`.deb` installed and enabled, the Flatpak installed, the KDE 6.11 runtime
-installed, screen blanking and lock turned off with
-`~/Isotone/.work/power-restore.sh` ready to put them back. Mint VM: the `.deb`
+`.deb` installed and enabled, the Flatpak installed (reinstalled 2026-09-20 with
+the Background portal in it), the KDE 6.11 runtime installed, screen blanking
+and lock turned off with `~/Isotone/.work/power-restore.sh` ready to put them
+back. **The Flatpak's launch at sign-in was left on**, so his next sign-in is
+the end-to-end check of it: an Isotone tray icon he did not put there is this,
+and the toggle in Settings, General turns it off. Mint VM: the `.deb`
 installed, powered off, and a build-directory user unit moved aside to
 `~/isotone-daemon.service.build-dir.bak`.
 

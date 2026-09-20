@@ -12,9 +12,10 @@ own laptop (decisions.md, the entries of 2026-09-19).
 Packaging (stage 6) is built and measured on all three targets (2026-09-20): an
 NSIS installer, a `.deb` and a Flatpak, each run for real and measured against
 the analytic filter rather than declared working. **0.1.0 is not tagged yet.**
-Left in stage 6: the Flatpak does not start at login, Windows' launch at sign-in
-needs one sign-out to confirm, and GNOME, KDE and Wayland have no VMs. See
-decisions.md, "Where things stand", which lists them in order.
+Left in stage 6: Windows' launch at sign-in needs one sign-out to confirm, and
+GNOME, KDE and Wayland have no VMs. The Flatpak now starts at login through the
+Background portal, but its daemon does not, which is open. See decisions.md,
+"Where things stand", which lists them in order.
 
 Read first:
 - `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
