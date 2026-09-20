@@ -4796,13 +4796,37 @@ that looks like, because it is the shipping path on a Wayland desktop:
 
 So global hotkeys on Wayland are a Flatpak feature, not a `.deb` feature, and
 the `.deb` should say so rather than leave a toggle that silently does nothing.
-**Not fixed, and it is a decision rather than a bug to patch**: the app could
-detect the refusal and say "your desktop refused", which is honest but useless;
-or the `.deb` could arrange for xdg-desktop-portal to derive a host application
-ID, which it does from the systemd scope a desktop launcher puts an app in
-(`app-<desktop id>-*.scope`). The second is the real fix and needs its own
-measurement: launching by hand over ssh lands in `session-N.scope` and produces
-no ID, which is how this was found.
+**The systemd-unit way out does not work, which was worth testing rather than
+assuming.** xdg-desktop-portal derives a host application ID from the systemd
+unit an app runs in, so the obvious answer was to launch the `.deb`'s app the
+way a desktop launcher does. Done exactly, and confirmed by reading the
+process's own cgroup:
+
+```
+systemd-run --user --unit=app-io.github.isotone.Isotone-888 ... isotone
+  /user.slice/user-1000.slice/user@1000.service/app.slice/app-io.github.isotone.Isotone-888.service
+```
+
+and the portal still answered `NotAllowed`. On reflection that is the right
+answer from its side: a unit name is chosen by whoever creates the unit, so it
+is not evidence of anything, and only a sandbox gives an identity the portal
+can check. **So global hotkeys on Wayland are a Flatpak feature and there is no
+`.deb` fix short of shipping sandboxed.** That is the platform's position
+rather than a gap in Isotone, and it is the answer to "is this an OS
+limitation": not that Wayland cannot deliver the key, but that it will not
+deliver it to someone it cannot name.
+
+**What was ours, and is fixed: the refusal was invisible.** `bind()` sent
+CreateSession with `asyncCall` and threw the reply away, so an error reply
+meant `onCreateResponse` never ran, `bound` was never emitted, and
+`setGlobalFailed` was never reached. Settings, Shortcuts sat there showing
+`Ctrl+Alt+Shift+E` as if it worked. Both portal calls now watch their method
+reply as well as the Request, and an error marks every enabled global shortcut
+refused, which is what that page has shown since stage 4 for the X11 BadAccess
+case. `mock_portal.py` grew a `REFUSE_SESSION` mode that answers CreateSession
+with `org.freedesktop.portal.Error.NotAllowed` and no Response, as both
+desktops do, and `run_portal_test.sh` runs a third leg against a second mock in
+that mode. Mutation-checked: putting the bare `asyncCall` back fails it.
 
 ### What does work on both
 
