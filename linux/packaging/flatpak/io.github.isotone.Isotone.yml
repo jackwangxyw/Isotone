@@ -64,6 +64,16 @@ finish-args:
   - --talk-name=org.freedesktop.portal.Desktop
   - --talk-name=org.freedesktop.portal.GlobalShortcuts
 
+  # The tray icon. Qt's QSystemTrayIcon is a StatusNotifierItem, and an item
+  # only exists once it has registered with the watcher; without this the
+  # sandbox cannot reach the watcher and the icon is simply absent, with
+  # nothing said anywhere. Measured that way on GNOME and on Plasma
+  # (2026-09-20): the same build outside the sandbox registered an item on both
+  # and the Flatpak registered none. It matters more than a missing icon
+  # usually would, because launch at sign-in starts the app with --tray, and an
+  # app in the tray with no tray icon cannot be opened at all.
+  - --talk-name=org.kde.StatusNotifierWatcher
+
   # Launch at sign-in, read side. The Background portal writes the autostart
   # entry on the host and gives no way to ask what it wrote, so the toggle in
   # Settings reads the entry itself, and this is what lets it
