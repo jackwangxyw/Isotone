@@ -5015,10 +5015,11 @@ copies files and calls it.
 `.deb` installed and enabled, the Flatpak installed (reinstalled 2026-09-20 with
 the Background portal in it), the KDE 6.11 runtime installed, screen blanking
 and lock turned off with `~/Isotone/.work/power-restore.sh` ready to put them
-back. **The Flatpak's launch at sign-in was left on**, so his next sign-in is
-the end-to-end check of it: an Isotone he did not start is this, and the toggle
-in Settings, General turns it off. Note the open tray bug above, which means it
-will start with no icon and may only show as a process.
+back. His Flatpak's launch at sign-in was turned on to measure it and **turned
+back off**, because of the tray bug above: with it on he would sign in to an
+Isotone with no window and no tray icon, which is a process he cannot reach
+rather than a feature. The toggle in Settings, General turns it on again when
+the tray is fixed.
 
 Mint VM: the `.deb` installed, powered off. **Two new VMs**, *Isotone GNOME*
 and *Isotone KDE*, built on 2026-09-20 and left powered off; `ssh isotone-gnome`
