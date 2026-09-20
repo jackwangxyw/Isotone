@@ -207,6 +207,24 @@ int main(int argc, char* argv[]) {
                           nullptr, SW_SHOWNORMAL);
         });
     }
+#else
+    // In a Flatpak nothing else can start the daemon at sign-in. The .deb
+    // enables a systemd user unit; a Flatpak cannot install one, and the only
+    // thing the Background portal starts is this app, so the app starts it.
+    //
+    // Unconditional, because the daemon refuses to be a second one
+    // (linux/transport/daemon_lock.h) and says so with 0. Detached, so it
+    // outlives the window: a child would go when the app is closed to the tray,
+    // and the EQ would go with it. Not under --screenshot, which must not leave
+    // a daemon behind on a machine that is only rendering a picture.
+    if (!qEnvironmentVariableIsEmpty("FLATPAK_ID") && !checking) {
+        qint64 daemon_pid = 0;
+        const bool started = QProcess::startDetached(QStringLiteral("isotone-daemon"), {}, QString(), &daemon_pid);
+        if (started)
+            qInfo("the daemon was started, pid %lld", static_cast<long long>(daemon_pid));
+        else
+            qWarning("the daemon could not be started");
+    }
 #endif
     if (parser.isSet(first_run)) QMetaObject::invokeMethod(engine.rootObjects().constFirst(), "showFirstRun");
     if (parser.isSet(view)) {

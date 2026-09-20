@@ -4946,6 +4946,204 @@ The tray was checked over D-Bus rather than by eye:
 `com.canonical.dbusmenu.GetLayout` gives the menu above, with
 `toggle-state` on EQ and Mute.
 
+## The icons, the status mark and the output dropdown (2026-09-20)
+
+The owner had someone look at the UI who is redoing the logo. His complaint was
+that it reads as generated, and he named the parts: the icon set, the status
+dots, the palette, the toggles. Two of those turned into changes; the rest are
+recorded and untouched.
+
+### The icons were the conventional drawings
+
+26 icons, all inline SVG in `ui/qml/Icon.qml`, no pack and no licence to worry
+about. The problem was never the licence: **20 of the 26 were the conventional
+drawing**, hairline strokes on a 24 box with round caps, which is Feather's
+idiom. `eq` was Feather `sliders`, `settings` was Feather `settings`, `output`
+was `volume-2`.
+
+The sidebar toggle was worse than similar. Lucide draws `panel-left` as a
+rounded rect plus a vertical line at x=9. So did we. He picked exactly that one
+out as identical to ChatGPT's and Claude's, and he was right in the strongest
+sense available.
+
+**The set is now Phosphor Bold** (phosphoricons.com, MIT), used as published.
+The alternatives were looked at first: Tabler is 2 px outline, the same idiom
+heavier; Heroicons is 316 icons and tied to Tailwind; Hugeicons is mostly paid.
+Phosphor is the one that is actually drawn differently, filled geometry rather
+than hairline strokes.
+
+It also fits this app for a reason nobody planned. Phosphor Bold's `waveform` is
+**five round-capped bars of varying heights about a centre line**, which is the
+mark, drawn by someone else, years earlier. No other pack speaks the language the
+logo is already in. That icon is now the collapsed rail's Outputs button, where
+it beat a third speaker glyph sitting next to `speaker-hifi` and `speaker-high`.
+
+`Icon.qml` carries two branches: Phosphor's filled paths on a 256 box, and the
+older stroked 24-box machinery for the two icons that are ours, the mark and the
+sidebar toggle. The whole set moved at once on purpose. A half-swapped set, some
+filled and some hairline, looks worse than either.
+
+The toggle took four attempts and the reason is worth keeping. The version
+before the last one was a hairline panel with a 3.1 bar inside it, and magnified
+it looked right. At 18 px it does not: 3.1 against a 1.6 outline is too little
+contrast to read as a separate object, so it came out looking like a thick
+divider line. The rail is outside the panel now, two shapes, which cannot be
+read that way. **Judge an icon at the size it is drawn at**, not in the
+inspector.
+
+### The status dot was the tell he named
+
+His own list of things that say "generated" included "green or grey dots". The
+Devices table stacks **eleven coloured dots down one column**, which is the
+worst instance of it in the app.
+
+`StatusDot` is now a 3 x 14 bar rather than a 6 px circle: the same information
+as a channel-strip mark rather than a dashboard LED. One component, eight call
+sites, so everything moved together.
+
+`off` draws nothing at all. That status is exactly `not_installed` and
+`unplugged` (`ui/src/devicestatus.cpp`), and the old hollow ring was still a dot.
+A mark that says "there is nothing here" was the wrong idea; the dimmed row
+already says it. An idle output keeps its bar, darkened, so "not playing" still
+reads differently from "not there".
+
+The box stays 6 wide so no call site reflows. Two of the eight positioned the old
+dot by hand and needed their centres moved, and one of those only showed up in a
+render: in the collapsed rail a 14 px bar inherited the 6 px dot's corner-badge
+offset and hung off the top of the speaker icon like a stray mark.
+
+### The output list is a dropdown
+
+Shut it is one row; open it discloses the rest in place, growing upward, because
+the foot it lives in is anchored to the sidebar's floor, so the divider and
+Settings below never move. No "Manage devices" footer: Devices is still in the
+nav, so that route was never lost.
+
+Two things came out of building it:
+
+- **One output is not a choice.** With one there is nothing to choose between
+  and with none nothing to show, so the caret is hidden and the control is
+  inert. A caret that promises something which never happens is worse than no
+  caret.
+- **The click did nothing at first.** The row inside the shut control kept its
+  own `MouseArea`, which took the press and re-selected the output that was
+  already current, so the box never opened and the screen never changed. A bug
+  with no symptom other than nothing happening. The box is the target now; the
+  row is a label.
+
+`OutputList`'s model is a property defaulting to the `Outputs` singleton. That
+singleton enumerates the machine and is **empty under Qt Quick Test**, so with no
+way to inject one, none of this was reachable by a test at all.
+
+### Recorded, not changed
+
+- **The palette** is the category default and he is right about it: near-neutral
+  greys and a mid blue, which is Cursor, VS Code and most audio software. Every
+  colour is a token in `ui/qml/Theme.qml`, one file, so a different default is an
+  edit to that file and nowhere else. Two cheap moves if it is ever wanted: bias
+  the neutrals off neutral, and move accent 1 off blue. Band colours stay.
+- **There is no second typeface.** All 191 `font.family` uses in the QML are
+  `Theme.font` and the app font is Instrument Sans. What he was reacting to is
+  real but different: **there is no type scale.** Ten sizes, with 11, 12, 13, 14
+  and 15 doing five nearly identical jobs. Mechanical to fix, not yet done.
+- **The toggle** is the iOS pill, which is also the Cursor pill and the macOS
+  pill. Consistent with itself, one component everywhere, so this is taste
+  rather than a defect.
+- **The graph fill** was the accent at 0.30 alpha along the top *and* bottom of
+  the plot: a gradient across the whole card rather than a fill under the curve,
+  so a boosted band read as a glow around itself. Now 0.17 and 0.03 dark, 0.11
+  and 0.015 light.
+- **Settings leaves 390 px of empty page** to the right of its content on all
+  five tabs, and the sidebar is empty for 509 px between the nav and the output
+  control, 57% of the window height. Both measured off the render rather than
+  judged by eye. The owner turned down the density work, so both stand.
+
+## The Flatpak's daemon, and one daemon at a time (2026-09-20)
+
+The last thing open in stage 6. The app starts at sign-in in a Flatpak, through
+the Background portal, and the daemon did not, so a Flatpak-only machine signed
+in with no EQ until someone opened Devices and pressed Start.
+
+The reason it had been left alone was written down here as: making the app start
+the daemon "would race the `.deb`'s unit on a machine with both, which his laptop
+is". That was the right worry and the wrong conclusion. **The race is the bug**,
+not the app starting the daemon, and nothing stopped it before either: the `.deb`
+was safe only because systemd will not start a unit twice, and anyone running
+`isotone-daemon` twice by hand got two of them.
+
+Two daemons are worse than none. Both create a sink of the same name, both
+follow the default sink, and what the UI reads out of the regions is whichever
+of them wrote last.
+
+### The lock
+
+`linux/transport/daemon_lock.h`: an advisory exclusive `flock` on an object in
+the same POSIX shared memory the regions live in, `shm_open("/isotone. daemon")`
+beside `"/isotone.<sink>"`. A space, because no sink key contains one.
+
+That location is the whole point. `/dev/shm` inside a Flatpak is the host's,
+which is what `--device=shm` buys and what the regions already depend on, so a
+daemon inside the sandbox and one started by the `.deb`'s unit on the host
+contend for the *same* lock. A lock under `XDG_RUNTIME_DIR` would not have done
+that.
+
+The kernel drops an `flock` when the process dies, however it dies, so a daemon
+that is killed leaves nothing behind to clean up. No stale lock file, no pid file
+to disbelieve.
+
+A daemon that finds the lock held **says so and exits 0**. Being asked to start
+one while one already runs is not a failure: the state asked for is the state
+there is. `--allow-second` skips the lock, for tests that want two.
+
+Which makes the app's side trivial and unconditional. In a Flatpak, at startup,
+not under `--screenshot`, it starts `isotone-daemon` detached and lets the lock
+sort out who wins. Detached because a child would go when the window is closed to
+the tray, and the EQ would go with it.
+
+On a machine with both, whichever starts first keeps it and the other leaves
+quietly. That is the behaviour the old note wanted and could not have.
+
+### Measured
+
+The binary, not the theory. One daemon running, a second started against the
+same sink:
+
+```
+first daemon pid: 1114
+--- second attempt ---
+isotone-daemon: another daemon is already running
+exit: 0
+daemons now running: 1
+```
+
+And the thing it was all for, on the KDE VM with the Flatpak installed for real
+and a host build of the daemon beside it:
+
+| first | then | daemons left | which |
+|---|---|---|---|
+| nothing | the Flatpak app starts | 1 | `/app/bin/isotone-daemon`, in the sandbox |
+| a host daemon | the Flatpak app starts | 1 | the host one; the sandboxed one refused |
+| the Flatpak's daemon | a host daemon is run | 1 | the sandboxed one; the host one said so and left with 0 |
+
+Both directions, across the sandbox boundary, which is the case the old note
+said could not be had.
+
+`flock` belongs to the open file description rather than to the process, so a
+second `DaemonLock` contends even from inside the same process. That is what
+makes it testable without starting two daemons, and
+`linux/transport/tests/test_daemon_lock.cpp` does exactly that: the second
+holder is refused with `EWOULDBLOCK` specifically, releasing hands it on,
+acquiring twice on one object is not a refusal. Mutating `flock` away so it
+never blocks fails two of the four.
+
+### What it cost to find
+
+The Flatpak build failed on the first attempt with `Cannot find source file:
+daemon_lock.cpp`. `flatpak-builder` is fed a tree built from `git ls-files`,
+which lists tracked files only, so a new file that has not been staged is
+invisible to it however complete the working tree looks. Worth remembering: a
+Flatpak build can fail for a reason that has nothing to do with the Flatpak.
+
 # Where things stand (2026-09-19)
 
 ## Done
@@ -5055,13 +5253,13 @@ copies files and calls it.
 
 **Left in stage 6, in the order they matter:**
 
-1. ~~The Flatpak does not start at login.~~ Done through the Background portal
-   (2026-09-20; "Launch at sign-in in a Flatpak"), measured in the installed
-   Flatpak on the owner's laptop and again on both new VMs. **Left open, and
-   the owner's call: the app starts at sign-in, the daemon does not**, so a
-   Flatpak-only machine signs in with no EQ until Devices is opened. Making the
-   app start it would race the `.deb`'s unit on a machine with both, which his
-   laptop is.
+1. ~~The Flatpak does not start at login.~~ Done, both halves. The app starts
+   through the Background portal (2026-09-20; "Launch at sign-in in a Flatpak"),
+   measured in the installed Flatpak on the owner's laptop and again on both new
+   VMs. ~~The daemon does not.~~ It does now: the app starts it, and the race
+   this note used to worry about is gone because the daemon takes a lock in the
+   shared `/dev/shm` and a second one leaves with 0 ("The Flatpak's daemon, and
+   one daemon at a time").
 2. **Launch at sign-in on Windows** still needs one sign-out to confirm Windows
    runs the Run value. The value itself is right and the app is installed now.
 3. ~~GNOME, KDE and Wayland, one VM each; none built.~~ Both built and run

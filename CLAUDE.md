@@ -12,10 +12,18 @@ own laptop (decisions.md, the entries of 2026-09-19).
 Packaging (stage 6) is built and measured on all three targets (2026-09-20): an
 NSIS installer, a `.deb` and a Flatpak, each run for real and measured against
 the analytic filter rather than declared working. **0.1.0 is not tagged yet.**
-Left in stage 6: Windows' launch at sign-in needs one sign-out to confirm, and
-GNOME, KDE and Wayland have no VMs. The Flatpak now starts at login through the
-Background portal, but its daemon does not, which is open. See decisions.md,
-"Where things stand", which lists them in order.
+Left in stage 6, and both need the owner: Windows' launch at sign-in wants one
+sign-out to confirm, and `v0.1.0` wants the repository public first, because the
+AppStream metadata points at it. Everything else in stage 6 is closed. GNOME and
+KDE now have a VM each, on Wayland; the Flatpak starts at sign-in through the
+Background portal and starts its own daemon, and one daemon at a time is
+enforced by a lock rather than by luck. See decisions.md, "Where things stand".
+
+The UI had an outside review on 2026-09-20 and two parts of it were acted on:
+the icon set is Phosphor Bold, and status is a bar rather than a coloured dot
+(decisions.md, "The icons, the status mark and the output dropdown"). What was
+recorded and deliberately not changed: the palette, the type scale, the
+toggle component and the empty space in Settings.
 
 Read first:
 - `docs/ui-spec.md`: the UI build brief, stage 4 and the EQ by ear screens for
@@ -92,7 +100,8 @@ windows/devices/      isotone_devices: render endpoints, their format and engine
                       speaker layouts (speaker_layout.h, the one write)
 windows/shmtool/      isotone-shm: status/write/persist/forget/capture on a region
 windows/measure/      isotone-measure: stepped-sine measurement between endpoints; analysis in measure.cpp
-linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG
+linux/transport/      POSIX shared region (ParamBlock + ring), saved state under XDG,
+                      daemon_lock (one daemon at a time, an flock in the shared /dev/shm)
 linux/daemon/         isotone-daemon: the virtual sink, the core in a PipeWire filter node,
                       links to the sink being fed, the post-EQ ring, following the default sink
                       through WirePlumber metadata, capturing applications' streams, stereo (--channels to 7.1 for the rig),
@@ -105,7 +114,9 @@ ui/backend/           the UI without Qt: DeviceLink (where edits go), spectrum, 
                       daemon_region for Linux
 ui/src/               EqSession (the edited state, undo), Outputs, Presets, Devices and Devicetool, Speakers,
                       ResponseGraph, settings, shortcuts, tray
-ui/qml/               the screens; Main.qml is the window, Theme.qml the tokens
+ui/qml/               the screens; Main.qml is the window, Theme.qml the tokens,
+                      Icon.qml the icon set (Phosphor Bold, filled on a 256 box;
+                      the mark and the sidebar toggle are ours, stroked on 24)
 ui/tests/             ui_tests, ui_model_tests (doctest), qml/ (Qt Quick Test); test_rig.h (an engine region of the
                       test's own, either platform); measure_linux.py; mock_portal.py (GlobalShortcuts)
 windows/setup/        isotone.nsi (NSIS), and the welcome and header bitmaps
