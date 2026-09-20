@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Isotone authors
+#
+# The Flatpak (stage 6).
+#
+# The app and the daemon are both in here, which is what decides the
+# permissions. The two talk through a POSIX shared memory object, shm_open
+# "/isotone.<sink>", which is a name in /dev/shm, and Flatpak gives a sandbox
+# its own.
+#
+# Shipping both in one Flatpak does not avoid that, which is the part worth
+# knowing: two `flatpak run` instances of the same application each get their
+# own /dev/shm too, so the daemon started in one and the app in another still
+# cannot see each other. --device=shm is needed either way, and is measured
+# rather than assumed (see the finish-args below).
+#
+# The daemon is started from here by a systemd user unit that runs
+# `flatpak run --command=isotone-daemon`.
+#
+# Build and install, no root anywhere:
+#   flatpak-builder --user --install --force-clean build-flatpak \
+#       linux/packaging/flatpak/io.github.isotone.Isotone.yml
+
+id: io.github.isotone.Isotone
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: isotone
+
+finish-args:
+  # The desktop.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+
+  # The shared region the app and the daemon talk through, shm_open
+  # "/isotone.<sink>", which is a name in /dev/shm.
+  #
+  # Measured 2026-09-20, and it is not what shipping both in one Flatpak
+  # suggests: two `flatpak run` instances of the same application each get their
+  # own /dev/shm, so the daemon in one and the app in another cannot see each
+  # other's region at all. This is what plan section 12 question 5 asked, and
+  # the answer is that the permission is needed whoever runs the daemon. With
+  # it, a daemon on the host from the .deb and a sandboxed app also find each
+  # other, which is the one good thing about needing it.
+  - --device=shm
+
+  # PipeWire itself, not the PulseAudio shim: the daemon creates a virtual sink
+  # and links nodes, which the shim cannot do. --socket=pulseaudio is here as
+  # well because Qt's multimedia pieces and the portal expect an audio socket to
+  # exist at all.
+  - --filesystem=xdg-run/pipewire-0
+  - --socket=pulseaudio
+
+  # X11 key grabs for global hotkeys where there is no portal, and the portal
+  # where there is (ui/src/globalhotkeys_posix.cpp).
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.GlobalShortcuts
+
+  # Importing and exporting presets from anywhere the user points the dialog at.
+  - --filesystem=xdg-download
+  - --filesystem=xdg-documents
+
+modules:
+  - name: isotone
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - -DISOTONE_BUILD_UI=ON
+      - -DISOTONE_BUILD_TESTS=OFF
+    sources:
+      - type: dir
+        path: ../../..

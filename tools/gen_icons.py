@@ -28,6 +28,11 @@ from PIL import Image, ImageDraw
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The mark, in a 24 x 24 box (docs/design/logo/out/mark-locked.png).
+# The reverse-DNS name Flatpak and AppStream want. Flatpak exports only files
+# named for the application ID, and the .deb is happy with the same name, so
+# there is one name rather than a rename in the Flatpak manifest.
+APP_ID = "io.github.isotone.Isotone"
+
 BOX = 24.0
 PROFILE = [-0.45, 1.00, -0.70, 0.70, -0.45]   # gain per bar, -1 to 1
 WIDTH = 3.0                                    # bar width
@@ -141,8 +146,8 @@ def build():
     for size in (16, 22, 24, 32, 48, 64, 128, 256):
         buffer = io.BytesIO()
         draw(size, GLYPH_LIGHT, tile=PLATE).save(buffer, format="PNG")
-        ASSETS[f"linux/packaging/icons/hicolor/{size}x{size}/apps/isotone.png"] = buffer.getvalue()
-    ASSETS["linux/packaging/icons/hicolor/scalable/apps/isotone.svg"] = svg("#1b2025").encode("utf-8")
+        ASSETS[f"linux/packaging/icons/hicolor/{size}x{size}/apps/{APP_ID}.png"] = buffer.getvalue()
+    ASSETS[f"linux/packaging/icons/hicolor/scalable/apps/{APP_ID}.svg"] = svg("#1b2025").encode("utf-8")
     return ASSETS
 
 

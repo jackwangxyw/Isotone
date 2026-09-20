@@ -22,7 +22,7 @@
     </p>
   </description>
 
-  <launchable type="desktop-id">isotone.desktop</launchable>
+  <launchable type="desktop-id">io.github.isotone.Isotone.desktop</launchable>
 
   <developer id="io.github.jackwangxyw">
     <name>The Isotone authors</name>

@@ -4536,6 +4536,64 @@ has no such override, so its result stands on its own.
 Left installed and enabled at the owner's choice: from his next login his audio
 goes through Isotone. `sudo apt-get purge isotone` removes it.
 
+## The Flatpak, and the answer to plan question 5
+
+Plan section 12 asked: "Flatpak for a daemon that must own a virtual sink: what
+permissions, and does the Electron app inside a sandbox still reach the
+`shm_open` names the daemon created?" Measured on 2026-09-20.
+
+**The answer is no, and shipping both halves in one Flatpak does not fix it.**
+The obvious reasoning is that app and daemon in one Flatpak are in one sandbox
+and so share `/dev/shm`. They are not: two `flatpak run` instances of the *same*
+application each get their own. A daemon started in one instance and an app in
+another cannot see each other's region at all. Tested directly, by creating a
+name in `/dev/shm` from one instance and looking for it from another:
+
+```
+  A: created /dev/shm/isotone.probe
+  B sees:
+  B CANNOT see it -> separate /dev/shm per instance
+```
+
+So `--device=shm` is needed whoever runs the daemon. With it, the same probe
+finds the name, and there is one good thing about needing it: a daemon on the
+host from the `.deb` and a sandboxed app then find each other too.
+
+The rest of the permissions: `--filesystem=xdg-run/pipewire-0` for PipeWire
+itself, since the daemon creates a node and links it and the PulseAudio shim
+cannot do either; `--socket=pulseaudio` as well, because the portal and Qt
+expect an audio socket to exist; `--talk-name` for the Desktop and
+GlobalShortcuts portals; wayland with an X11 fallback.
+
+**One name everywhere.** Flatpak exports only files named for the application
+ID, so `isotone.desktop` and `isotone.png` were silently dropped, with the whole
+reason given as "non-allowed export filename" in the build log: the app would
+have installed with no menu entry and no icon. Renaming them in the manifest
+then broke the metainfo, whose `launchable` still named the old file, and
+`appstreamcli compose` refused the build with `gui-app-without-icon`. Two hacks
+inviting a third, so the desktop entry and the icons are now
+`io.github.isotone.Isotone.*` everywhere, which is what the AppStream ID already
+was and what a `.deb` is equally happy with.
+
+**Measured end to end on the owner's laptop**, which is the only machine with a
+real PipeWire session and real hardware: the daemon inside the sandbox, its
+region written from `/usr/bin/isotone-state` on the host, outside the sandbox,
+and the result measured from the host. -12.000 dB against -12.000 analytic,
+error -0.0000. That one test exercises the sandbox boundary in both directions.
+
+**Left open: the Flatpak has no way to start its daemon.** On Linux the app runs
+`systemctl --user start isotone-daemon.service`, which inside a sandbox reaches
+nothing, and a Flatpak cannot install a unit into the host's systemd. The app
+should start the daemon itself when it is sandboxed.
+
+**Found on the way: the sandboxed app ignores the desktop's light or dark
+setting.** The `.deb` app came up light on the owner's Cinnamon desktop and the
+Flatpak came up dark on the same desktop, minutes apart. Inside the sandbox the
+app cannot read the host's theme, the portal reports no preference, and
+`Theme.qml` reads anything that is not explicitly Light as dark
+(`systemDark: Qt.styleHints.colorScheme !== Qt.ColorScheme.Light`). Not a
+Flatpak quirk: the same would happen anywhere the scheme is unknown.
+
 # Where things stand (2026-09-19)
 
 ## Done
