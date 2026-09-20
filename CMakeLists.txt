@@ -125,3 +125,90 @@ if(ISOTONE_BUILD_UI)
     endif()
     add_subdirectory(ui)
 endif()
+
+# ---------------------------------------------------------------------------
+# Packaging (stage 6)
+#
+# `cpack -G DEB --config build/CPackConfig.cmake` builds the .deb from the same
+# install() rules `cmake --install` uses, so the package and a staged tree are
+# the same layout.
+if(UNIX AND NOT APPLE AND TARGET isotone-daemon)
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_PACKAGE_NAME "isotone")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_CONTACT "The Isotone authors <noreply@github.com>")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "System-wide parametric EQ")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/jackwangxyw/Isotone")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_STRIP_FILES ON)
+
+    set(CPACK_DEBIAN_PACKAGE_SECTION "sound")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+    # Read off the binaries rather than written out, so a Qt or PipeWire version
+    # bump does not need this list edited.
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    # pipewire itself is a runtime program, not a library the linker records.
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "pipewire, pipewire-pulse | pulseaudio, wireplumber | pipewire-media-session")
+    # The extended description only: CPack takes the synopsis from
+    # CPACK_PACKAGE_DESCRIPTION_SUMMARY and indents each line of this by one
+    # space itself, so a leading space here would show as two.
+    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
+"Isotone equalises everything the computer plays. It runs as a PipeWire filter,
+so applications need no setting up: their audio goes through it on the way to
+the output.
+.
+Parametric bands with the usual filter types, a response graph with a live
+spectrum, per-channel bands, speaker setup with bass management and delay, and
+presets that follow the output they were made for.
+.
+The daemon is enabled on install and starts at the next login.")
+
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_CURRENT_SOURCE_DIR}/linux/packaging/postinst"
+        "${CMAKE_CURRENT_SOURCE_DIR}/linux/packaging/prerm")
+    # The source tree is on a Windows filesystem when this is built from WSL,
+    # which reports every file as 0777; dpkg wants 0755 on a maintainer script,
+    # and lintian calls it an error.
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)
+
+    include(CPack)
+endif()
+
+# usr/share/doc: required of a Debian package, and harmless anywhere else.
+#
+# The changelog has to be gzipped. Done here rather than in an install(CODE)
+# block, which is what the first attempt did and which broke under CPack: CPack
+# stages through DESTDIR, so ${CMAKE_INSTALL_PREFIX} in an install script is the
+# real /usr and writing there is refused. Compressing once at configure time
+# sidesteps the question and works the same for `cmake --install`.
+if(UNIX AND NOT APPLE AND TARGET isotone-daemon)
+    find_program(ISOTONE_GZIP gzip REQUIRED)
+    # -n keeps the name and timestamp out of the header, so the package is the
+    # same bytes from one build to the next.
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${CMAKE_CURRENT_SOURCE_DIR}/linux/packaging/changelog"
+                "${CMAKE_CURRENT_BINARY_DIR}/changelog"
+        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND "${ISOTONE_GZIP}" -9 -n -f "${CMAKE_CURRENT_BINARY_DIR}/changelog"
+                    COMMAND_ERROR_IS_FATAL ANY)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/linux/packaging/copyright"
+                  "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/isotone" COMPONENT app)
+
+    # Man pages, gzipped the same way and for the same reason.
+    set(ISOTONE_MAN_GZ "")
+    foreach(page isotone isotone-daemon isotone-state)
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${CMAKE_CURRENT_SOURCE_DIR}/linux/packaging/man/${page}.1"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${page}.1"
+            COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(COMMAND "${ISOTONE_GZIP}" -9 -n -f "${CMAKE_CURRENT_BINARY_DIR}/${page}.1"
+                        COMMAND_ERROR_IS_FATAL ANY)
+        list(APPEND ISOTONE_MAN_GZ "${CMAKE_CURRENT_BINARY_DIR}/${page}.1.gz")
+    endforeach()
+    install(FILES ${ISOTONE_MAN_GZ}
+            DESTINATION "${CMAKE_INSTALL_MANDIR}/man1" COMPONENT app)
+endif()

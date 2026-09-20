@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Isotone authors
+set -e
+
+case "$1" in
+configure)
+    # The daemon is enabled on install (owner, 2026-09-19). From the next login
+    # every application's audio goes through Isotone, which is the point of
+    # installing it, and is also why this runs on a first install only: on an
+    # upgrade, re-enabling would undo a user who had turned it off by hand.
+    #
+    # --global, not --user: it writes /etc/systemd/user/, which applies to every
+    # account, the ones that already exist as well as new ones. A user-preset
+    # file would not; presets are consulted by `preset-all`, which nothing runs.
+    if [ -z "$2" ]; then
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --global enable isotone-daemon.service >/dev/null 2>&1 || true
+        fi
+    fi
+    ;;
+abort-upgrade | abort-remove | abort-deconfigure) ;;
+*)
+    echo "postinst called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

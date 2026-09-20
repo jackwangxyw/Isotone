@@ -1,0 +1,39 @@
+.TH ISOTONE 1 "2026-09-19" "Isotone 0.1.0" "User Commands"
+.SH NAME
+isotone \- system-wide parametric equaliser
+.SH SYNOPSIS
+.B isotone
+.RI [ options ]
+.SH DESCRIPTION
+.B isotone
+is the Isotone window: parametric bands with a response graph and a live
+spectrum, per-channel bands, speaker setup, and presets.
+.PP
+It edits the state of one output at a time. The audio itself is processed by
+.BR isotone-daemon (1),
+which the app offers to start when it is not running.
+.SH OPTIONS
+.TP
+.B \-\-tray
+Start hidden in the notification area. This is what the launch-at-sign-in entry
+uses.
+.TP
+.BI \-\-data\-dir " directory"
+Read and write presets and settings here instead of
+.IR $XDG_CONFIG_HOME/isotone/ui .
+.TP
+.B \-\-first\-run
+Show the first-run screens whether or not they have been finished before.
+.TP
+.B \-\-help
+List every option, including the ones used for screenshots and testing.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/isotone/ui
+Presets and settings.
+.TP
+.I $XDG_CONFIG_HOME/isotone
+Each sink's saved state, shared with the daemon.
+.SH SEE ALSO
+.BR isotone-daemon (1),
+.BR isotone-state (1)

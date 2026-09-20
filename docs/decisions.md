@@ -4415,6 +4415,55 @@ where systemd does not look. It is installed **disabled**: starting the daemon
 moves every application's audio through Isotone, which is not something a
 package does to a machine on its own.
 
+## The .deb
+
+CPack's DEB generator off the same `install()` rules, so the package and a
+staged tree are the same layout. 1.6 MB; dependencies read off the binaries by
+`dpkg-shlibdeps` rather than written out, so a Qt or PipeWire version bump needs
+no edit here. `pipewire`, `wireplumber` and a PulseAudio shim are added by hand,
+because they are programs rather than libraries the linker records.
+
+**The daemon is enabled on install** (owner, 2026-09-19). The recommendation
+here was the other way, and the reason is worth keeping: starting the daemon
+moves every application's audio through Isotone, and it cannot share a machine
+with EasyEffects or anything else that captures every stream. The owner's call
+is that installing it is the point of installing it.
+
+Two details that are easy to get wrong:
+
+- `systemctl --global enable`, not a `user-preset` file. A preset is consulted
+  by `preset-all`, which nothing runs, so it would only ever affect accounts
+  created afterwards. `--global` writes `/etc/systemd/user/` and applies to
+  every account that already exists.
+- On a **first install only** (`[ -z "$2" ]`). On an upgrade, re-enabling would
+  undo a user who had turned it off by hand. `prerm` disables it again on
+  removal, and stops it for whoever is logged in so the audio goes back to the
+  hardware without a sign-out.
+
+**lintian found four things the build was getting wrong**, none of which any
+test would have:
+
+| | |
+|---|---|
+| `control-file-has-bad-permissions 0777` | The source tree is on a Windows filesystem when built from WSL, which reports every file as 0777. `CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION` |
+| `no-copyright-file` | Now a machine-readable `copyright`, which also records the vendored Equalizer APO code, doctest and Instrument Sans |
+| `no-changelog` | Written and gzipped |
+| `no-manual-page` | `isotone(1)`, `isotone-daemon(1)`, `isotone-state(1)` |
+
+The changelog and man pages are gzipped at **configure** time. The first attempt
+did it in an `install(CODE)` block, which worked for `cmake --install` and broke
+under CPack: CPack stages through `DESTDIR`, so `${CMAKE_INSTALL_PREFIX}` inside
+an install script is the real `/usr` and writing there is refused.
+
+What lintian still says is three `maintainer-script-calls-systemctl`. It wants
+`dh_installsystemd`, which is debhelper's, for system units; this is a CPack
+package shipping a user unit. Deliberate.
+
+Measured, not assumed: the rig was pointed at `/usr/bin` rather than the build
+directory, and the **packaged** daemon passed every case, `live` through
+`reclaim`, each to the analytic filter. Install, remove and purge all leave the
+machine clean, and the `--global` symlink appears and disappears with them.
+
 # Where things stand (2026-09-19)
 
 ## Done

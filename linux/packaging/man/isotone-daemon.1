@@ -1,0 +1,63 @@
+.TH ISOTONE-DAEMON 1 "2026-09-19" "Isotone 0.1.0" "User Commands"
+.SH NAME
+isotone-daemon \- the Isotone audio engine
+.SH SYNOPSIS
+.B isotone-daemon
+.RI [ options ]
+.SH DESCRIPTION
+.B isotone-daemon
+owns a virtual PipeWire sink, runs Isotone's filters over everything played
+into it, and plays the result into a hardware sink.
+.PP
+With no options it follows the default sink and moves each application's
+playback into its own sink as the application appears, so the output the
+desktop shows stays the hardware and choosing another one there moves the EQ
+with it.
+.PP
+It is a user service, not a system one: it reads the session's PipeWire socket
+and writes only the user's own configuration directory. Nothing it does needs
+root.
+.SH OPTIONS
+.TP
+.BI \-\-sink " name"
+Feed this sink, by
+.IR node.name ,
+instead of following the default.
+.TP
+.BI \-\-channels " n"
+Channels of the virtual sink: 1, 2, 4, 6 or 8. The default is 2.
+.TP
+.B \-\-leave\-streams
+Do not move applications' streams. Isotone's sink then has to be chosen by hand
+to hear anything through it.
+.TP
+.BI \-\-state\-dir " directory"
+Read and write each sink's saved state here.
+.SH USAGE
+.PP
+The package enables the service, and it starts at the next login. To control it
+by hand:
+.PP
+.nf
+.RS
+systemctl \-\-user start isotone\-daemon
+systemctl \-\-user stop isotone\-daemon
+systemctl \-\-user disable isotone\-daemon
+.RE
+.fi
+.PP
+To pin it to one sink rather than follow the default, override the command:
+.PP
+.nf
+.RS
+systemctl \-\-user edit isotone\-daemon
+.RE
+.fi
+.PP
+and set an empty
+.B ExecStart=
+followed by the one wanted; the empty line is how systemd is told to forget the
+original rather than run both.
+.SH SEE ALSO
+.BR isotone (1),
+.BR isotone-state (1)

@@ -1,0 +1,27 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Isotone authors
+set -e
+
+case "$1" in
+remove | deconfigure)
+    # Undo what postinst enabled. Not on upgrade: the unit file is replaced and
+    # the user's choice should survive it.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --global disable isotone-daemon.service >/dev/null 2>&1 || true
+        # Stop it for whoever is logged in now, so the audio goes back to the
+        # hardware without them having to sign out. The daemon clears the
+        # target.object it set on every stream as it exits.
+        for uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+            systemctl --user --machine="${uid}@.host" stop isotone-daemon.service >/dev/null 2>&1 || true
+        done
+    fi
+    ;;
+upgrade | failed-upgrade) ;;
+*)
+    echo "prerm called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

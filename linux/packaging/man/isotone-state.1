@@ -1,0 +1,46 @@
+.TH ISOTONE-STATE 1 "2026-09-19" "Isotone 0.1.0" "User Commands"
+.SH NAME
+isotone-state \- read and write a sink's Isotone state
+.SH SYNOPSIS
+.B isotone-state
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B isotone-state
+reads and writes the filters a sink is set to, either in the running daemon's
+shared region or in the file it is saved to. It needs no PipeWire, so it works
+with nothing running, which is the first thing to reach for when the EQ is not
+being applied.
+.SH COMMANDS
+.TP
+.B show
+Print the sink's current filters.
+.TP
+.B set
+Write filters into the running daemon's region, which takes effect at once.
+.TP
+.B save
+Write filters to the saved-state file, which the daemon reads when it next
+starts on that sink.
+.TP
+.B capture
+Read from the post-filter ring the app's spectrum drains, for checking that
+audio is reaching the engine at all.
+.SH OPTIONS
+.TP
+.BI \-\-sink " name"
+The sink to act on, by
+.IR node.name .
+.TP
+.BI \-\-band " freq,gain,q"
+A peaking band. May be given more than once.
+.TP
+.BI \-\-dir " directory"
+Where saved state lives, instead of the default.
+.PP
+Run
+.B isotone-state
+with no arguments for the full list.
+.SH SEE ALSO
+.BR isotone (1),
+.BR isotone-daemon (1)
