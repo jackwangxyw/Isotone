@@ -24,3 +24,14 @@ ISOTONE_MOCK_PORTAL_LOG="$log" QT_QPA_PLATFORM=offscreen "$tests" "-tc=global ho
 
 ISOTONE_MOCK_PORTAL_LOG="$log" QT_QPA_PLATFORM=offscreen FLATPAK_ID=io.github.isotone.Isotone \
     ISOTONE_AUTOSTART_DIR="$autostart" "$tests" "-tc=launch at sign-in in a Flatpak*"
+
+# And a third, against a second mock that refuses the shortcuts session
+# outright. It is a second portal rather than another request to the first,
+# because the first one would have to stop answering to play both parts.
+kill "$mock" 2>/dev/null || true
+refuse_log="$(mktemp)"
+MOCK_LOG="$refuse_log" REFUSE_SESSION=1 python3 "$(dirname "${BASH_SOURCE[0]}")/mock_portal.py" &
+mock=$!
+trap 'kill "$mock" 2>/dev/null || true; rm -rf "$log" "$log.refuse" "$autostart" "$refuse_log"' EXIT
+for _ in $(seq 1 100); do grep -q ready "$refuse_log" && break; sleep 0.05; done
+ISOTONE_MOCK_PORTAL_LOG="$refuse_log" QT_QPA_PLATFORM=offscreen "$tests" "-tc=a desktop that refuses the shortcuts session*"

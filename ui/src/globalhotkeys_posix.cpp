@@ -11,6 +11,9 @@
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
+#include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDBusReply>
 #include <QGuiApplication>
 #include <QKeySequence>
@@ -94,7 +97,7 @@ public:
         watchResponse(handle, SLOT(onCreateResponse(uint, QVariantMap)));
         QDBusMessage create = QDBusMessage::createMethodCall(kPortalService, kPortalPath, kShortcutsInterface, QStringLiteral("CreateSession"));
         create << QVariantMap{{QStringLiteral("handle_token"), handle}, {QStringLiteral("session_handle_token"), token()}};
-        bus_.asyncCall(create);
+        failIfRefused(bus_.asyncCall(create), QStringLiteral("CreateSession"));
     }
 
     void close() {
@@ -121,7 +124,7 @@ private slots:
         QDBusMessage bind = QDBusMessage::createMethodCall(kPortalService, kPortalPath, kShortcutsInterface, QStringLiteral("BindShortcuts"));
         bind << QVariant::fromValue(QDBusObjectPath(session_)) << QVariant::fromValue(pending_) << QString()
              << QVariantMap{{QStringLiteral("handle_token"), handle}};
-        bus_.asyncCall(bind);
+        failIfRefused(bus_.asyncCall(bind), QStringLiteral("BindShortcuts"));
     }
 
     void onBindResponse(uint response, const QVariantMap& results) {
@@ -143,6 +146,26 @@ private slots:
     }
 
 private:
+    // A portal that refuses the call outright answers the method with an error
+    // and never sends a Response, so watching only the Request leaves the
+    // Shortcuts page saying nothing is wrong while no key works. That is what
+    // both GNOME and Plasma do to an app they have no application ID for,
+    // which is any app not in a Flatpak (decisions.md, "GNOME and KDE, on
+    // Wayland"), so it is the ordinary case on a Wayland desktop rather than an
+    // edge. An empty bind marks every global shortcut as refused, which is what
+    // the page already knows how to show.
+    void failIfRefused(const QDBusPendingCall& call, const QString& what) {
+        auto* watcher = new QDBusPendingCallWatcher(call, this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, what](QDBusPendingCallWatcher* w) {
+            w->deleteLater();
+            const QDBusPendingReply<QDBusObjectPath> reply = *w;
+            if (!reply.isError()) return;
+            qInfo("global shortcuts: the desktop refused %s (%s)", qPrintable(what), qPrintable(reply.error().name()));
+            dropResponse();
+            emit bound({});
+        });
+    }
+
     // The Request object's path is known before the call, so the Response
     // cannot arrive before anything listens for it.
     void watchResponse(const QString& handle, const char* slot) {

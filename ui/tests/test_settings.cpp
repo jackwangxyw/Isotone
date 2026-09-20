@@ -564,6 +564,34 @@ TEST_CASE("global hotkeys bind through the GlobalShortcuts portal, report one re
     CHECK(wait_until([&] { return read_all(log).contains(QStringLiteral("Close ")); }));
 }
 
+TEST_CASE("a desktop that refuses the shortcuts session marks every key refused") {
+    // Only against tests/mock_portal.py started with REFUSE_SESSION, which
+    // answers CreateSession with an error and no Response, as GNOME and Plasma
+    // both do to an app they have no application ID for. Without that being
+    // reported, the Shortcuts page says nothing is wrong while no key works
+    // (decisions.md, "GNOME and KDE, on Wayland").
+    const QString log = qEnvironmentVariable("ISOTONE_MOCK_PORTAL_LOG");
+    if (log.isEmpty()) {
+        MESSAGE("no mock portal; skipped");
+        return;
+    }
+    Scratch s;
+    ShortcutRegistry registry(s.settings.get());
+    for (const QString& id : registry.ids(QStringLiteral("app"))) registry.setGlobal(id, false);
+    registry.setGlobal(QStringLiteral("eq"), true);
+    registry.setGlobal(QStringLiteral("mute"), true);
+
+    auto hotkeys = std::make_unique<GlobalHotkeys>(&registry);
+    REQUIRE(hotkeys->mechanism() == QStringLiteral("portal"));
+    CHECK(wait_until([&] { return read_all(log).contains(QStringLiteral("CreateSession refused")); }));
+    // The refusal reaches the page: both keys are marked, and nothing is bound.
+    REQUIRE(wait_until([&] { return registry.globalFailed(QStringLiteral("eq")); }));
+    CHECK(registry.globalFailed(QStringLiteral("mute")));
+    CHECK(hotkeys->registered().isEmpty());
+    // An action whose global is off is not marked: there is nothing to refuse.
+    CHECK_FALSE(registry.globalFailed(QStringLiteral("undo")));
+}
+
 TEST_CASE("launch at sign-in in a Flatpak goes through the Background portal") {
     // Only against tests/mock_portal.py, which ctest runs as the second half of
     // ui_model_tests_portal: FLATPAK_ID set, and ISOTONE_AUTOSTART_DIR pointing

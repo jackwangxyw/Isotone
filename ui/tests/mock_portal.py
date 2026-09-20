@@ -8,7 +8,9 @@
 # GlobalShortcuts: CreateSession and BindShortcuts answer through a Request
 # object's Response signal, and a bound shortcut fires Activated. It binds every
 # shortcut except those whose id is in REFUSE, and presses ACTIVATE a moment
-# after binding.
+# after binding. With REFUSE_SESSION set it answers CreateSession with an error
+# instead and sends no Response at all, which is what GNOME and Plasma do to an
+# app they have no application ID for.
 #
 # Background: RequestBackground with autostart writes or removes the entry
 # xdg-desktop-portal would, in MOCK_AUTOSTART_DIR and named for MOCK_APP_ID,
@@ -33,6 +35,7 @@ IFACE = "org.freedesktop.portal.GlobalShortcuts"
 BACKGROUND = "org.freedesktop.portal.Background"
 REFUSE = set(filter(None, os.environ.get("REFUSE", "").split(",")))
 ACTIVATE = os.environ.get("ACTIVATE", "")
+REFUSE_SESSION = os.environ.get("REFUSE_SESSION", "") != ""
 AUTOSTART_DIR = os.environ.get("MOCK_AUTOSTART_DIR", "")
 APP_ID = os.environ.get("MOCK_APP_ID", "io.github.isotone.Isotone")
 LOG_PATH = os.environ["MOCK_LOG"]
@@ -70,6 +73,11 @@ class Portal(dbus.service.Object):
 
     @dbus.service.method(IFACE, in_signature="a{sv}", out_signature="o", sender_keyword="sender")
     def CreateSession(self, options, sender=None):
+        if REFUSE_SESSION:
+            # What GNOME and Plasma both do to an app they have no application
+            # ID for: the method itself errors and no Response is ever sent.
+            log.write("CreateSession refused\n")
+            raise dbus.DBusException("Not allowed", name="org.freedesktop.portal.Error.NotAllowed")
         r, path = self._request(sender, str(options["handle_token"]))
         s = sender[1:].replace(".", "_")
         session = f"/org/freedesktop/portal/desktop/session/{s}/{options['session_handle_token']}"
