@@ -27,6 +27,13 @@ int make_directories(const std::string& dir) {
     return 0;
 }
 
+// The application ID when the app is inside a Flatpak, null when it is not.
+// AppSettings::sandboxed() is the Qt-side reading of the same variable.
+const char* flatpak_id() {
+    const char* id = std::getenv("FLATPAK_ID");
+    return id != nullptr && id[0] != '\0' ? id : nullptr;
+}
+
 std::string trimmed(std::string text) {
     const size_t first = text.find_first_not_of(" \t\r");
     if (first == std::string::npos) return {};
@@ -52,18 +59,29 @@ std::string value_of(const std::string& path, const std::string& key) {
 }  // namespace
 
 std::string autostart_dir() {
+    const char* home = std::getenv("HOME");
+    const std::string under_home = home != nullptr && home[0] == '/' ? std::string(home) + "/.config/autostart" : std::string();
+
+    // In a Flatpak XDG_CONFIG_HOME is ~/.var/app/<id>/config, a directory of the
+    // sandbox's own that no desktop reads. $HOME is the real one, and the
+    // desktop's autostart directory under it is mounted read-only, so the entry
+    // the portal writes there is the one to read.
+    if (flatpak_id() != nullptr) return under_home;
+
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     // A relative XDG_CONFIG_HOME is invalid and is ignored, not resolved against
     // the working directory.
     if (xdg != nullptr && xdg[0] == '/') return std::string(xdg) + "/autostart";
-
-    const char* home = std::getenv("HOME");
-    if (home != nullptr && home[0] == '/') return std::string(home) + "/.config/autostart";
-    return {};
+    return under_home;
 }
 
 std::string autostart_path(const std::string& dir) {
-    return dir.empty() ? std::string() : dir + "/" + kAutostartFileName;
+    if (dir.empty()) return {};
+    // The Background portal names the entry after the application ID, so that is
+    // the file to read in a Flatpak (measured against the one xdg-desktop-portal
+    // 1.20 writes: decisions.md, "Launch at sign-in in a Flatpak").
+    const char* id = flatpak_id();
+    return dir + "/" + (id != nullptr ? std::string(id) + ".desktop" : std::string(kAutostartFileName));
 }
 
 namespace {

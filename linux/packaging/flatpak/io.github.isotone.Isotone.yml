@@ -14,8 +14,12 @@
 # cannot see each other. --device=shm is needed either way, and is measured
 # rather than assumed (see the finish-args below).
 #
-# The daemon is started from here by a systemd user unit that runs
-# `flatpak run --command=isotone-daemon`.
+# The daemon is started by the app itself when FLATPAK_ID is set: a Flatpak
+# cannot install a systemd user unit, and `systemctl --user` inside the sandbox
+# reaches the sandbox rather than the session (ui/src/devicetool_posix.cpp).
+#
+# Launch at sign-in is the Background portal's, for the same reason: the entry
+# the desktop reads is on the host (see --filesystem=xdg-config/autostart below).
 #
 # Build and install, no root anywhere:
 #   flatpak-builder --user --install --force-clean build-flatpak \
@@ -54,9 +58,21 @@ finish-args:
   - --socket=pulseaudio
 
   # X11 key grabs for global hotkeys where there is no portal, and the portal
-  # where there is (ui/src/globalhotkeys_posix.cpp).
+  # where there is (ui/src/globalhotkeys_posix.cpp). One bus name carries every
+  # portal interface, GlobalShortcuts and Background alike, so the line below it
+  # grants nothing and is kept only because removing it is not this change.
   - --talk-name=org.freedesktop.portal.Desktop
   - --talk-name=org.freedesktop.portal.GlobalShortcuts
+
+  # Launch at sign-in, read side. The Background portal writes the autostart
+  # entry on the host and gives no way to ask what it wrote, so the toggle in
+  # Settings reads the entry itself, and this is what lets it
+  # (ui/src/startup_portal.h). Read-only: the entry is the portal's to write.
+  #
+  # Measured: a directory bound this way shows entries created after the sandbox
+  # started, and binding the single file instead does not, because the file does
+  # not exist when there is nothing to read yet.
+  - --filesystem=xdg-config/autostart:ro
 
   # Importing and exporting presets from anywhere the user points the dialog at.
   - --filesystem=xdg-download

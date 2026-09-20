@@ -9,6 +9,13 @@
 // is nothing to enable separately, and no equivalent of Windows' StartupApproved,
 // so a desktop that lets a person turn entries off does it by writing
 // Hidden=true, which is read back here as off.
+//
+// In a Flatpak the file is still the state, but it is not this code's to write.
+// $XDG_CONFIG_HOME there is ~/.var/app/<id>/config, which no desktop reads, and
+// the host's directory is mounted read-only. The entry belongs to the Background
+// portal (ui/src/startup_portal.h), which names it after the application ID and
+// fills in the `flatpak run` command. Reading it back is the same code either
+// way: what changes here is the directory and the file's name.
 
 #pragma once
 
@@ -16,15 +23,20 @@
 
 namespace isotone::ui {
 
-// The file's name, which is also its desktop entry id.
+// The file's name outside a sandbox, which is also its desktop entry id.
 inline constexpr char kAutostartFileName[] = "isotone.desktop";
 
 // $XDG_CONFIG_HOME/autostart, or $HOME/.config/autostart when XDG_CONFIG_HOME is
 // unset or not absolute, as the base directory specification requires. Empty
 // when neither is usable.
+//
+// In a Flatpak it is $HOME/.config/autostart whatever XDG_CONFIG_HOME says: the
+// desktop reads the host's directory, and the sandbox's own is not it.
 std::string autostart_dir();
 
-// "<dir>/isotone.desktop". Empty when `dir` is empty.
+// "<dir>/isotone.desktop", or "<dir>/<FLATPAK_ID>.desktop" in a Flatpak, which
+// is what the Background portal names the entry it writes. Empty when `dir` is
+// empty.
 std::string autostart_path(const std::string& dir);
 
 // The file's contents: `exec` is the command, with --tray appended when `tray`.

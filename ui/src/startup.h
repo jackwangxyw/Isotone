@@ -9,6 +9,11 @@
 // The key is HKCU\Software\Microsoft\Windows\CurrentVersion\Run, or
 // HKCU\<ISOTONE_RUN_KEY> when that is set: the QML tests and screenshots set it
 // to a test key, so they never write the real one.
+//
+// Linux has the same shape with an XDG autostart entry in place of the value
+// (autostart_xdg.h), and ISOTONE_AUTOSTART_DIR in place of ISOTONE_RUN_KEY. In
+// a Flatpak the entry is still what the toggle shows, but it is written by the
+// Background portal rather than here (startup_portal.h).
 
 #pragma once
 

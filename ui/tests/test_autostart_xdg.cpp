@@ -130,3 +130,36 @@ TEST_CASE("no temporary file is left behind") {
 
     std::filesystem::remove_all(scratch());
 }
+
+TEST_CASE("in a Flatpak the entry is the host's, and named for the application id") {
+    const char* saved_xdg = std::getenv("XDG_CONFIG_HOME");
+    const std::string keep_xdg = saved_xdg != nullptr ? saved_xdg : "";
+    const char* saved_home = std::getenv("HOME");
+    const std::string keep_home = saved_home != nullptr ? saved_home : "";
+
+    ::setenv("HOME", "/home/someone", 1);
+    // What a sandbox actually has: XDG_CONFIG_HOME under ~/.var/app, which no
+    // desktop reads, and $HOME the real one (measured in the sandbox on the
+    // owner's laptop).
+    ::setenv("XDG_CONFIG_HOME", "/home/someone/.var/app/io.github.isotone.Isotone/config", 1);
+    ::setenv("FLATPAK_ID", "io.github.isotone.Isotone", 1);
+
+    CHECK(autostart_dir() == "/home/someone/.config/autostart");
+    // The name the Background portal gives the entry it writes.
+    CHECK(autostart_path(autostart_dir()) == "/home/someone/.config/autostart/io.github.isotone.Isotone.desktop");
+
+    // And outside one, the same two are XDG's.
+    ::unsetenv("FLATPAK_ID");
+    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart");
+    CHECK(autostart_path(autostart_dir()) ==
+          "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart/isotone.desktop");
+
+    // An empty FLATPAK_ID is not a Flatpak.
+    ::setenv("FLATPAK_ID", "", 1);
+    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart");
+    ::unsetenv("FLATPAK_ID");
+
+    if (saved_xdg != nullptr) ::setenv("XDG_CONFIG_HOME", keep_xdg.c_str(), 1);
+    else ::unsetenv("XDG_CONFIG_HOME");
+    if (saved_home != nullptr) ::setenv("HOME", keep_home.c_str(), 1);
+}

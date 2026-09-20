@@ -2,12 +2,23 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 The Isotone authors
 #
-# A stand-in org.freedesktop.portal.GlobalShortcuts on the session bus, speaking
-# the protocol as xdg-desktop-portal documents it: CreateSession and
-# BindShortcuts answer through a Request object's Response signal, and a bound
-# shortcut fires Activated. It binds every shortcut except those whose id is in
-# REFUSE, and presses ACTIVATE a moment after binding. Logs what it is asked to
-# MOCK_LOG. Run by run_portal_test.sh; needs python3-dbus and python3-gi.
+# A stand-in xdg-desktop-portal on the session bus, speaking the protocol as it
+# is documented, for the two interfaces this app uses.
+#
+# GlobalShortcuts: CreateSession and BindShortcuts answer through a Request
+# object's Response signal, and a bound shortcut fires Activated. It binds every
+# shortcut except those whose id is in REFUSE, and presses ACTIVATE a moment
+# after binding.
+#
+# Background: RequestBackground with autostart writes or removes the entry
+# xdg-desktop-portal would, in MOCK_AUTOSTART_DIR and named for MOCK_APP_ID,
+# with the `flatpak run` line it builds out of `commandline`. The shape is the
+# one measured off xdg-desktop-portal 1.20 on the owner's laptop (decisions.md,
+# "Launch at sign-in in a Flatpak"). It refuses while MOCK_LOG.refuse exists,
+# which is how the refused path is tested.
+#
+# Logs what it is asked to MOCK_LOG. Run by run_portal_test.sh; needs
+# python3-dbus and python3-gi.
 import os
 import sys
 
@@ -19,9 +30,13 @@ from gi.repository import GLib
 BUS = "org.freedesktop.portal.Desktop"
 PATH = "/org/freedesktop/portal/desktop"
 IFACE = "org.freedesktop.portal.GlobalShortcuts"
+BACKGROUND = "org.freedesktop.portal.Background"
 REFUSE = set(filter(None, os.environ.get("REFUSE", "").split(",")))
 ACTIVATE = os.environ.get("ACTIVATE", "")
-log = open(os.environ["MOCK_LOG"], "a", buffering=1)
+AUTOSTART_DIR = os.environ.get("MOCK_AUTOSTART_DIR", "")
+APP_ID = os.environ.get("MOCK_APP_ID", "io.github.isotone.Isotone")
+LOG_PATH = os.environ["MOCK_LOG"]
+log = open(LOG_PATH, "a", buffering=1)
 
 
 class Request(dbus.service.Object):
@@ -82,6 +97,46 @@ class Portal(dbus.service.Object):
     @dbus.service.signal(IFACE, signature="osta{sv}")
     def Activated(self, session, shortcut_id, timestamp, options):
         pass
+
+    @dbus.service.method(BACKGROUND, in_signature="sa{sv}", out_signature="o", sender_keyword="sender")
+    def RequestBackground(self, parent, options, sender=None):
+        r, path = self._request(sender, str(options["handle_token"]))
+        autostart = bool(options.get("autostart", False))
+        command = [str(a) for a in options.get("commandline", [])]
+        reason = options.get("reason", "")
+        log.write(f"RequestBackground autostart={autostart} commandline={' '.join(command)} reason={reason}\n")
+        refused = os.path.exists(LOG_PATH + ".refuse")
+        if not refused:
+            write_autostart(autostart, command)
+        results = {} if refused else {"background": dbus.Boolean(True), "autostart": dbus.Boolean(autostart)}
+        code = dbus.UInt32(1 if refused else 0)
+        GLib.timeout_add(50, lambda: (r.Response(code, results), False)[1])
+        return dbus.ObjectPath(path)
+
+
+def write_autostart(autostart, command):
+    """The entry xdg-desktop-portal writes on the host, or its removal."""
+    if not AUTOSTART_DIR:
+        return
+    entry = os.path.join(AUTOSTART_DIR, APP_ID + ".desktop")
+    if not autostart:
+        if os.path.exists(entry):
+            os.remove(entry)
+        return
+    os.makedirs(AUTOSTART_DIR, exist_ok=True)
+    # The command goes through `flatpak run`, and the two X- keys mark the entry
+    # as the portal's own.
+    exec_line = " ".join(["flatpak", "run", f"--command={command[0]}", APP_ID] + command[1:])
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={APP_ID}",
+        f"X-XDP-Autostart={APP_ID}",
+        f"Exec={exec_line}",
+        f"X-Flatpak={APP_ID}",
+    ]
+    with open(entry, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 DBusGMainLoop(set_as_default=True)

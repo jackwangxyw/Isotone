@@ -134,6 +134,10 @@ else()
         src/devicetool_posix.cpp
         src/devicetool_posix.h
         src/globalhotkeys_posix.cpp
+        # Settings: launch at sign-in inside a Flatpak, which only the Background
+        # portal can set.
+        src/startup_portal.cpp
+        src/startup_portal.h
     )
 endif()
 

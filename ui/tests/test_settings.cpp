@@ -33,6 +33,7 @@
 #include "responsegraph.h"
 #include "shortcutregistry.h"
 #include "singleinstance.h"
+#include "startup.h"
 #include "test_rig.h"
 #include "traymenu.h"
 
@@ -561,6 +562,56 @@ TEST_CASE("global hotkeys bind through the GlobalShortcuts portal, report one re
     registry.setCapturing(true);
     CHECK(hotkeys->registered().isEmpty());
     CHECK(wait_until([&] { return read_all(log).contains(QStringLiteral("Close ")); }));
+}
+
+TEST_CASE("launch at sign-in in a Flatpak goes through the Background portal") {
+    // Only against tests/mock_portal.py, which ctest runs as the second half of
+    // ui_model_tests_portal: FLATPAK_ID set, and ISOTONE_AUTOSTART_DIR pointing
+    // at the directory the mock writes the entry into, as the real portal writes
+    // the host's.
+    const QString log = qEnvironmentVariable("ISOTONE_MOCK_PORTAL_LOG");
+    if (log.isEmpty()) {
+        MESSAGE("no mock portal; skipped");
+        return;
+    }
+    REQUIRE(AppSettings::sandboxed());
+    const QString dir = Startup::runKey();
+    REQUIRE_FALSE(dir.isEmpty());
+    // Named for the application ID, not isotone.desktop: that is what the portal
+    // writes and so what there is to read.
+    const QString entry = dir + QStringLiteral("/io.github.isotone.Isotone.desktop");
+
+    Startup startup;
+    QSignalSpy changed(&startup, &Startup::changed);
+    CHECK_FALSE(startup.launchAtSignIn());
+
+    // On: the request carries the app's own argv, and the portal turns it into
+    // the `flatpak run` line. Nothing here writes the file.
+    REQUIRE(startup.setLaunchAtSignIn(true, true));
+    CHECK(read_all(log).contains(QStringLiteral("RequestBackground autostart=True commandline=isotone --tray")));
+    CHECK(QFile::exists(entry));
+    CHECK(startup.launchAtSignIn());
+    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.isotone.Isotone --tray"));
+    CHECK(changed.count() == 1);
+
+    // Start in the tray off rewrites it through the portal as well.
+    REQUIRE(startup.setStartInTray(false));
+    CHECK(read_all(log).contains(QStringLiteral("RequestBackground autostart=True commandline=isotone reason=")));
+    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.isotone.Isotone"));
+
+    // Off: the portal removes it.
+    REQUIRE(startup.setLaunchAtSignIn(false, false));
+    CHECK_FALSE(QFile::exists(entry));
+    CHECK_FALSE(startup.launchAtSignIn());
+
+    // A desktop that refuses is not reported as on.
+    QFile refuse(log + QStringLiteral(".refuse"));
+    REQUIRE(refuse.open(QIODevice::WriteOnly));
+    refuse.close();
+    CHECK_FALSE(startup.setLaunchAtSignIn(true, true));
+    CHECK_FALSE(QFile::exists(entry));
+    CHECK_FALSE(startup.launchAtSignIn());
+    QFile::remove(log + QStringLiteral(".refuse"));
 }
 #endif
 

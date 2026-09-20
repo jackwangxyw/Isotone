@@ -39,7 +39,11 @@ bool Startup::setStartInTray(bool tray) {
     return setLaunchAtSignIn(true, tray);
 }
 #else
+#include <QtGlobal>
+
+#include "appsettings.h"
 #include "autostart_xdg.h"
+#include "startup_portal.h"
 
 Startup::Startup(QObject* parent) : QObject(parent) {}
 
@@ -61,6 +65,21 @@ bool Startup::launchAtSignIn() const { return isotone::ui::autostart_enabled(ent
 QString Startup::command() const { return QString::fromStdString(isotone::ui::autostart_command(entry_path())); }
 
 bool Startup::setLaunchAtSignIn(bool on, bool tray) {
+    // In a Flatpak the entry is the Background portal's to write: the directory
+    // the desktop reads is outside the sandbox and mounted read-only, and the
+    // one inside is read by nothing (startup_portal.h).
+    if (AppSettings::sandboxed()) {
+        QStringList command{QStringLiteral("isotone")};
+        if (tray) command << QStringLiteral("--tray");
+        QString detail;
+        const bool accepted = isotone::ui::request_autostart(on, command, &detail);
+        qInfo("launch at sign-in %s through the Background portal: %s (%s)", on ? "on" : "off",
+              accepted ? "accepted" : "refused", qPrintable(detail));
+        emit changed();
+        // The entry is the state, so that is what is reported, not the call.
+        return accepted && launchAtSignIn() == on;
+    }
+
     const std::string exe = QCoreApplication::applicationFilePath().toStdString();
     const int error = on ? isotone::ui::write_autostart(entry_path(), exe, tray) : isotone::ui::remove_autostart(entry_path());
     emit changed();
