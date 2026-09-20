@@ -4464,6 +4464,48 @@ directory, and the **packaged** daemon passed every case, `live` through
 `reclaim`, each to the analytic filter. Install, remove and purge all leave the
 machine clean, and the `--global` symlink appears and disappears with them.
 
+## A CI failure in the compat writer: reading the DACL of a file that is going away
+
+`compat_tests` went red in CI on 2026-09-20, in the case where three threads
+write the same path 200 times each: `first_error = 5`, ERROR_ACCESS_DENIED. The
+commit had not touched `windows/compat`, and the two runs before it passed, so
+it was intermittent.
+
+**The first diagnosis was wrong, and measuring is what caught it.** The obvious
+suspect was `replace_denied_for_good`, which decides whether an
+ERROR_ACCESS_DENIED from `MoveFileExW` is worth retrying. A target another
+writer has left pending deletion refuses a DELETE open with
+ERROR_ACCESS_DENIED, exactly as an ACL that denies delete does, and the comment
+there said a pending deletion could be treated as permanent because "the
+caller's next attempt sees the name gone" -- true of one writer, false of two.
+That reasoning is sound and the change was written. A `fprintf` in the retry
+loop then showed it never runs: **zero** iterations in the failing case. The
+change was reverted; it was speculation.
+
+The failure is earlier, in `dacl_for`, which reads the DACL the replacement file
+should be given. It falls back to "the DACL a file created in this directory
+would get" only on ERROR_FILE_NOT_FOUND. A target pending deletion answers
+`GetFileSecurityW` with ERROR_ACCESS_DENIED, which was returned straight out of
+`write_file_atomically` before the replace and its retry loop were ever reached.
+That is the 5.
+
+It now waits out an ERROR_ACCESS_DENIED for 50 ms, which is far longer than a
+pending deletion lasts and inside every deadline above it. Waited out rather
+than treated as missing, because that error is also what a target genuinely out
+of reach gives, and that one should still be reported.
+
+**The test is deterministic, not a stress run.** Twelve stress runs under load
+passed both with the fix and with it mutated out, on this machine, which proves
+nothing: the race needs a slower machine than this one. Setting the delete
+disposition on an open handle puts a name in the pending-deletion state at once
+and holds it there, so the condition can be created exactly. The first attempt
+used FILE_FLAG_DELETE_ON_CLOSE, which does not: other opens still succeed until
+the last handle closes, and the test leaked the probe handle and so held the
+file pending for ever. `SetFileInformationByHandle(FileDispositionInfo)` does
+what was wanted, and the test asserts the state it has made is the right one
+(an open refused, and refused with ERROR_ACCESS_DENIED) before testing anything
+else. Mutating the 50 ms to 0 fails it; restoring it passes.
+
 # Where things stand (2026-09-19)
 
 ## Done

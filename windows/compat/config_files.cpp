@@ -256,7 +256,24 @@ DWORD read_security(const fs::path& path, SECURITY_INFORMATION what, std::vector
 // inherited when the directory's are (NTFS marks them only then), or the
 // token's default DACL when there are none.
 DWORD dacl_for(const fs::path& path, std::vector<BYTE>* sd) {
-    const DWORD e = read_security(path, DACL_SECURITY_INFORMATION, sd);
+    DWORD e = read_security(path, DACL_SECURITY_INFORMATION, sd);
+    // A target another writer has left pending deletion refuses this with
+    // ERROR_ACCESS_DENIED, and a moment later is not there at all. Returning
+    // that error failed the whole write before it ever reached the replace and
+    // its retry loop, which is how two writers racing on one path lost: three
+    // threads over 200 rounds each, in CI on 2026-09-20.
+    //
+    // Waited out rather than treated as missing, because ERROR_ACCESS_DENIED
+    // from a DACL read is also what a target genuinely out of reach gives, and
+    // that one should still be reported. 50 ms is far longer than a pending
+    // deletion lasts and inside every deadline above this.
+    if (e == ERROR_ACCESS_DENIED) {
+        const ULONGLONG deadline = GetTickCount64() + 50;
+        while (e == ERROR_ACCESS_DENIED && GetTickCount64() < deadline) {
+            Sleep(0);
+            e = read_security(path, DACL_SECURITY_INFORMATION, sd);
+        }
+    }
     if (e != ERROR_FILE_NOT_FOUND) return e;
 
     std::vector<BYTE> parent;
@@ -350,8 +367,10 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
             return ERROR_SUCCESS;
         }
         const DWORD e = GetLastError();
+        const bool forgood = e == ERROR_ACCESS_DENIED && replace_denied_for_good(path);
+        std::fprintf(stderr, "PROBE move failed e=%lu for_good=%d\n", e, static_cast<int>(forgood));
         const bool contended = e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION ||
-                               (e == ERROR_ACCESS_DENIED && !replace_denied_for_good(path));
+                               (e == ERROR_ACCESS_DENIED && !forgood);
         if (!contended || GetTickCount64() >= deadline) {
             DeleteFileW(tmp.c_str());
             return e;

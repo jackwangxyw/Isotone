@@ -422,6 +422,49 @@ TEST_CASE("atomic writes to one path from several threads at once each land whol
     CHECK(no_temporary_files(s.dir));
 }
 
+TEST_CASE("a replace waits out a target another writer left pending deletion") {
+    // MoveFileExW leaves the target pending deletion while the writer replacing
+    // it holds its handle, and opening a file in that state answers
+    // ERROR_ACCESS_DENIED, exactly as an ACL that denies delete does. Windows
+    // gives no way to tell the two apart by error code, and treating it as
+    // permanent made two writers racing on one path give up: one saw the
+    // other's pending deletion and stopped (CI, 2026-09-20).
+    //
+    // Setting the delete disposition on an open handle marks the name pending
+    // deletion straight away and keeps it there until the handle closes, which
+    // is the state a concurrent MoveFileExW passes through.
+    // FILE_FLAG_DELETE_ON_CLOSE does not: the file is only removed when the
+    // last handle goes, and other opens succeed until then.
+    Sandbox s;
+    const fs::path f = s.dir / "Isotone.txt";
+    REQUIRE(write_file_atomically(f, "old") == ERROR_SUCCESS);
+
+    HANDLE pending = CreateFileW(f.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, 0, nullptr);
+    REQUIRE(pending != INVALID_HANDLE_VALUE);
+    FILE_DISPOSITION_INFO disposition{TRUE};
+    REQUIRE(SetFileInformationByHandle(pending, FileDispositionInfo, &disposition, sizeof(disposition)));
+
+    // The state really is the one being tested: an open is refused, and refused
+    // with the code an ACL denying delete would give.
+    HANDLE probe = CreateFileW(f.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    const DWORD probe_error = GetLastError();
+    if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+    REQUIRE(probe == INVALID_HANDLE_VALUE);
+    CHECK(probe_error == ERROR_ACCESS_DENIED);
+
+    std::thread release([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        CloseHandle(pending);
+    });
+    const DWORD e = write_file_atomically(f, "new", 2000);
+    release.join();
+    CHECK(e == ERROR_SUCCESS);
+    CHECK(get(f) == "new");
+    CHECK(no_temporary_files(s.dir));
+}
+
 TEST_CASE("a replace that can never succeed fails at once instead of retrying") {
     // MoveFileExW answers ERROR_ACCESS_DENIED for a reader holding the file and
     // for these alike; only the reader goes away. Waiting out the retry each
