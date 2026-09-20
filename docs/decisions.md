@@ -4586,6 +4586,28 @@ error -0.0000. That one test exercises the sandbox boundary in both directions.
 nothing, and a Flatpak cannot install a unit into the host's systemd. The app
 should start the daemon itself when it is sandboxed.
 
+### Starting the daemon from inside the sandbox
+
+`systemctl --user start isotone-daemon.service` reaches the sandbox, not the
+session, and a Flatpak cannot put a unit where the host's systemd would find
+one. When `FLATPAK_ID` is set the app now starts `isotone-daemon` directly and
+detached, rather than through systemd.
+
+Detached, because a child would go when the window is closed to the tray or
+quit, and the EQ with it. Measured: a detached daemon does outlive its
+`flatpak run`, and keeps its region, which is what matters. The cost is that
+`flatpak run` does not return while it lives, because the launcher waits for the
+sandbox to empty and the daemon is in it. That is inherent rather than a fault:
+the sandbox has to stay up for the daemon to keep running at all.
+
+**Not done, and worth knowing before this is called finished: the Flatpak does
+not start at login.** The `.deb` enables a user unit; the Flatpak has none, and
+the app's "launch at sign-in" writes an autostart file into
+`~/.var/app/io.github.isotone.Isotone/config`, which the desktop does not read.
+Doing it properly means the Background portal
+(`org.freedesktop.portal.Background`, `RequestBackground` with autostart), which
+is not wired up. Until it is, the Flatpak's EQ starts when the app is opened.
+
 **Found on the way: the sandboxed app ignores the desktop's light or dark
 setting.** The `.deb` app came up light on the owner's Cinnamon desktop and the
 Flatpak came up dark on the same desktop, minutes apart. Inside the sandbox the

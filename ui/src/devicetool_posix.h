@@ -65,6 +65,9 @@ signals:
 
 private:
     QString phase_, kind_, target_, reason_, details_;
+    // Set in the constructor when the app is in a Flatpak: the daemon is
+    // started directly and detached rather than through systemd.
+    bool detached_ = false;
     QString program_ = QStringLiteral("systemctl");
     QStringList args_{QStringLiteral("--user"), QStringLiteral("start"), QStringLiteral("isotone-daemon.service")};
     QProcess* process_ = nullptr;

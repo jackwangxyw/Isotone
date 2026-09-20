@@ -7,7 +7,25 @@
 #include <QGuiApplication>
 #include <QProcess>
 
-DevicetoolController::DevicetoolController(QObject* parent) : QObject(parent) {}
+DevicetoolController::DevicetoolController(QObject* parent) : QObject(parent) {
+    // In a Flatpak there is no systemd to talk to: `systemctl --user` inside a
+    // sandbox reaches the sandbox, not the session, and a Flatpak cannot put a
+    // unit where the host's systemd would find one. The daemon ships in the
+    // same Flatpak, so it is started directly instead.
+    //
+    // Detached, so it outlives the window: a child of the app would go when the
+    // app is closed to the tray or quit, and the EQ would go with it. The
+    // sandbox instance stays up while any process in it runs.
+    //
+    // It still finds the app's region: both are in the host's /dev/shm, which
+    // is what --device=shm is for (linux/packaging/flatpak, and plan section 12
+    // question 5).
+    if (!qEnvironmentVariableIsEmpty("FLATPAK_ID")) {
+        program_ = QStringLiteral("isotone-daemon");
+        args_.clear();
+        detached_ = true;
+    }
+}
 
 DevicetoolController::~DevicetoolController() {
     if (process_) {
@@ -35,6 +53,20 @@ void DevicetoolController::run(const QString& kind, const QString& guid, const Q
     }
     phase_ = QStringLiteral("running");
     emit changed();
+
+    if (detached_) {
+        qint64 pid = 0;
+        const bool started = QProcess::startDetached(program_, args_, QString(), &pid);
+        details_ = QStringLiteral("%1 %2\n%3")
+                       .arg(program_, args_.join(QLatin1Char(' ')),
+                            started ? QStringLiteral("started, pid %1").arg(pid)
+                                    : QStringLiteral("could not be started"));
+        phase_ = started ? QStringLiteral("done") : QStringLiteral("failed");
+        if (!started) reason_ = QStringLiteral("%1 could not be run.").arg(program_);
+        emit changed();
+        emit finished(kind_, target_);
+        return;
+    }
 
     delete process_;
     process_ = new QProcess(this);
