@@ -233,6 +233,7 @@ qt_add_qml_module(isotone_ui
         qml/Toast.qml
         qml/StatusDot.qml
         qml/OutputList.qml
+        qml/OutputPicker.qml
         qml/EqualizerView.qml
         qml/SpeakersView.qml
         qml/DevicesView.qml

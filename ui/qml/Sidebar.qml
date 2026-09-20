@@ -123,13 +123,15 @@ Rectangle {
             Text {
                 leftPadding: 10
                 bottomPadding: 8
-                text: "Outputs"
+                text: "Output"
                 font.family: Theme.font
                 font.pixelSize: 13
                 font.weight: Font.Medium
                 color: Theme.muted
             }
-            OutputList { width: parent.width }
+            // Shut, this is one row; open, it grows upward, because the column
+            // it is in is anchored to the sidebar's floor.
+            OutputPicker { width: parent.width }
             Item { width: 1; height: 10 }
             Rectangle { width: parent.width; height: 1; color: Theme.gridMajor }
             Item { width: 1; height: 12 }
