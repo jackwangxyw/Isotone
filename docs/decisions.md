@@ -4723,6 +4723,118 @@ unit enabled *and* the Flatpak. Two daemons would race for the same virtual
 sink at sign-in. A "start it only if none is running" check is a race at exactly
 the moment both start. It wants deciding, not guessing.
 
+## 2026-09-20: GNOME and KDE, on Wayland
+
+Two VMs built overnight for the desktops stage 6 had left (docs/notes/linux-vm-setup.md
+has how, and the two traps): **Isotone GNOME**, Ubuntu 26.04.1 with GNOME on
+Wayland, and **Isotone KDE**, Kubuntu 26.04.1 with Plasma 6 on Wayland. Both run
+a much newer stack than the 24.04 baseline: GCC 15, Qt 6.10.2, PipeWire 1.6.2,
+systemd 259.5, kernel 7.0.
+
+**Kubuntu 26.04 has no Plasma X11 session at all.** `/usr/share/xsessions` does
+not exist and `/usr/share/wayland-sessions` holds one file. So "Plasma on X11",
+which the plan listed as a thing to check, is not a thing to check any more.
+
+### The portal refuses global shortcuts to an app that is not in a Flatpak
+
+The headline, and it needed the real desktop to find. On Plasma Wayland the app
+takes the portal path correctly, calls `GlobalShortcuts.CreateSession`, and gets
+
+```
+error time=... sender=:1.37 -> destination=:1.103
+      error_name=org.freedesktop.portal.Error.NotAllowed reply_serial=14
+```
+
+so `BindShortcuts` never follows, nothing is registered, and a global hotkey
+does nothing at all. Nothing in the app reports this, because
+`setGlobalFailed` is only reached from the bind response, which never comes.
+Taken off a full `dbus-monitor` of the session while the app started;
+`GetConnectionCredentials` in the same trace shows why: `LinuxSecurityLabel`
+is `unconfined`, so the portal has no application ID to name the desktop's
+shortcut record with, and refuses.
+
+**GNOME does exactly the same thing**, with the same error on the same method,
+which rules out one desktop's quirk:
+
+```
+error ... sender=:1.59 -> destination=:1.99
+      error_name=org.freedesktop.portal.Error.NotAllowed reply_serial=12
+```
+
+**The same app in the Flatpak is allowed on both**, and it is worth saying what
+that looks like, because it is the shipping path on a Wayland desktop:
+
+- **Plasma** puts up **Global Shortcuts Requested**, "Isotone wants to register
+  the following 4 shortcuts", and lists EQ on / off, Mute, Next preset and
+  Previous preset against `Ctrl+Alt+Shift+E`, `+M`, `+PgDown` and `+PgUp`.
+  **GNOME** puts up **Add Keyboard Shortcuts** with the same four and the same
+  keys, written its way round (`Shift+Ctrl+Alt+E`). Both are the desktop
+  spelling `toPortalTrigger` asked for.
+- After the dialog, `~/.config/kglobalshortcutsrc` gains
+
+  ```
+  [io.github.isotone.Isotone]
+  _k_friendly_name=Isotone
+  eq=Ctrl+Alt+Shift+E,Ctrl+Alt+Shift+E,EQ on / off
+  mute=Ctrl+Alt+Shift+M,Ctrl+Alt+Shift+M,Mute
+  nextPreset=Ctrl+Alt+Shift+PgDown,Ctrl+Alt+Shift+PgDown,Next preset
+  previousPreset=Ctrl+Alt+Shift+PgUp,Ctrl+Alt+Shift+PgUp,Previous preset
+  ```
+
+  and on GNOME the trace shows `BindShortcuts` going on to
+  `org.gnome.Settings.GlobalShortcutsProvider`.
+- And it fires, on both. Measured with another window focused (Dolphin on
+  Plasma, Files on GNOME) and the keys put in at the virtual machine's keyboard
+  controller, which is a real keyboard as far as the compositor is concerned,
+  rather than through XTEST, which a Wayland compositor does not see. The EQ
+  toggle's track, in pixels off the screenshot:
+
+  | | before | after one press | after another |
+  |---|---|---|---|
+  | Plasma | (106, 167, 244) | (144, 150, 157) | (106, 167, 244) |
+  | GNOME | (106, 167, 244) | (144, 150, 157) | (106, 167, 244) |
+
+So global hotkeys on Wayland are a Flatpak feature, not a `.deb` feature, and
+the `.deb` should say so rather than leave a toggle that silently does nothing.
+**Not fixed, and it is a decision rather than a bug to patch**: the app could
+detect the refusal and say "your desktop refused", which is honest but useless;
+or the `.deb` could arrange for xdg-desktop-portal to derive a host application
+ID, which it does from the systemd scope a desktop launcher puts an app in
+(`app-<desktop id>-*.scope`). The second is the real fix and needs its own
+measurement: launching by hand over ssh lands in `session-N.scope` and produces
+no ID, which is how this was found.
+
+### What does work on both
+
+| | GNOME on Wayland | Plasma 6 on Wayland |
+|---|---|---|
+| the window | yes | yes, with the desktop's own decoration |
+| the tray icon | yes outside the sandbox, through the `ubuntu-appindicators` extension | yes outside the sandbox, natively |
+| the tooltip | `Isotone\n<output> · <preset>` | the same |
+| the tray menu | EQ and Mute with their keys, Output with every sink, Preset, Open Isotone, Quit | the same |
+| light or dark | follows the desktop | follows it in the Flatpak too, because the KDE runtime carries `xdg-config/kdeglobals:ro` |
+| `ctest` | 7 of 7 | 7 of 7 |
+| the Background portal | writes the same entry as Cinnamon's, no dialog | the same |
+
+**And one thing that did not work on either: the Flatpak's tray icon.** The
+manifest never granted `--talk-name=org.kde.StatusNotifierWatcher`, so the
+sandbox could not register an item and there was no icon at all, with nothing
+saying so. Fixed the same night (see the commit of that name); found only
+because the tray was checked by asking the watcher rather than by looking at a
+panel, which is the other lesson here.
+
+**The Flatpak follows the desktop's light and dark on Plasma and not on GNOME**,
+which is not a contradiction of the entry of 2026-09-20 that made it dark: the
+KDE runtime grants `xdg-config/kdeglobals:ro` by default, so on Plasma the
+sandboxed app reads the colour scheme and comes up light with the desktop. On
+GNOME there is no kdeglobals and it comes up dark, as designed.
+
+The tray was checked over D-Bus rather than by eye:
+`org.kde.StatusNotifierWatcher.RegisteredStatusNotifierItems` lists the item,
+`GetConnectionUnixProcessID` on it gives the app's own pid, and
+`com.canonical.dbusmenu.GetLayout` gives the menu above, with
+`toggle-state` on EQ and Mute.
+
 # Where things stand (2026-09-19)
 
 ## Done
@@ -4834,15 +4946,22 @@ copies files and calls it.
 
 1. ~~The Flatpak does not start at login.~~ Done through the Background portal
    (2026-09-20; "Launch at sign-in in a Flatpak"), measured in the installed
-   Flatpak on the owner's laptop. **Left open, and the owner's call: the app
-   starts at sign-in, the daemon does not**, so a Flatpak-only machine signs in
-   with no EQ until Devices is opened. Making the app start it would race the
-   `.deb`'s unit on a machine with both, which his laptop is.
+   Flatpak on the owner's laptop and again on both new VMs. **Left open, and
+   the owner's call: the app starts at sign-in, the daemon does not**, so a
+   Flatpak-only machine signs in with no EQ until Devices is opened. Making the
+   app start it would race the `.deb`'s unit on a machine with both, which his
+   laptop is.
 2. **Launch at sign-in on Windows** still needs one sign-out to confirm Windows
    runs the Run value. The value itself is right and the app is installed now.
-3. **GNOME, KDE and Wayland**, one VM each; none built
-   (docs/notes/linux-vm-setup.md). The only desktops tested are Cinnamon under
-   X11, on the VM and the owner's laptop.
+3. ~~GNOME, KDE and Wayland, one VM each; none built.~~ Both built and run
+   overnight on 2026-09-20 (docs/notes/linux-vm-setup.md, and "GNOME and KDE,
+   on Wayland"). Four things came out of it, three fixed the same night: the UI
+   backend not compiling on PipeWire 1.6, the daemon's unit not starting on
+   systemd 259, and the Flatpak having no tray icon anywhere. **Left open, and
+   the owner's call: global hotkeys do not work outside a Flatpak on Wayland**,
+   because the portal refuses an app it has no ID for, on GNOME and Plasma
+   alike. Plasma on X11 no longer exists to test: Kubuntu 26.04 ships a Wayland
+   session only.
 4. **`v0.1.0`**, when the owner says. The repository should be public first: the
    AppStream metadata points at it, and `appstreamcli` warns the URLs are
    unreachable until it is.
