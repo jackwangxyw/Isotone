@@ -65,13 +65,24 @@ finish-args:
   - --talk-name=org.freedesktop.portal.GlobalShortcuts
 
   # The tray icon. Qt's QSystemTrayIcon is a StatusNotifierItem, and an item
-  # only exists once it has registered with the watcher; without this the
-  # sandbox cannot reach the watcher and the icon is simply absent, with
-  # nothing said anywhere. Measured that way on GNOME and on Plasma
-  # (2026-09-20): the same build outside the sandbox registered an item on both
-  # and the Flatpak registered none. It matters more than a missing icon
-  # usually would, because launch at sign-in starts the app with --tray, and an
-  # app in the tray with no tray icon cannot be opened at all.
+  # only exists once it has registered with the watcher, so the sandbox has to
+  # be able to reach it. EasyEffects' manifest carries the same line.
+  #
+  # **This is necessary and it is not sufficient: the Flatpak still has no tray
+  # icon** (2026-09-20, measured on GNOME and on Plasma by asking the watcher
+  # for RegisteredStatusNotifierItems rather than by looking at a panel; the
+  # same build outside the sandbox registers an item on both, the Flatpak
+  # registers none, with this line in place and with --own-name=org.kde.* as
+  # well). What is known: the sandbox cannot own the name Qt publishes the item
+  # under, org.kde.StatusNotifierItem-<pid>-<n>, because the proxy answers
+  # RequestName with ServiceUnknown, and no --own-name pattern covers it
+  # (org.kde.StatusNotifierItem.* does not, the suffix is not a subtree;
+  # org.kde.* does and is far too broad). Why it still does not register with
+  # both granted is not diagnosed. decisions.md, "GNOME and KDE, on Wayland".
+  #
+  # It matters more than a missing icon usually would, because launch at
+  # sign-in starts the app with --tray, and an app in the tray with no tray
+  # icon cannot be opened at all.
   - --talk-name=org.kde.StatusNotifierWatcher
 
   # Launch at sign-in, read side. The Background portal writes the autostart

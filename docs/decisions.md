@@ -4816,12 +4816,32 @@ no ID, which is how this was found.
 | `ctest` | 7 of 7 | 7 of 7 |
 | the Background portal | writes the same entry as Cinnamon's, no dialog | the same |
 
-**And one thing that did not work on either: the Flatpak's tray icon.** The
-manifest never granted `--talk-name=org.kde.StatusNotifierWatcher`, so the
-sandbox could not register an item and there was no icon at all, with nothing
-saying so. Fixed the same night (see the commit of that name); found only
-because the tray was checked by asking the watcher rather than by looking at a
-panel, which is the other lesson here.
+**And one thing that did not work on either, and is still not working: the
+Flatpak's tray icon.** Asking the watcher for
+`RegisteredStatusNotifierItems` lists the item when the same build runs outside
+the sandbox, on both desktops, with `GetConnectionUnixProcessID` pointing back
+at the app; with the Flatpak it lists only kded6's on Plasma and only the
+update notifier's on GNOME. Found only because the tray was checked by asking
+the watcher rather than by looking at a panel, which is the lesson.
+
+The manifest was missing `--talk-name=org.kde.StatusNotifierWatcher`, which
+EasyEffects has and which the protocol needs, and that line is now in. **It did
+not fix it**, and the rest is not diagnosed. What was measured on the way:
+
+- The sandbox cannot own the name Qt publishes the item under,
+  `org.kde.StatusNotifierItem-<pid>-<n>`. `RequestName` for one comes back
+  `org.freedesktop.DBus.Error.ServiceUnknown`, which is how xdg-dbus-proxy
+  refuses.
+- No `--own-name` pattern covers that shape:
+  `org.kde.StatusNotifierItem.*` is refused, because `-<pid>-<n>` is not a
+  `.` subtree; `org.kde.*` is granted and is far too broad to ship.
+- With both `--talk-name=org.kde.StatusNotifierWatcher` and
+  `--own-name=org.kde.*` in place, the item still does not appear, so the name
+  is not the whole of it.
+
+**Open, and it blocks calling the Flatpak's launch at sign-in finished**,
+because that starts the app with `--tray` and an app in the tray with no icon
+cannot be reached at all.
 
 **The Flatpak follows the desktop's light and dark on Plasma and not on GNOME**,
 which is not a contradiction of the entry of 2026-09-20 that made it dark: the
@@ -4955,12 +4975,18 @@ copies files and calls it.
    runs the Run value. The value itself is right and the app is installed now.
 3. ~~GNOME, KDE and Wayland, one VM each; none built.~~ Both built and run
    overnight on 2026-09-20 (docs/notes/linux-vm-setup.md, and "GNOME and KDE,
-   on Wayland"). Four things came out of it, three fixed the same night: the UI
-   backend not compiling on PipeWire 1.6, the daemon's unit not starting on
-   systemd 259, and the Flatpak having no tray icon anywhere. **Left open, and
-   the owner's call: global hotkeys do not work outside a Flatpak on Wayland**,
-   because the portal refuses an app it has no ID for, on GNOME and Plasma
-   alike. Plasma on X11 no longer exists to test: Kubuntu 26.04 ships a Wayland
+   on Wayland"). Four things came out of it. Two are fixed and tested: the UI
+   backend not compiling on PipeWire 1.6, and the daemon's unit not starting on
+   systemd 259. Two are open:
+   - **The Flatpak has no tray icon**, on GNOME or on Plasma. One missing
+     `--talk-name` was found and added and did not fix it; the rest is
+     undiagnosed. This is the one to pick up first, because launch at sign-in
+     starts the app with `--tray`.
+   - **Global hotkeys do not work outside a Flatpak on Wayland**, because the
+     portal refuses an app it has no application ID for, on GNOME and Plasma
+     alike. A decision rather than a patch; the entry says what the options are.
+
+   Plasma on X11 no longer exists to test: Kubuntu 26.04 ships a Wayland
    session only.
 4. **`v0.1.0`**, when the owner says. The repository should be public first: the
    AppStream metadata points at it, and `appstreamcli` warns the URLs are
