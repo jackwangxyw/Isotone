@@ -8,7 +8,12 @@ Item {
     id: root
     implicitHeight: Math.max(leftColumn.implicitHeight, previewColumn.y + previewColumn.implicitHeight)
 
-    readonly property var themes: ["system", "dark", "light", "custom"]
+    // System is not offered in a Flatpak: the sandbox cannot read the desktop's
+    // setting, so it would be Dark wearing another name (owner, 2026-09-20).
+    readonly property var themes: AppSettings.sandboxed ? ["dark", "light", "custom"]
+                                                        : ["system", "dark", "light", "custom"]
+    readonly property var themeLabels: AppSettings.sandboxed ? ["Dark", "Light", "Custom"]
+                                                             : ["System", "Dark", "Light", "Custom"]
     // Custom starts from Dark (ui-spec.md, "Themes").
     readonly property var customColours: [["background", "Background", "#121519"], ["surface", "Surface", "#0e1115"],
                                           ["text", "Text", "#e8ebf1"], ["grid", "Grid", "#26292e"],
@@ -36,7 +41,7 @@ Item {
         SettingsSection { text: "Theme" }
         Segmented {
             objectName: "theme"
-            options: ["System", "Dark", "Light", "Custom"]
+            options: root.themeLabels
             current: root.themes.indexOf(AppSettings.theme)
             onPicked: (index) => AppSettings.theme = root.themes[index]
         }

@@ -21,6 +21,8 @@ class AppSettings : public QObject {
 
     // "system", "dark", "light" or "custom".
     Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY themeChanged)
+    // Whether the app is in a Flatpak, where "follow the system" cannot work.
+    Q_PROPERTY(bool sandboxed READ sandboxed CONSTANT)
     // 0 to 5 into Theme's accents; -1 is customAccent.
     Q_PROPERTY(int accent READ accent WRITE setAccent NOTIFY themeChanged)
     Q_PROPERTY(QString customAccent READ customAccent WRITE setCustomAccent NOTIFY themeChanged)
@@ -37,6 +39,7 @@ public:
     ~AppSettings() override;
 
     QString theme() const;
+    static bool sandboxed();
     void setTheme(const QString& v);
     int accent() const;
     void setAccent(int v);

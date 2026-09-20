@@ -30,7 +30,21 @@ bool AppSettings::write(const QString& key, const QVariant& value) {
     return true;
 }
 
-QString AppSettings::theme() const { return settings_->value(QStringLiteral("appearance/theme"), QStringLiteral("system")).toString(); }
+// "system" everywhere but a Flatpak, where it cannot mean anything: the sandbox
+// cannot read the desktop's setting and the portal reports no preference, so
+// Theme.qml's "not explicitly Light" reads as dark whatever the desktop is. The
+// app came up dark on a Cinnamon desktop that was light, minutes after the .deb
+// build of it came up light (2026-09-20). Rather than offer a choice that does
+// nothing, the Flatpak defaults to dark and does not offer System at all
+// (owner, 2026-09-20).
+bool AppSettings::sandboxed() { return !qEnvironmentVariableIsEmpty("FLATPAK_ID"); }
+
+QString AppSettings::theme() const {
+    const QString fallback = sandboxed() ? QStringLiteral("dark") : QStringLiteral("system");
+    const QString chosen = settings_->value(QStringLiteral("appearance/theme"), fallback).toString();
+    // A settings file carried in from a host install can still say "system".
+    return sandboxed() && chosen == QLatin1String("system") ? QStringLiteral("dark") : chosen;
+}
 void AppSettings::setTheme(const QString& v) {
     if (write(QStringLiteral("appearance/theme"), v)) emit themeChanged();
 }
