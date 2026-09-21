@@ -158,6 +158,40 @@ TEST_CASE("a band of bins reads as its loudest bin or as its mean power") {
     CHECK(wobble(n_mean) < wobble(n_loudest) * 0.9);
 }
 
+TEST_CASE("a rate of zero from the host's header does not take the spectrum's scale with it") {
+    // The engine's region carries a sample rate of 0 until a stream has locked,
+    // and any account that can open the region can write one. It used to be
+    // taken as the rate: every bin index became freqs / 0, and the silence a
+    // stopped player no longer sends was pushed 0 frames at a time, so the
+    // curve stopped falling.
+    SpectrumAnalyzer a;
+    std::vector<float> sine(SpectrumAnalyzer::kFftSize);
+    const double rate = 48000.0, hz = 1000.0;
+    for (size_t i = 0; i < sine.size(); ++i)
+        sine[i] = static_cast<float>(std::sin(2.0 * kPi * hz * static_cast<double>(i) / rate));
+    a.push(sine.data(), sine.size(), 1);
+    a.update(rate, 10.0);
+    REQUIRE(a.sample_rate() == doctest::Approx(rate));
+
+    double before = 0.0;
+    a.levels_at(&hz, 1, &before, SpectrumAnalyzer::Bands::Loudest);
+    REQUIRE(before > -6.0);   // a full-scale sine reads about 0 dBFS
+
+    a.update(0.0, 0.1);
+    CHECK(a.sample_rate() == doctest::Approx(rate));   // the last good rate stands
+    double after = 0.0;
+    a.levels_at(&hz, 1, &after, SpectrumAnalyzer::Bands::Loudest);
+    CHECK(after == doctest::Approx(before).epsilon(0.05));
+
+    // And the silence a stopped player no longer sends still reaches it, so the
+    // curve falls at the decay the settings ask for.
+    a.push_silence(static_cast<size_t>(a.sample_rate() * 1.0));
+    a.update(0.0, 1.0);
+    double fallen = 0.0;
+    a.levels_at(&hz, 1, &fallen, SpectrumAnalyzer::Bands::Loudest);
+    CHECK(fallen < before - 10.0);
+}
+
 TEST_CASE("the smoothing setting decides how spiky the curve is") {
     // The owner asked for a slider between spiky and smooth (2026-09-15).
     std::vector<double> spikes(120, -60.0);

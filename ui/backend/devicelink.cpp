@@ -275,7 +275,12 @@ uint32_t DeviceLink::read_audio(float* out, uint32_t max_frames, uint32_t* chann
     *channels = 0;
     if (target_.backend == Backend::native) {
         if (!ensure_region()) return 0;
-        *sample_rate = mapping_.params()->hdr.sample_rate;
+        // The header is the host's, in memory any authenticated user can write,
+        // and a rate of 0 is what a region carries before a stream has locked.
+        // Either way the caller keeps the rate it came with rather than dividing
+        // by it (the Linux side does the same).
+        const uint32_t rate = mapping_.params()->hdr.sample_rate;
+        if (rate != 0) *sample_rate = rate;
         return audio_ring_read(mapping_.ring(), kRingCapacityFrames, &ring_cursor_, out, max_frames, channels);
     }
     if (target_.backend == Backend::equalizer_apo && capture_ && capture_->running()) {

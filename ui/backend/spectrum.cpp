@@ -84,7 +84,11 @@ double SpectrumAnalyzer::loudest_db() const {
 }
 
 void SpectrumAnalyzer::update(double sample_rate, double elapsed_s) {
-    sample_rate_ = sample_rate;
+    // A rate of 0 or worse is a host header that has not been written yet, or
+    // one that was written by something else: keeping the last good rate leaves
+    // the levels a little stale, where taking it divides every bin index by
+    // zero and stops push_silence advancing at all.
+    if (std::isfinite(sample_rate) && sample_rate > 0.0) sample_rate_ = sample_rate;
     if (filled_ < fft_size_) return;
     for (size_t i = 0; i < fft_size_; ++i) work_[i] = {history_[(write_ + i) % fft_size_] * window_[i], 0.0};
     fft(work_);
