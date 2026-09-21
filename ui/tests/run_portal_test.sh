@@ -15,14 +15,14 @@ set -euo pipefail
 tests="$1"
 log="$(mktemp)"
 autostart="$(mktemp -d)"
-export MOCK_LOG="$log" REFUSE=mute ACTIVATE=eq MOCK_AUTOSTART_DIR="$autostart" MOCK_APP_ID=io.github.isotone.Isotone
+export MOCK_LOG="$log" REFUSE=mute ACTIVATE=eq MOCK_AUTOSTART_DIR="$autostart" MOCK_APP_ID=io.github.jackwangxyw.Isotone
 python3 "$(dirname "${BASH_SOURCE[0]}")/mock_portal.py" &
 mock=$!
 trap 'kill "$mock" 2>/dev/null || true; rm -rf "$log" "$log.refuse" "$autostart"' EXIT
 for _ in $(seq 1 100); do grep -q ready "$log" && break; sleep 0.05; done
 ISOTONE_MOCK_PORTAL_LOG="$log" QT_QPA_PLATFORM=offscreen "$tests" "-tc=global hotkeys bind through the GlobalShortcuts portal*"
 
-ISOTONE_MOCK_PORTAL_LOG="$log" QT_QPA_PLATFORM=offscreen FLATPAK_ID=io.github.isotone.Isotone \
+ISOTONE_MOCK_PORTAL_LOG="$log" QT_QPA_PLATFORM=offscreen FLATPAK_ID=io.github.jackwangxyw.Isotone \
     ISOTONE_AUTOSTART_DIR="$autostart" "$tests" "-tc=launch at sign-in in a Flatpak*"
 
 # And a third, against a second mock that refuses the shortcuts session

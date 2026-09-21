@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "autostart_xdg.h"
 #include "doctest.h"
@@ -141,24 +142,24 @@ TEST_CASE("in a Flatpak the entry is the host's, and named for the application i
     // What a sandbox actually has: XDG_CONFIG_HOME under ~/.var/app, which no
     // desktop reads, and $HOME the real one (measured in the sandbox on the
     // owner's laptop).
-    ::setenv("XDG_CONFIG_HOME", "/home/someone/.var/app/io.github.isotone.Isotone/config", 1);
-    ::setenv("FLATPAK_ID", "io.github.isotone.Isotone", 1);
+    ::setenv("XDG_CONFIG_HOME", "/home/someone/.var/app/io.github.jackwangxyw.Isotone/config", 1);
+    ::setenv("FLATPAK_ID", "io.github.jackwangxyw.Isotone", 1);
 
     CHECK(autostart_dir() == "/home/someone/.config/autostart");
     // The name the Background portal gives the entry it writes.
-    CHECK(autostart_path(autostart_dir()) == "/home/someone/.config/autostart/io.github.isotone.Isotone.desktop");
+    CHECK(autostart_path(autostart_dir()) == "/home/someone/.config/autostart/io.github.jackwangxyw.Isotone.desktop");
 
     // And outside one, the same two are XDG's.
     ::unsetenv("FLATPAK_ID");
-    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart");
+    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.jackwangxyw.Isotone/config/autostart");
     // The same name either way: the application ID is what a desktop file is
     // called, in a Flatpak or out of one.
     CHECK(autostart_path(autostart_dir()) ==
-          "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart/io.github.isotone.Isotone.desktop");
+          "/home/someone/.var/app/io.github.jackwangxyw.Isotone/config/autostart/io.github.jackwangxyw.Isotone.desktop");
 
     // An empty FLATPAK_ID is not a Flatpak.
     ::setenv("FLATPAK_ID", "", 1);
-    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.isotone.Isotone/config/autostart");
+    CHECK(autostart_dir() == "/home/someone/.var/app/io.github.jackwangxyw.Isotone/config/autostart");
     ::unsetenv("FLATPAK_ID");
 
     if (saved_xdg != nullptr) ::setenv("XDG_CONFIG_HOME", keep_xdg.c_str(), 1);
@@ -166,15 +167,21 @@ TEST_CASE("in a Flatpak the entry is the host's, and named for the application i
     if (saved_home != nullptr) ::setenv("HOME", keep_home.c_str(), 1);
 }
 
-TEST_CASE("the entry is named for the application id, and the old name is known") {
+TEST_CASE("the entry is named for the application id, and every old name is known") {
     // The GlobalShortcuts portal takes the application ID from the systemd unit
     // the desktop started the app in and looks for a desktop file of that name.
     // "isotone.desktop" gives the ID "isotone", which resolves to nothing,
-    // because what a package installs is io.github.isotone.Isotone.desktop.
-    CHECK(std::string(kAutostartFileName) == "io.github.isotone.Isotone.desktop");
-    CHECK(autostart_path("/c/autostart") == "/c/autostart/io.github.isotone.Isotone.desktop");
-    // The old name is still known, so an entry under it can be removed.
-    CHECK(std::string(kLegacyAutostartFileName) == "isotone.desktop");
-    CHECK(legacy_autostart_path("/c/autostart") == "/c/autostart/isotone.desktop");
-    CHECK(legacy_autostart_path("").empty());
+    // because what a package installs is io.github.jackwangxyw.Isotone.desktop.
+    CHECK(std::string(kAutostartFileName) == "io.github.jackwangxyw.Isotone.desktop");
+    CHECK(autostart_path("/c/autostart") == "/c/autostart/io.github.jackwangxyw.Isotone.desktop");
+    // Every name the entry has had, newest first, so one left behind by an older
+    // version can be read and removed. io.github.isotone.Isotone was the
+    // application ID until 2026-09-21, when it was renamed for the account the
+    // repository is actually under; an entry under it starts the app with an ID
+    // that now resolves to nothing.
+    const std::vector<std::string> legacy = legacy_autostart_paths("/c/autostart");
+    REQUIRE(legacy.size() == 2);
+    CHECK(legacy[0] == "/c/autostart/io.github.isotone.Isotone.desktop");
+    CHECK(legacy[1] == "/c/autostart/isotone.desktop");
+    CHECK(legacy_autostart_paths("").empty());
 }

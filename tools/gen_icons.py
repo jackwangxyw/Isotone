@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The reverse-DNS name Flatpak and AppStream want. Flatpak exports only files
 # named for the application ID, and the .deb is happy with the same name, so
 # there is one name rather than a rename in the Flatpak manifest.
-APP_ID = "io.github.isotone.Isotone"
+APP_ID = "io.github.jackwangxyw.Isotone"
 
 BOX = 24.0
 PROFILE = [-0.45, 1.00, -0.70, 0.70, -0.45]   # gain per bar, -1 to 1

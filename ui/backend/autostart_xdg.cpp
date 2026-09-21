@@ -75,8 +75,11 @@ std::string autostart_dir() {
     return under_home;
 }
 
-std::string legacy_autostart_path(const std::string& dir) {
-    return dir.empty() ? std::string() : dir + "/" + kLegacyAutostartFileName;
+std::vector<std::string> legacy_autostart_paths(const std::string& dir) {
+    std::vector<std::string> paths;
+    if (dir.empty()) return paths;
+    for (const char* name : kLegacyAutostartFileNames) paths.push_back(dir + "/" + name);
+    return paths;
 }
 
 std::string autostart_path(const std::string& dir) {

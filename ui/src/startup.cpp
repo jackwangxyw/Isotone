@@ -6,6 +6,9 @@
 #include <QCoreApplication>
 #include <QDir>
 
+#include <string>
+#include <vector>
+
 #if defined(_WIN32)
 #include "startup_registration.h"
 
@@ -57,16 +60,20 @@ QString Startup::runKey() {
 namespace {
 
 std::string entry_path() { return isotone::ui::autostart_path(Startup::runKey().toStdString()); }
-std::string legacy_path() { return isotone::ui::legacy_autostart_path(Startup::runKey().toStdString()); }
+std::vector<std::string> legacy_paths() {
+    return isotone::ui::legacy_autostart_paths(Startup::runKey().toStdString());
+}
 
-// The entry this version writes, or the one an older version left behind. Both
-// start the app; only the first gets it an application ID the GlobalShortcuts
-// portal will accept, so the old one is read but never written.
+// The entry this version writes, or the newest one an older version left
+// behind. They all start the app; only the first gets it an application ID the
+// GlobalShortcuts portal will accept, so the old ones are read but never
+// written.
 std::string live_path() {
     const std::string current = entry_path();
     if (isotone::ui::autostart_enabled(current)) return current;
-    const std::string legacy = legacy_path();
-    return isotone::ui::autostart_enabled(legacy) ? legacy : current;
+    for (const std::string& legacy : legacy_paths())
+        if (isotone::ui::autostart_enabled(legacy)) return legacy;
+    return current;
 }
 
 }  // namespace
@@ -93,10 +100,10 @@ bool Startup::setLaunchAtSignIn(bool on, bool tray) {
 
     const std::string exe = QCoreApplication::applicationFilePath().toStdString();
     const int error = on ? isotone::ui::write_autostart(entry_path(), exe, tray) : isotone::ui::remove_autostart(entry_path());
-    // Either way the old name goes: on, it would start the app a second time
-    // under an ID that resolves to nothing; off, it would go on starting it at
+    // Either way the old names go: on, they would start the app a second time
+    // under an ID that resolves to nothing; off, they would go on starting it at
     // all.
-    isotone::ui::remove_autostart(legacy_path());
+    for (const std::string& legacy : legacy_paths()) isotone::ui::remove_autostart(legacy);
     emit changed();
     return error == 0;
 }

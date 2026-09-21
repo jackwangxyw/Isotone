@@ -37,7 +37,7 @@ REFUSE = set(filter(None, os.environ.get("REFUSE", "").split(",")))
 ACTIVATE = os.environ.get("ACTIVATE", "")
 REFUSE_SESSION = os.environ.get("REFUSE_SESSION", "") != ""
 AUTOSTART_DIR = os.environ.get("MOCK_AUTOSTART_DIR", "")
-APP_ID = os.environ.get("MOCK_APP_ID", "io.github.isotone.Isotone")
+APP_ID = os.environ.get("MOCK_APP_ID", "io.github.jackwangxyw.Isotone")
 LOG_PATH = os.environ["MOCK_LOG"]
 log = open(LOG_PATH, "a", buffering=1)
 

@@ -572,7 +572,7 @@ TEST_CASE("an autostart entry under the old name is read, then replaced") {
     REQUIRE(dir.isValid());
     qputenv("ISOTONE_AUTOSTART_DIR", dir.path().toLocal8Bit());
     const QString legacy = dir.path() + QStringLiteral("/isotone.desktop");
-    const QString current = dir.path() + QStringLiteral("/io.github.isotone.Isotone.desktop");
+    const QString current = dir.path() + QStringLiteral("/io.github.jackwangxyw.Isotone.desktop");
 
     QFile old_entry(legacy);
     REQUIRE(old_entry.open(QIODevice::WriteOnly));
@@ -641,7 +641,7 @@ TEST_CASE("launch at sign-in in a Flatpak goes through the Background portal") {
     REQUIRE_FALSE(dir.isEmpty());
     // Named for the application ID, not isotone.desktop: that is what the portal
     // writes and so what there is to read.
-    const QString entry = dir + QStringLiteral("/io.github.isotone.Isotone.desktop");
+    const QString entry = dir + QStringLiteral("/io.github.jackwangxyw.Isotone.desktop");
 
     Startup startup;
     QSignalSpy changed(&startup, &Startup::changed);
@@ -653,13 +653,13 @@ TEST_CASE("launch at sign-in in a Flatpak goes through the Background portal") {
     CHECK(read_all(log).contains(QStringLiteral("RequestBackground autostart=True commandline=isotone --tray")));
     CHECK(QFile::exists(entry));
     CHECK(startup.launchAtSignIn());
-    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.isotone.Isotone --tray"));
+    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.jackwangxyw.Isotone --tray"));
     CHECK(changed.count() == 1);
 
     // Start in the tray off rewrites it through the portal as well.
     REQUIRE(startup.setStartInTray(false));
     CHECK(read_all(log).contains(QStringLiteral("RequestBackground autostart=True commandline=isotone reason=")));
-    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.isotone.Isotone"));
+    CHECK(startup.command() == QStringLiteral("flatpak run --command=isotone io.github.jackwangxyw.Isotone"));
 
     // Off: the portal removes it.
     REQUIRE(startup.setLaunchAtSignIn(false, false));

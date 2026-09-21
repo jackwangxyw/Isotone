@@ -366,9 +366,9 @@ if(WIN32)
 else()
     # The desktop's half of an installed app: the launcher, the icon theme and
     # the AppStream metadata GNOME Software and KDE Discover read.
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/io.github.isotone.Isotone.desktop"
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/io.github.jackwangxyw.Isotone.desktop"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/applications" COMPONENT app)
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/io.github.isotone.Isotone.metainfo.xml"
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/io.github.jackwangxyw.Isotone.metainfo.xml"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo" COMPONENT app)
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../linux/packaging/icons/"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/icons" COMPONENT app)

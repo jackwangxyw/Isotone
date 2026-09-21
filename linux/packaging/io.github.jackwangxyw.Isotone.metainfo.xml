@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 <!-- Copyright (C) 2026 The Isotone authors -->
 <component type="desktop-application">
-  <id>io.github.isotone.Isotone</id>
+  <id>io.github.jackwangxyw.Isotone</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-2.0-or-later</project_license>
 
@@ -22,7 +22,7 @@
     </p>
   </description>
 
-  <launchable type="desktop-id">io.github.isotone.Isotone.desktop</launchable>
+  <launchable type="desktop-id">io.github.jackwangxyw.Isotone.desktop</launchable>
 
   <developer id="io.github.jackwangxyw">
     <name>The Isotone authors</name>

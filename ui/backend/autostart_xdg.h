@@ -20,6 +20,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace isotone::ui {
 
@@ -28,15 +29,21 @@ namespace isotone::ui {
 // the desktop started the app in, looks for a desktop file of that name, and
 // refuses the app its keys when it finds none. An entry called isotone.desktop
 // gives the ID "isotone", and the installed desktop file is
-// io.github.isotone.Isotone.desktop, so nothing resolved and global hotkeys
+// io.github.jackwangxyw.Isotone.desktop, so nothing resolved and global hotkeys
 // were refused at every sign-in (decisions.md, "An application ID is what the
 // portal wants").
-inline constexpr char kAutostartFileName[] = "io.github.isotone.Isotone.desktop";
+inline constexpr char kAutostartFileName[] = "io.github.jackwangxyw.Isotone.desktop";
 
-// What it was called before 2026-09-20. Only ever removed: an entry left under
-// the old name would go on starting the app with an ID that resolves to
-// nothing.
-inline constexpr char kLegacyAutostartFileName[] = "isotone.desktop";
+// What the entry has been called before, newest first. Only ever read and
+// removed, never written: an entry left under an old name would go on starting
+// the app, and with an ID that now resolves to nothing.
+//   io.github.isotone.Isotone  the application ID until 2026-09-21, which named
+//                              a GitHub account that is not the repository's
+//   isotone                    before 2026-09-20, no application ID at all
+inline constexpr const char* kLegacyAutostartFileNames[] = {
+    "io.github.isotone.Isotone.desktop",
+    "isotone.desktop",
+};
 
 // $XDG_CONFIG_HOME/autostart, or $HOME/.config/autostart when XDG_CONFIG_HOME is
 // unset or not absolute, as the base directory specification requires. Empty
@@ -46,14 +53,15 @@ inline constexpr char kLegacyAutostartFileName[] = "isotone.desktop";
 // desktop reads the host's directory, and the sandbox's own is not it.
 std::string autostart_dir();
 
-// "<dir>/io.github.isotone.Isotone.desktop", or "<dir>/<FLATPAK_ID>.desktop" in
-// a Flatpak, which is what the Background portal names the entry it writes and
-// is the same name anywhere the ID is the usual one. Empty when `dir` is empty.
+// "<dir>/io.github.jackwangxyw.Isotone.desktop", or "<dir>/<FLATPAK_ID>.desktop"
+// in a Flatpak, which is what the Background portal names the entry it writes
+// and is the same name anywhere the ID is the usual one. Empty when `dir` is
+// empty.
 std::string autostart_path(const std::string& dir);
 
-// "<dir>/isotone.desktop": the entry as older versions wrote it, so it can be
+// The entries older versions wrote, newest first, so they can be read and
 // cleaned up. Empty when `dir` is empty.
-std::string legacy_autostart_path(const std::string& dir);
+std::vector<std::string> legacy_autostart_paths(const std::string& dir);
 
 // The file's contents: `exec` is the command, with --tray appended when `tray`.
 // A value in a desktop entry cannot carry a newline, so one in `exec` would

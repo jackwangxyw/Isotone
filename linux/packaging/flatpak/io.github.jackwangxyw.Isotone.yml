@@ -23,9 +23,9 @@
 #
 # Build and install, no root anywhere:
 #   flatpak-builder --user --install --force-clean build-flatpak \
-#       linux/packaging/flatpak/io.github.isotone.Isotone.yml
+#       linux/packaging/flatpak/io.github.jackwangxyw.Isotone.yml
 
-id: io.github.isotone.Isotone
+id: io.github.jackwangxyw.Isotone
 runtime: org.kde.Platform
 runtime-version: '6.11'
 sdk: org.kde.Sdk

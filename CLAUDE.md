@@ -163,8 +163,8 @@ cd ~/build-linux && cpack -G DEB && lintian --tag-display-limit 0 isotone-0.1.0-
 rm -rf ~/flat-src && mkdir ~/flat-src
 cd /mnt/c/Users/jackw/OneDrive/Documents/GitHub/Isotone && git ls-files -z | tar --null -T - -cf - | tar -xf - -C ~/flat-src
 cd ~/flat-src
-flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=$HOME/flat-repo \n    ~/flat-build linux/packaging/flatpak/io.github.isotone.Isotone.yml
-flatpak build-bundle $HOME/flat-repo $HOME/isotone-0.1.0.flatpak io.github.isotone.Isotone master
+flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=$HOME/flat-repo \n    ~/flat-build linux/packaging/flatpak/io.github.jackwangxyw.Isotone.yml
+flatpak build-bundle $HOME/flat-repo $HOME/isotone-0.1.0.flatpak io.github.jackwangxyw.Isotone master
 ```
 
 - `linux/spike` and `linux/daemon` are added only when pkg-config finds
