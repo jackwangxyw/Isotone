@@ -5144,6 +5144,325 @@ which lists tracked files only, so a new file that has not been staged is
 invisible to it however complete the working tree looks. Worth remembering: a
 Flatpak build can fail for a reason that has nothing to do with the Flatpak.
 
+## A review pass over everything, and five fixes (2026-09-21)
+
+A full read of the tree with every suite run on every target the project has,
+plus sanitizers and property probes the suites do not carry. Five defects came
+out of it, four in the product and one in a test, each fixed with a check that
+fails without the fix.
+
+### What was run, and what it said
+
+Everything already in the project was green on the first pass, which is worth
+stating because it is what made the findings findings rather than noise. The one
+exception arrived part way through, when the owner's AirPods connected and
+`devices_tests` started failing and kept failing; that is the fifth finding
+below, and it would have failed the same way on the first run had they been
+connected then.
+
+| check | result |
+|---|---|
+| `ctest` on Windows (MSVC 19.51) | 7 of 7 |
+| `ctest` on Linux (WSL, g++ 13.3) | 7 of 7 |
+| the APO self test, `check_shm_transport.py`, `gen_reference.py --check`, `gen_icons.py --check` | all pass |
+| `ui_tests` 50, `ui_model_tests` 129, `ui_qml_tests` 305 on Windows | pass |
+| `linux/ci-audio.sh`: stage 1c, stage 3, stage 4 through a real PipeWire graph | pass, the app's tone at -12.011 against -12.000 |
+| the whole tree built and tested on the owner's laptop (Mint 22.3, Qt 6.4.2) | 7 of 7 |
+
+Three things were added for this pass and are not part of the build:
+
+- **ASan and UBSan** over `core_tests`: 213 cases, 2,669,046 assertions, clean.
+- **ThreadSanitizer** over the same: one race, and it is the documented one.
+  `audio_ring_read`'s `memcpy` of the sample area against the writer's store
+  into it is deliberate: the reader copies what may be being written and
+  then drops it by comparing `pending_index`, which is how every lock-free audio
+  ring works. Nothing else races, the seqlock included. TSan in CI would need a
+  suppression for that one frame; it is not there today.
+- **Property probes** against the core, in the scratch directory rather than the
+  tree: 60,000 rounds of random and adversarial text through `parse_apo_config`,
+  `parse_curve`, `fit_curve`, `parse_speaker_setup` and `remap_channels` under
+  ASan/UBSan, clean; and 700 random states across five layouts, four rates and
+  six frequencies measured through `Processor` and compared with `magnitude_db`,
+  plus 1,400 rounds of hostile parameters and 700 of random block splitting.
+  Clean, which is the "what is drawn is what is heard" contract holding for the
+  engine. It is the drawing that was wrong, below. And 2,500 random states
+  through the Equalizer APO backend, each written as a device block beside
+  another device's and read back: the curve on every channel within 0.02 dB, the
+  speaker setup, mute and bypass unchanged, the other device's bytes untouched
+  and not one parse warning.
+
+### The curve was drawn at 48 kHz on every output
+
+`ResponseGraph` designed every band at a fixed `kSampleRate = 48000.0` while the
+engine designs them at the output's own rate, which the session already knows
+and already uses for the Auto preamp. A filter's shape depends on the rate it is
+designed at, so on any output that is not 48 kHz the curve was not the curve
+heard. Measured, worst error over 20 Hz to the output's Nyquist:
+
+| band | at 44.1 kHz | at 96 kHz | at 32 kHz |
+|---|---|---|---|
+| peak 15 kHz Q 4 +9 dB | 0.79 dB | 2.64 dB | 5.46 dB |
+| notch 12 kHz Q 10 | 0.82 dB | 2.88 dB | 6.53 dB |
+| low pass 18 kHz Q 0.707 | 3.56 dB | 3.89 dB | 0.25 dB |
+| peak 1 kHz Q 1 +6 dB | 0.003 dB | 0.014 dB | 0.024 dB |
+
+So it never showed below about 3 kHz and never on a 48 kHz output, which is why
+it survived the owner's own use: both his outputs run at 48 kHz. The AirPods in
+the Devices list are 44.1 kHz.
+
+The graph now asks the session for the rate, as `autoPreampValue` does. One
+thing that follows from it and is worth knowing: the core's `response()` is
+unity above Nyquist, so on an output whose rate is under 40 kHz the plot is flat
+from its Nyquist to 20 kHz. That is the honest answer, since nothing up there
+reaches the output at all, and it is a great deal closer than drawing the
+48 kHz shape across the whole range; an 8 kHz Bluetooth headset, which this
+machine has in its list while it is unplugged, was being drawn entirely wrong.
+Whether that stretch deserves a mark of its own is a question for the owner. The
+import preview (`CurvePreview`) drew at 48 kHz for the same reason and now takes
+the rate of the output the file is for. Not changed: `filterglyph` and the
+Appearance preview, which draw a shape rather than an output, and
+`fit_curve`'s own rate, since a preset is for every output unless it is narrowed
+and 48 kHz is the neutral choice there.
+
+The test is in `ui_model_tests`: the graph's composite at 16.2 kHz against
+`magnitude_db` at 44.1, 48, 96 and 192 kHz, with a check that the rates really
+do differ so it cannot pass vacuously. Reverted, it reads 2.94 dB where the
+engine plays 5.58 dB.
+
+### A pre-mix IsoAPO reported the post-mix class
+
+`IsoApo` was always constructed with `regPostMixProperties`, and
+`ClassFactory::clsid_` was stored and never used, so an instance created as
+`ISOAPO_PRE_MIX_GUID` answered `GetRegistrationProperties` with the post-mix
+CLSID. The flags in the two registrations are identical, which is why it has
+never been felt, but an object that misreports what class it is is wrong and the
+factory already knew the answer. The class now reaches the constructor and picks
+its own properties. The self test creates one of each and reads the CLSID back.
+
+### The installer did not notice a running Isotone
+
+Windows keeps a running image open for reading and deleting only, so its exe
+cannot be opened for writing while the app is up (measured: `File.Open` with
+`Write` is denied at every share mode while it runs and succeeds the moment it
+exits). Two consequences, neither handled:
+
+- An install over a running one stopped at NSIS's "error opening file for
+  writing" with Abort, Retry, Ignore, and Ignore left a stale exe.
+- An uninstall ran `machine-uninstall`, unregistered the class, and then left
+  `isotone.exe` and the whole Qt runtime in `$INSTDIR`: `RMDir /r` cannot take
+  the files that are open and `RMDir /REBOOTOK` will not take a directory that
+  still has files in it, so nothing was scheduled to remove them either. The app
+  went on running with a tray icon offering an engine that was no longer
+  registered.
+
+Both sections now call `CheckNotRunning` first, which opens
+`$INSTDIR\isotone.exe` for append and asks the person to quit the app and
+click Retry when that is refused; a silent run aborts and says why. `FileOpen`
+rather than a process list: it asks exactly the question that matters and needs
+no plugin. Checked both ways against a harness built from the macro itself,
+with the app running and with it stopped.
+
+### The spectrum took the host's sample rate on trust
+
+`DeviceLink::read_audio` on Windows wrote the shared header's `sample_rate` into
+the caller's variable whatever it held; the Linux side already ignored a zero.
+A region carries zero until a stream has locked, and the header is in memory any
+authenticated user can write, which the ring reader already treats as hostile.
+A zero reached `SpectrumAnalyzer::update`, which stored it, and then every bin
+index was a frequency divided by zero and `push_silence(sample_rate * elapsed)`
+pushed nothing, so a spectrum that had stopped arriving froze instead of falling
+at the decay the settings ask for. Both sides now keep the last good rate: the
+Windows reader as the Linux one does, and the analyzer itself, which is where it
+is divided by. Reverted, the analyzer reads -120 dB where it should read
+-1.3 dB.
+
+### `devices_tests` could not pass while the AirPods were connected
+
+Found on the last confirmation run and then reproduced six times out of six,
+which is what made it worth chasing rather than writing off as a flake. The
+cross-check "endpoints, formats and engines match isotone-devicetool" requires
+that every render endpoint `devicetool list` names was also returned by
+`enumerate_render_endpoints`. Windows does not guarantee that.
+
+`devicetool` reads `MMDevices\Render`; the library asks the audio API. The
+owner's AirPods keep a render key for their Hands-Free endpoint,
+`{136126fa-...}`, and the key says `DeviceState = 0x1`, active. Measured with a
+scratch probe over the API itself:
+
+```
+read_render_endpoint:  0x80070490   (ERROR_NOT_FOUND)
+GetDevice(id):         0x00000000   GetState: 0x00000001  (active)
+EnumAudioEndpoints(eRender, DEVICE_STATEMASK_ALL): 35 endpoints, not among them
+```
+
+So it is not a stale key: the API will hand that endpoint over by id and call it
+active, and leave it out of its own full enumeration. That is what Windows does
+with a Bluetooth Hands-Free render endpoint while the device is in A2DP, and it
+appeared here only because the AirPods connected part way through the pass.
+
+Following the enumeration is right for the app. An endpoint Windows will not
+list is one nothing plays through, and Windows' own Sound settings does not
+offer it either; `Outputs` needs `DEVICE_STATE_ACTIVE` and a format from the
+library, so no phantom can become an editable output. It is the test that was
+asserting something untrue. It now reports such an endpoint and carries on, and
+keeps its teeth: the library's two entry points must still agree with each other
+(`read_render_endpoint` has to refuse it too), the counts must still add up, and
+a library that enumerated nothing at all would leave every endpoint hidden,
+which is a failure. 18 of 18, four runs in a row, 35 endpoints compared and the
+one reported.
+
+**Left alone, deliberately** (owner, 2026-09-21). `read_render_endpoint` is
+built on the same enumeration, so it refuses an endpoint `GetDevice` would
+resolve: `devicetool status {136126fa-...}` describes the endpoint and
+`devicetool layouts` on the same GUID in the same second answers "no such render
+endpoint". Asking `GetDevice` first would make the by-id path agree with
+Windows, and it is what `check_speaker_layout` and `set_speaker_layout` resolve
+through. Three things argue against doing it: it is unreachable from the app,
+since `Outputs` and `Devices` both list from the enumeration and a hidden
+endpoint therefore never becomes a row with a Test button or a layout picker;
+the only way to reach it is to type the GUID into `isotone-devicetool` by hand;
+and no test can be written that fails without the change, because the case needs
+Windows to be of two minds about a real endpoint and cannot be synthesised.
+Recorded here so the next person who meets it knows it is known.
+
+### The application ID is renamed for the account the repository is under
+
+`io.github.isotone.Isotone` reads as `github.com/isotone`, which is not the
+owner's and is not one he wants (owner, 2026-09-21). The ID is now
+`io.github.jackwangxyw.Isotone`, which is the repository's own account and the
+form Flathub asks for if it is ever submitted there.
+
+Done now rather than after `v0.1.0` because the ID is the app's identity on
+Linux and a rename after a release is a different app to everyone who has it:
+their old Flatpak stays installed, and the autostart entry the Background portal
+wrote keeps starting it under an ID that resolves to nothing, which is silently
+no global hotkeys.
+
+Twelve files renamed (the desktop entry, the AppStream metadata, the Flatpak
+manifest and nine icon theme files) and the string changed in
+`ui/CMakeLists.txt`, `tools/gen_icons.py`, `ui/backend/autostart_xdg.h`,
+`CLAUDE.md` and four test files. `<developer id>` in the metadata was already
+`io.github.jackwangxyw`, so it now agrees with the component ID instead of
+contradicting it.
+
+The one piece of real work was the upgrade path. `autostart_xdg.h` already knew
+one old entry name, `isotone.desktop` from before 2026-09-20, read as a fallback
+and removed on any write. That is now a list, newest first, with
+`io.github.isotone.Isotone.desktop` at its head, and `startup.cpp` reads the
+whole list and removes the whole list. So a `.deb` install that had launch at
+sign-in on keeps it on, and the stale entry goes the first time the toggle is
+touched.
+
+**A Flatpak cannot do that for itself.** The host's autostart directory is
+mounted read-only (`--filesystem=xdg-config/autostart:ro`) and the entry belongs
+to the Background portal, which only ever writes its own. So an existing
+sandboxed install leaves `io.github.isotone.Isotone.desktop` on the host, and
+uninstalling the old Flatpak does not take it: it has to be deleted by hand,
+once, on each machine that has one.
+
+The one rough edge, and it is the same one the previous rename had: outside a
+Flatpak the app reads an old entry as "on" and reports the toggle on, but does
+not rewrite it until the toggle is touched. So a `.deb` or build-tree install
+that had launch at sign-in on keeps starting under the old entry, and its
+application ID resolves to nothing, so global hotkeys do not bind until the
+toggle is used once. Migrating at startup instead was considered and left: in a
+Flatpak the write is a portal call that can prompt, so an app cannot do it
+unasked, and doing it on one platform and not the other is worse than doing it
+nowhere.
+
+### The renamed Flatpak, verified at a real sign-in on both desktops
+
+The packaging was rebuilt and the machines were moved over rather than left for
+later (owner, 2026-09-21).
+
+| check | result |
+|---|---|
+| `.deb` rebuilt, contents listed | ships the desktop entry, the metadata and all nine icons under the new name |
+| `lintian` | clean but for the three deliberate `systemctl` warnings |
+| `appstreamcli validate` | the ID is accepted; only the two known unreachable-URL warnings, which want the repository public |
+| `desktop-file-validate` | clean |
+| Flatpak rebuilt and bundled under the new ID | exports `io.github.jackwangxyw.Isotone.{desktop,metainfo.xml}` |
+
+Then the three machines. The laptop had the old Flatpak and, because launch at
+sign-in had been turned back off there on 2026-09-20, no autostart entry to
+clean up; the new bundle installed and runs. Both VMs had the old Flatpak
+**and** a stale entry, and the two were not the same thing, which is worth
+recording: KDE's was the Background portal's (`X-XDP-Autostart`, running
+`flatpak run`), GNOME's was the unsandboxed app's own, naming itself for the
+application ID but running `/home/jackw/build/ui/isotone --tray`.
+
+On both, the old Flatpak was removed, the new one installed, the stale entry
+deleted, and launch at sign-in turned on again through the new Flatpak. The
+portal wrote `io.github.jackwangxyw.Isotone.desktop` on each. Then a real power
+cycle, and at sign-in:
+
+- **Plasma**: the app came up in its sandbox, started its own daemon, which
+  created the region and linked both channels; the tray item registered; and
+  `xdg-desktop-portal-kde` logged `BindShortcuts` with all four shortcuts and
+  their triggers. No `NotAllowed`, which is what a shell-started app still gets.
+- **GNOME**: the same, and the journal names the process
+  `io.github.jackwangxyw.Isotone.desktop[2548]`, so the session knows it by the
+  new ID; `org.gnome.Settings.GlobalShortcutsProvider` was activated, which is
+  the path that works there.
+
+So the rename carries the whole stage 6 Linux story with it, checked rather than
+assumed. Both VMs were powered off again afterwards. GNOME now autostarts the
+Flatpak rather than the build tree, and its `~/build` predates the rename, so a
+build-tree check there wants the tree synced again first.
+
+One aside worth keeping: `systemctl reboot` over ssh is refused by polkit on
+these VMs ("interactive authentication required") and returns 0, so it looks
+like it worked and nothing happens. Two minutes went into reading a state that
+had never rebooted. Power cycle them with VirtualBox's ACPI button instead, and
+answer Plasma's confirmation with Enter.
+
+### Looked at and left alone
+
+- `speaker_channel`'s bit walk looked like it could run for ever at the top bit.
+  It cannot: `bit` reaches the speaker bit exactly and the loop ends. Only a
+  multi-bit argument above 0x80000000 would wrap, and every caller passes one of
+  eight fixed single bits. No change.
+- `EqSession::nextBandId` can return an id already in use, but only for a state
+  carrying both `UINT32_MAX` and `UINT32_MAX - 1`, which nothing but a crafted
+  param block produces, and the processor is specified to tolerate shared ids.
+  No change.
+- The Flatpak's `--own-name=org.kde.StatusNotifierItem-2-1` is exact rather than
+  general. It holds because the app makes one `QSystemTrayIcon`, on the stack,
+  shown once and never hidden, and the sandbox's pid namespace makes the app
+  pid 2. Worth knowing it is a pair of facts rather than a rule.
+- The application ID is `io.github.isotone.Isotone` while the repository is
+  `github.com/jackwangxyw/Isotone`. The reverse-DNS form claims the GitHub
+  account `isotone`. It is the owner's call, and it is the kind of thing that is
+  cheap now and expensive after a release: the ID names the Flatpak, the desktop
+  file, the icon, the autostart entry the portal resolves and the D-Bus names.
+- `gen_icons.py --check` is in CLAUDE.md's local list and not in CI.
+
+### Two things about the owner's own machines
+
+- The laptop's installed `.deb` is the 0.1.0 built before 2026-09-20: its unit
+  still has `PrivateDevices=true` and its daemon has no lock. `PrivateDevices`
+  is harmless on systemd 255, which is what Mint 22.3 has, so nothing there is
+  broken; the missing lock is. A second daemon started by hand ran alongside the
+  first, made a second virtual sink of the same name, and on exit unlinked the
+  region the first was still using, which is exactly what the lock was added to
+  stop. The current build, synced and built on the laptop for this pass, refuses
+  the second daemon and leaves with 0. He wants the new `.deb` when he next
+  installs one.
+- The daemon was inactive on the laptop because the session has been up since
+  2026-09-08 and the unit was enabled on 2026-09-19: a symlink does not start a
+  unit in a user manager that is already running. It starts at his next sign-in.
+  Started by hand for this pass and stopped again, and the region it left behind
+  was removed; the lock object stays, as designed.
+
+The GNOME and KDE VMs were started for this pass and powered off again. On
+Plasma the Flatpak was up from its own sign-in with its tray icon, its own
+daemon and the lock in `/dev/shm`, which is the whole stage 6 Flatpak story
+working unattended.
+`systemctl --user --machine=<uid>@.host`, which `prerm` uses, answers on
+systemd 259 as well as 255. The Mint VM was started as well and never left the
+VirtualBox splash, which is the stall of 2026-09-19 again; nothing was done in
+it and it was powered off.
+
 # Where things stand (2026-09-19)
 
 ## Done
@@ -5262,6 +5581,14 @@ copies files and calls it.
    one daemon at a time").
 2. **Launch at sign-in on Windows** still needs one sign-out to confirm Windows
    runs the Run value. The value itself is right and the app is installed now.
+   The owner's recollection (2026-09-21) is that a prerelease did try to start
+   at a sign-in and was stopped by a Qt error, which is not written down
+   anywhere and is worth reading carefully: it says Windows *does* run the Run
+   value, and that whatever ran then could not find its Qt runtime. A build
+   directory started from the Run key has no Qt beside it; the installed tree
+   does, because `cmake --install` runs windeployqt. So the likely reading is
+   that the mechanism works and the old failure was the path, not the key. It
+   is still one sign-out from being known rather than inferred.
 3. ~~GNOME, KDE and Wayland, one VM each; none built.~~ Both built and run
    overnight on 2026-09-20 (docs/notes/linux-vm-setup.md, and "GNOME and KDE,
    on Wayland"). Four things came out of it. Two are fixed and tested: the UI
@@ -5299,6 +5626,12 @@ copies files and calls it.
 - **The QtQuick.Controls styles**, about 9 MB, ship in the Windows installer and
   are probably unused: they arrive through QtQuick.Dialogs, whose FileDialog is
   native on Windows. The owner's call was to leave them.
+- ~~**The application ID claims an account that is not the repository's**.~~
+  Settled the same day: it is `io.github.jackwangxyw.Isotone` now. What is left
+  is one manual step per machine that has the old Flatpak, below.
+- **`gen_icons.py --check` is not in CI** (2026-09-21), though it is in
+  CLAUDE.md's local list. An icon that stops matching the mark is caught only by
+  whoever runs it by hand.
 
 **State of the owner's machines.** Windows: Isotone installed at
 `C:\Program Files\Isotone` by the installer, on two outputs (below). Laptop: the
@@ -5310,6 +5643,14 @@ back off**, because of the tray bug above: with it on he would sign in to an
 Isotone with no window and no tray icon, which is a process he cannot reach
 rather than a feature. The toggle in Settings, General turns it on again when
 the tray is fixed.
+
+The laptop's `.deb` is the 0.1.0 built before 2026-09-20 (2026-09-21): its unit
+still carries `PrivateDevices=true`, which systemd 255 accepts, and its daemon
+has no lock, which a hand-started second daemon proved by running alongside the
+first and unlinking its region on the way out. Nothing is broken by it as long
+as only the unit starts the daemon, and the next `.deb` he installs fixes both.
+The current tree is built there as `~/Isotone-src/build`, where all seven suites
+pass on Qt 6.4.2 and the second daemon leaves with 0.
 
 Mint VM: the `.deb` installed, powered off. **Two new VMs**, *Isotone GNOME*
 and *Isotone KDE*, built on 2026-09-20 and left powered off; `ssh isotone-gnome`
