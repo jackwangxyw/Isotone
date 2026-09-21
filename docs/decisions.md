@@ -5633,6 +5633,13 @@ copies files and calls it.
   CLAUDE.md's local list. An icon that stops matching the mark is caught only by
   whoever runs it by hand.
 
+**Laptop brought up to date (2026-09-21).** The `.deb` built from this tree is
+installed: 0.1.0, the daemon carries the one-at-a-time lock, and the unit no
+longer sets `PrivateDevices` (only the comment saying why remains;
+`systemctl --user show` reads `PrivateDevices=no`). Enabled, inactive, so it
+starts at his next sign-in. The Flatpak there is
+`io.github.jackwangxyw.Isotone` now.
+
 **State of the owner's machines.** Windows: Isotone installed at
 `C:\Program Files\Isotone` by the installer, on two outputs (below). Laptop: the
 `.deb` installed and enabled, the Flatpak installed (reinstalled 2026-09-20 with
