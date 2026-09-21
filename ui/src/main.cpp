@@ -20,10 +20,11 @@
 //   --tray                    start hidden in the tray (launch at sign-in with Start in the tray)
 //   --key <keys>              press keys ("Ctrl+M") after the clicks (repeatable, in order)
 //   --size <w>x<h>            the window's size (held to its minimum)
+//   --update-url <url>        check for updates there, file:// included, instead of GitHub (also under --screenshot)
 //
 // One instance per user and data directory: a second launch shows the running
 // window and exits (singleinstance.h). A screenshot run is always its own, and
-// registers no global hotkeys and no tray icon.
+// registers no global hotkeys and no tray icon, and checks for no update.
 
 #include <QCommandLineParser>
 #include <QSystemTrayIcon>
@@ -46,6 +47,7 @@
 #endif
 
 #include "apppaths.h"
+#include "appsettings.h"
 #include "devicesmodel.h"
 #if defined(_WIN32)
 #include "devicetoolcontroller.h"
@@ -64,6 +66,7 @@
 #include "shortcutregistry.h"
 #include "singleinstance.h"
 #include "traymenu.h"
+#include "updatecheck.h"
 
 #include <cstdio>
 #include <cstring>
@@ -119,6 +122,9 @@ int main(int argc, char* argv[]) {
     parser.addOption(key);
     const QCommandLineOption size(QStringLiteral("size"), QStringLiteral("Size the window to <w>x<h>."), QStringLiteral("wxh"));
     parser.addOption(size);
+    const QCommandLineOption update_url(QStringLiteral("update-url"), QStringLiteral("Check for updates at <url>."),
+                                        QStringLiteral("url"));
+    parser.addOption(update_url);
     parser.process(app);
     // Before any singleton exists: they read these when created.
     if (parser.isSet(data_dir)) AppPaths::setDataDir(parser.value(data_dir));
@@ -295,6 +301,13 @@ int main(int argc, char* argv[]) {
     }
     if (parser.isSet(quit_after)) {
         QTimer::singleShot(static_cast<int>(parser.value(quit_after).toDouble() * 1000), &app, [] { QCoreApplication::exit(0); });
+    }
+    // Settings, General, Check for updates on startup.
+    if (parser.isSet(update_url) || !checking) {
+        auto* settings = isotoneSingleton<AppSettings>(&engine, "AppSettings");
+        auto* updates = isotoneSingleton<UpdateCheck>(&engine, "UpdateCheck");
+        if (!settings || !updates) return 1;
+        if (settings->value(QStringLiteral("general/checkForUpdates"), true).toBool()) updates->check(parser.value(update_url));
     }
 
     auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());

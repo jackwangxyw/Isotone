@@ -192,6 +192,8 @@ qt_add_library(isotone_ui STATIC
     src/startup.h
     src/traymenu.cpp
     src/traymenu.h
+    src/updatecheck.cpp
+    src/updatecheck.h
     ${ISOTONE_UI_PLATFORM}
 )
 # Settings, About: the version, defined once in project().
@@ -283,6 +285,7 @@ qt_add_qml_module(isotone_ui
         qml/EarBandList.qml
         qml/SweepSlider.qml
         qml/VolumeDialog.qml
+        qml/UpdateNotice.qml
     RESOURCES
         fonts/InstrumentSans-Regular.ttf
         fonts/InstrumentSans-Medium.ttf
@@ -400,7 +403,7 @@ if(ISOTONE_BUILD_TESTS)
     endif()
     add_executable(ui_model_tests tests/test_model.cpp tests/test_speakers_model.cpp tests/test_undo.cpp tests/test_presets.cpp
                    tests/test_settings.cpp tests/test_session_fixes.cpp tests/test_spectrum_display.cpp
-                   tests/test_eqbyear.cpp tests/test_logomark.cpp tests/test_rig.h ${ISOTONE_UI_MODEL_TESTS_PLATFORM})
+                   tests/test_eqbyear.cpp tests/test_logomark.cpp tests/test_updatecheck.cpp tests/test_rig.h ${ISOTONE_UI_MODEL_TESTS_PLATFORM})
     target_link_libraries(ui_model_tests PRIVATE isotone_ui Qt6::Test)
     target_compile_definitions(ui_model_tests PRIVATE ISOTONE_UI_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/devices")
     target_include_directories(ui_model_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests/third_party)

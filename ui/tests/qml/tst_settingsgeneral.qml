@@ -59,7 +59,8 @@ Item {
             const toggles = [["startInTray", "general/startInTray"], ["keepInTray", "general/keepInTray"],
                              ["switchOnDefaultOutput", "general/switchOnDefaultOutput"],
                              ["autoPreampForNew", "general/autoPreampForNew"],
-                             ["alwaysOnTop", "window/alwaysOnTop"]]
+                             ["alwaysOnTop", "window/alwaysOnTop"],
+                             ["checkForUpdates", "general/checkForUpdates"]]
             for (const [name, key] of toggles) {
                 const t = child(name)
                 verify(t !== null, name)

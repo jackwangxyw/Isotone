@@ -42,6 +42,14 @@ Item {
                 onToggled: (on) => AppSettings.setValue("general/keepInTray", on)
             }
         }
+        SettingsRow {
+            label: "Check for updates on startup"
+            Toggle {
+                objectName: "checkForUpdates"
+                checked: GeneralSettings.checkForUpdates
+                onToggled: (on) => AppSettings.setValue("general/checkForUpdates", on)
+            }
+        }
 
         SettingsSection { text: "Window" }
         SettingsRow {

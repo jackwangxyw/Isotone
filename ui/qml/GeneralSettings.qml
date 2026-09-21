@@ -14,6 +14,7 @@ QtObject {
 
     property bool startInTray: true
     property bool keepInTray: true
+    property bool checkForUpdates: true
     property bool switchOnDefaultOutput: true
     property bool autoPreampForNew: true
     // The window stays over other windows (owner, 2026-09-16).
@@ -54,6 +55,7 @@ QtObject {
     function read() {
         startInTray = flag("general/startInTray", true)
         keepInTray = flag("general/keepInTray", true)
+        checkForUpdates = flag("general/checkForUpdates", true)
         switchOnDefaultOutput = flag("general/switchOnDefaultOutput", true)
         autoPreampForNew = flag("general/autoPreampForNew", true)
         alwaysOnTop = flag("window/alwaysOnTop", false)

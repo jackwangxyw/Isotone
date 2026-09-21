@@ -5463,6 +5463,38 @@ systemd 259 as well as 255. The Mint VM was started as well and never left the
 VirtualBox splash, which is the stall of 2026-09-19 again; nothing was done in
 it and it was powered off.
 
+## Check for updates on startup (2026-09-20)
+
+Added before 0.1.0, because a 0.1.0 without it cannot tell anyone about 0.2.0.
+The owner's decisions: all three builds check, including the `.deb` and the
+Flatpak that a package manager also updates; a newer release shows a notice that
+links to its page, nothing is downloaded; on by default, with Check for updates
+on startup in Settings, General; and a start in the tray stays silent until the
+window is opened.
+
+- `UpdateCheck` (`ui/src/updatecheck.h`) asks
+  `api.github.com/repos/jackwangxyw/Isotone/releases/latest` once per start. A
+  release counts when it is not a draft or a pre-release and its tag is
+  `v?X.Y.Z`, compared as numbers (0.10.0 is after 0.9.0). The page it opens is
+  built from the tag, not taken from the reply. A failed request finds nothing
+  and says why on stderr; GitHub answers 404 until the first release exists.
+- `UpdateNotice.qml`: the owner's mock (approved 2026-09-20), 320 px, 24 px in
+  from the bottom right of the window, over whatever is there. It shows once a
+  release is found and the window is visible, fades out after 8 s, held while
+  the pointer is over it; Later, close and View release put it away until the
+  next start.
+- The Flatpak gains `--share=network`, which it had not needed until now.
+- `--update-url <url>` points the check elsewhere, `file://` included, and runs
+  it under `--screenshot`, which otherwise checks nothing.
+
+Measured: the app reaches GitHub over HTTPS from the Windows build (Schannel,
+already shipped as `tls/qschannelbackend.dll`) and the Linux one (OpenSSL,
+Qt 6.4.2), and from inside the Flatpak built with the new permission
+(`shared=network;ipc;` in its metadata), and gets the 404 that curl gets. `test_updatecheck.cpp` (5 cases)
+and `tst_updatenotice.qml` (6) cover it, and five mutations (the window
+ignored, the pointer ignored, no fade, a textual version comparison, a
+pre-release accepted) each fail a test.
+
 # Where things stand (2026-09-19)
 
 ## What `v0.1.0` is waiting on (2026-09-21)

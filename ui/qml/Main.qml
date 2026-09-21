@@ -191,6 +191,8 @@ Window {
 
         // A toast: text and an optional action, for a few seconds (Toast.qml).
         Toast { centreOffset: sidebar.width / 2 }
+        // A newer release (UpdateCheck), once the window is open.
+        UpdateNotice {}
     }
 
     PressWatch {
