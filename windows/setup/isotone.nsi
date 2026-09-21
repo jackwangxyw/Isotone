@@ -134,6 +134,42 @@ FunctionEnd
 
 Var DeleteData
 
+; Isotone must not be running while its files are replaced or removed. Windows
+; keeps a running image open for reading and deleting only, so its exe cannot be
+; opened for writing while the app is up (measured 2026-09-21). Without this an
+; install over a running one stops at NSIS's "error opening file for writing",
+; and an uninstall leaves isotone.exe and the whole Qt runtime in $INSTDIR:
+; RMDir /REBOOTOK does not take a directory that still has files in it, so
+; nothing is scheduled to remove them either.
+;
+; FileOpen "a" rather than a process list: it asks exactly the question that
+; matters, needs no plugin, and is right however the app was started. A file
+; that is not there yet, which is every first install, is not running.
+!macro NotRunning un
+Function ${un}CheckNotRunning
+  ${Do}
+    ClearErrors
+    ${IfNot} ${FileExists} "$INSTDIR\isotone.exe"
+      Return
+    ${EndIf}
+    FileOpen $0 "$INSTDIR\isotone.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      Return
+    ${EndIf}
+    ${If} ${Silent}
+      DetailPrint "Isotone is running; close it and run this again."
+      Abort "Isotone is running."
+    ${EndIf}
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+      "Isotone is running.$\r$\n$\r$\nQuit it from its tray icon, then click Retry." IDRETRY +2
+    Abort "Isotone is running."
+  ${Loop}
+FunctionEnd
+!macroend
+!insertmacro NotRunning ""
+!insertmacro NotRunning "un."
+
 ; devicetool prints one JSON object; on failure its exit code says why. The
 ; whole object goes into the details log either way, so a failed install can be
 ; read afterwards rather than guessed at.
@@ -156,6 +192,9 @@ Section "Isotone" SecMain
     MessageBox MB_ICONSTOP "Isotone needs Windows 10 or later."
     Abort
   ${EndIf}
+
+  ; An upgrade over a running app cannot replace its files.
+  Call CheckNotRunning
 
   SetOutPath "$INSTDIR"
   ; The whole staged tree: the app, the engine, the devicetool and the Qt
@@ -229,6 +268,10 @@ Function un.ConfirmLeave
 FunctionEnd
 
 Section "Uninstall"
+  ; A running app keeps its own files, and its tray icon would go on offering an
+  ; engine that is no longer registered.
+  Call un.CheckNotRunning
+
   ; machine-uninstall takes IsoAPO off every output it is on, then unregisters
   ; the class, in that order: unregistering while a slot still names the CLSID
   ; leaves that output with no audio. It removes DisableProtectedAudioDG only
