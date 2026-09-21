@@ -368,7 +368,6 @@ DWORD write_file_atomically(const fs::path& path, const std::string& bytes, DWOR
         }
         const DWORD e = GetLastError();
         const bool forgood = e == ERROR_ACCESS_DENIED && replace_denied_for_good(path);
-        std::fprintf(stderr, "PROBE move failed e=%lu for_good=%d\n", e, static_cast<int>(forgood));
         const bool contended = e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION ||
                                (e == ERROR_ACCESS_DENIED && !forgood);
         if (!contended || GetTickCount64() >= deadline) {
