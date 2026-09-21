@@ -19,7 +19,7 @@ System-wide parametric EQ for Windows and Linux.
 
 
 
-A modern system wide parametric EQ software for Windows and Linux. DSP engine built in C++ and UI built using QT.
+A modern system-wide parametric EQ software for Windows and Linux. The DSP engine is built in C++ and the UI in Qt.
 
 **Status: 0.1.0, beta.**
 
@@ -32,7 +32,7 @@ A modern system wide parametric EQ software for Windows and Linux. DSP engine bu
 - Presets per output
 - Import of Equalizer APO configs, including GraphicEQ and FilterCurve curves
 - Speaker setup on Windows: routing, bass management, delay, polarity, mute,
-  balance, etc
+  balance, etc.
 - EQ by ear: inspired by DMS's [EQ by ear tool](https://eqbyear.com/)
 - Tray icon, global hotkeys, launch at sign-in
 
@@ -76,10 +76,10 @@ own daemon.
 ## Known limitations
 
 - Linux is stereo only.
-- On Linux, Isotone captures every application's stream. This means all applications will route audio through it. You can turn off the EQ for that output, but you can't strictly exclude an output.
+- On Linux, Isotone captures every application's stream, and there's no way yet to exclude an application or an output. You can turn the EQ off, but audio still routes through Isotone. It can't share a machine with another program that captures every stream, such as EasyEffects. Exclusions are planned for 0.2.0.
 - Global hotkeys on Wayland work only when the app was started from its
   desktop entry or at sign-in, not from a shell.
-- KDE and GNOME desktop enviornments were tested in a VM only, so if you find a bug, please report it in Github Issues.
+- KDE and GNOME desktop environments were tested in a VM only, so if you find a bug, please report it in GitHub Issues.
 
 ## Building
 
@@ -98,4 +98,4 @@ The Linux daemon builds when pkg-config finds `libpipewire-0.3`. Packaging:
 
 ## BUGS!!!
 
-- Isotone is still very much a beta software, so if you find bugs of any kind, please create a github issue so I can fix it.
+- Isotone is still very much beta software, so if you find bugs of any kind, please create a GitHub issue so I can fix it.
