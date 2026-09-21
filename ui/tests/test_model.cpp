@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include "eqsession.h"
+#include "isotone/response.h"
 #include "responsegraph.h"
 #include "speakers.h"
 #include "isotone/param_block.h"
@@ -339,6 +340,44 @@ TEST_CASE("an output's layout is named by its channels and speakers") {
     CHECK(speaker_layout_name(8, 0) == QStringLiteral("7.1"));
     CHECK(speaker_layout_name(4, 0x33) == QStringLiteral("4 ch"));
     CHECK(speaker_layout_name(6, 0x637) == QStringLiteral("6 ch"));   // no LFE
+}
+
+TEST_CASE("the curve is drawn at the output's rate, not always at 48 kHz") {
+    // The graph designed every band at a fixed 48 kHz while the engine designs
+    // them at the output's rate, so the curve drawn was not the curve heard
+    // (plan 4.5). A Q 4 bell at 15 kHz was 2.6 dB out on a 96 kHz output and a
+    // low pass at 18 kHz 3.6 dB out on a 44.1 kHz one (measured 2026-09-21).
+    EqSession session;
+    EqState s;
+    s.bands = {band(1, FilterType::Peaking, 15000, 9, 4, WidthMode::Q)};
+    session.loadState(&s);
+    ResponseGraph graph;
+    graph.setSession(&session);
+
+    const std::string guid = "{8f4d2a10-0000-4000-8000-0000000000fa}";
+    const auto at_rate = [&](double rate) {
+        session.useTarget(isotone::ui::OutputTarget{guid, isotone::ui::Backend::none,
+                                                    isotone::ui::OutputLayout{2, 0x3, rate}});
+        session.loadState(&s);
+        return graph.compositeAt(16248.0);
+    };
+    // What the engine plays at each rate, from the core itself.
+    const auto engine = [&](double rate) {
+        EqState probe = s;
+        probe.layout_channels = 2;
+        probe.layout_speaker_mask = 0x3;
+        double db = 0.0;
+        const double hz = 16248.0;
+        isotone::magnitude_db(probe, 2, 0x3, 0, &hz, 1, rate, &db);
+        return db;
+    };
+
+    for (double rate : {44100.0, 48000.0, 96000.0, 192000.0}) {
+        CAPTURE(rate);
+        CHECK(at_rate(rate) == doctest::Approx(engine(rate)).epsilon(1e-6));
+    }
+    // The rates really do differ, so the check above is not vacuous.
+    CHECK(std::abs(engine(96000.0) - engine(48000.0)) > 1.0);
 }
 
 int main(int argc, char** argv) {

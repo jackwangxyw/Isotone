@@ -22,7 +22,8 @@ static_assert(ResponseGraph::kSpectrumRangeDb == EqSession::kSpectrumRangeDb);
 
 namespace {
 
-constexpr double kSampleRate = 48000.0;
+// The rate a curve is drawn at when there is no output to ask.
+constexpr double kDefaultSampleRate = 48000.0;
 
 // How far a drawn bell may sit from the sampled one, in pixels. Against the
 // unsimplified rendering of a set including a Q 12 and a Q 30 band, 0.05 moves
@@ -156,6 +157,17 @@ double ResponseGraph::frequencyAt(double x) const {
 
 double ResponseGraph::dbAt(double y) const { return (kTop + plotHeight() / 2.0 - y) * range_db_ / (plotHeight() / 2.0); }
 
+// A filter's shape depends on the rate it is designed at: a Q 4 bell at 15 kHz
+// drawn at 48 kHz sits 2.6 dB from the one a 96 kHz output plays, and a low-pass
+// at 18 kHz 3.6 dB from the one a 44.1 kHz output plays (measured 2026-09-21).
+// The curve drawn is the curve heard (plan 4.5), so it is drawn at the output's
+// own rate, which is the rate the Auto preamp already uses.
+double ResponseGraph::sampleRate() const {
+    if (session_ == nullptr) return kDefaultSampleRate;
+    const double rate = session_->layout().sample_rate;
+    return rate > 0.0 ? rate : kDefaultSampleRate;
+}
+
 uint32_t ResponseGraph::viewChannel() const {
     // Surround: the channel in view with the most bands (speaker_setup.h).
     if (session_ && session_->layout().channels > 2)
@@ -171,7 +183,7 @@ double ResponseGraph::compositeOn(uint32_t channel, double hz) const {
     s.bypass = false;
     s.mute = false;
     double out = 0.0;
-    isotone::magnitude_db(s, session_->layout().channels, session_->layout().speaker_mask, channel, &hz, 1, kSampleRate,
+    isotone::magnitude_db(s, session_->layout().channels, session_->layout().speaker_mask, channel, &hz, 1, sampleRate(),
                           &out);
     return out;
 }
@@ -431,7 +443,7 @@ void ResponseGraph::paint(QPainter* p) {
         for (int row = 0; row < session_->rowCount(); ++row) {
             const isotone::Band* b = session_->bandAt(row);
             if (!b->enabled || !onView(row)) continue;
-            isotone::band_magnitude_db(*b, freqs.data(), n, kSampleRate, db.data());
+            isotone::band_magnitude_db(*b, freqs.data(), n, sampleRate(), db.data());
             QColor c = bell_;
             if (per_band_ && !band_colours_.isEmpty()) {
                 c = band_colours_[static_cast<int>((b->id - 1) % static_cast<uint32_t>(band_colours_.size()))].value<QColor>();
@@ -446,7 +458,7 @@ void ResponseGraph::paint(QPainter* p) {
     isotone::EqState drawn = state;
     drawn.preamp_db = 0.0;
     const uint32_t channels = session_->layout().channels, mask = session_->layout().speaker_mask;
-    isotone::magnitude_db(drawn, channels, mask, viewChannel(), freqs.data(), n, kSampleRate, db.data());
+    isotone::magnitude_db(drawn, channels, mask, viewChannel(), freqs.data(), n, sampleRate(), db.data());
     const QPainterPath curve = polyline(db);
 
     if (!state.bypass) {
@@ -466,7 +478,7 @@ void ResponseGraph::paint(QPainter* p) {
     // L+R with channels that differ: the right channel as a second line.
     if (channels == 2 && session_->viewChannel() == 2 && !state.bypass) {
         std::vector<double> right(n);
-        isotone::magnitude_db(drawn, channels, mask, 1, freqs.data(), n, kSampleRate, right.data());
+        isotone::magnitude_db(drawn, channels, mask, 1, freqs.data(), n, sampleRate(), right.data());
         bool differs = false;
         for (size_t i = 0; i < n && !differs; ++i) differs = std::abs(right[i] - db[i]) > 0.01;
         if (differs) {
@@ -504,7 +516,7 @@ void ResponseGraph::paint(QPainter* p) {
         bool marked = false;
         for (uint32_t c : others) {
             std::vector<double> line(n);
-            isotone::magnitude_db(drawn, channels, mask, c, freqs.data(), n, kSampleRate, line.data());
+            isotone::magnitude_db(drawn, channels, mask, c, freqs.data(), n, sampleRate(), line.data());
             bool differs = false;
             for (size_t i = 0; i < n && !differs; ++i) differs = std::abs(line[i] - db[i]) > 0.01;
             if (!differs) continue;

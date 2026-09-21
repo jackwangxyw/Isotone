@@ -45,6 +45,9 @@ signals:
     void styleChanged();
 
 private:
+    // The rate the curve is designed at: that of the output the file is for.
+    double sampleRate() const;
+
     QPointer<ImportPreview> preview_;
     QColor accent_{0x6a, 0xa7, 0xf4};
     QColor grid_major_, grid_minor_, zero_line_, label_colour_, bell_;

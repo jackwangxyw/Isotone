@@ -157,6 +157,9 @@ private:
     static constexpr double kLeft = 46.0, kRight = 14.0, kTop = 14.0, kBottom = 30.0;
 
     void curveChanged();
+    // The rate the curve is designed at: the output's own, so what is drawn is
+    // what that output plays. 48 kHz with no session.
+    double sampleRate() const;
     // The channel the composite is drawn for: the right in R view, else the left.
     uint32_t viewChannel() const;
     double compositeOn(uint32_t channel, double hz) const;

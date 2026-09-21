@@ -16,7 +16,8 @@
 
 namespace {
 
-constexpr double kSampleRate = 48000.0;
+// The rate a curve is drawn at when there is no output to ask.
+constexpr double kDefaultSampleRate = 48000.0;
 constexpr double kFMin = 20.0, kFMax = 20000.0;
 constexpr double kRangeDb = 15.0;
 // ResponseGraph's margins.
@@ -40,13 +41,21 @@ void CurvePreview::setPreview(ImportPreview* p) {
     update();
 }
 
+// The rate the output the file is for runs at, so the preview draws what that
+// output would play, as ResponseGraph does.
+double CurvePreview::sampleRate() const {
+    if (preview_ == nullptr) return kDefaultSampleRate;
+    const double rate = preview_->target().layout.sample_rate;
+    return rate > 0.0 ? rate : kDefaultSampleRate;
+}
+
 double CurvePreview::compositeAt(double hz) const {
     if (!preview_) return 0.0;
     isotone::EqState s = preview_->state();
     s.preamp_db = 0.0;
     double out = 0.0;
     const uint32_t channels = s.layout_channels ? s.layout_channels : 2;
-    isotone::magnitude_db(s, channels, s.layout_speaker_mask, 0, &hz, 1, kSampleRate, &out);
+    isotone::magnitude_db(s, channels, s.layout_speaker_mask, 0, &hz, 1, sampleRate(), &out);
     return out;
 }
 
@@ -108,11 +117,11 @@ void CurvePreview::paint(QPainter* p) {
     s.preamp_db = 0.0;
     for (const isotone::Band& b : s.bands) {
         if (!b.enabled || !isotone::band_affects_channel(b, 0)) continue;
-        isotone::band_magnitude_db(b, freqs.data(), n, kSampleRate, db.data());
+        isotone::band_magnitude_db(b, freqs.data(), n, sampleRate(), db.data());
         p->strokePath(polyline(db), QPen(bell_, 1.25));
     }
     const uint32_t channels = s.layout_channels ? s.layout_channels : 2;
-    isotone::magnitude_db(s, channels, s.layout_speaker_mask, 0, freqs.data(), n, kSampleRate, db.data());
+    isotone::magnitude_db(s, channels, s.layout_speaker_mask, 0, freqs.data(), n, sampleRate(), db.data());
     const QPainterPath curve = polyline(db);
     QPainterPath fill = curve;
     fill.lineTo(kLeft + pw, y_of(0));
