@@ -77,7 +77,6 @@ own daemon.
 
 - Linux is stereo only.
 - On Linux, Isotone captures every application's stream. This means all applications will route audio through it. You can turn off the EQ for that output, but you can't strictly exclude an output.
-  program that does the same, such as EasyEffects. Planned for 0.2.0.
 - Global hotkeys on Wayland work only when the app was started from its
   desktop entry or at sign-in, not from a shell.
 - KDE and GNOME desktop enviornments were tested in a VM only, so if you find a bug, please report it in Github Issues.
