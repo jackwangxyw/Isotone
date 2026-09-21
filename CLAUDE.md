@@ -19,6 +19,18 @@ KDE now have a VM each, on Wayland; the Flatpak starts at sign-in through the
 Background portal and starts its own daemon, and one daemon at a time is
 enforced by a lock rather than by luck. See decisions.md, "Where things stand".
 
+A full review pass over the tree on 2026-09-21 found five defects, each fixed
+with a test that fails without it: the response graph designed every band at a
+fixed 48 kHz instead of the output's rate; a pre-mix IsoAPO reported the
+post-mix class; the installer and uninstaller did not notice a running Isotone
+and left Program Files half emptied; the Windows side took the shared header's
+sample rate on trust; and `devices_tests` asserted that the registry and the
+audio API agree about every render endpoint, which Windows does not guarantee.
+The same day the application ID was renamed to
+**`io.github.jackwangxyw.Isotone`**, the account the repository is under; the
+old one survives only in `autostart_xdg.h`'s list of entry names to clean up.
+See decisions.md, "A review pass over everything, and five fixes".
+
 The UI had an outside review on 2026-09-20 and two parts of it were acted on:
 the icon set is Phosphor Bold, and status is a bar rather than a coloured dot
 (decisions.md, "The icons, the status mark and the output dropdown"). What was
@@ -191,7 +203,12 @@ into `~/Isotone/build`, and everything else lives in `~/Isotone/.work`:
 (nothing written to his config), `x.py` clicks, presses keys and captures the
 Isotone window through XTEST. Capture the window or the panel, never the whole
 screen: his desktop is his. sudo there needs his password, always: hand him the
-command. The daemon runs from the build directory, never installed.
+command.
+
+The `.deb` built from this tree is installed there (2026-09-21) and enabled, so
+the daemon starts at his next sign-in; for a check, run one from a build
+directory instead and let the lock refuse the second. `~/Isotone` is a copy of
+the tree as of 2026-09-19 and wants a resync before it is built again.
 
 ## The GNOME and KDE VMs (Wayland)
 
@@ -199,8 +216,16 @@ command. The daemon runs from the build directory, never installed.
 (Kubuntu 26.04.1, Plasma 6 on Wayland), both VirtualBox, both left powered off;
 start them with `VBoxManage startvm "Isotone GNOME" --type headless`. They carry
 the tree in `~/Isotone`, a build in `~/build`, the daemon's user unit pointing
-at it, the rig's null sinks and the 0.1.0 Flatpak. `~/desk.sh <cmd>` runs a
-command in the logged-in session on either.
+at it, the rig's null sinks and the 0.1.0 Flatpak, which is
+`io.github.jackwangxyw.Isotone` since 2026-09-21 and has launch at sign-in on,
+so the app and its daemon are up as soon as either VM boots. `~/desk.sh <cmd>`
+runs a command in the logged-in session on either. Their `~/build` predates the
+rename and wants a resync before a build-tree check.
+
+Power them off with `VBoxManage controlvm <vm> acpipowerbutton`, and answer
+Plasma's confirmation with `keyboardputscancode 1c 9c`. Not `systemctl reboot`
+over ssh: polkit refuses it and returns 0, so it looks like it worked and
+nothing happens.
 
 They are for the desktop, not for audio: keys go in with
 `VBoxManage controlvm <vm> keyboardputscancode` (XTEST does not reach a Wayland

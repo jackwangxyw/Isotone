@@ -5465,6 +5465,33 @@ it and it was powered off.
 
 # Where things stand (2026-09-19)
 
+## What `v0.1.0` is waiting on (2026-09-21)
+
+Everything else in stage 6 is closed. In the order they have to happen:
+
+1. **Make the repository public.** The only hard blocker.
+   `appstreamcli validate` fails on the two URLs in the AppStream metadata
+   until it is, and those URLs are what a store reads.
+2. **Trial the installer on a machine that already has Isotone.** This is the
+   one end-to-end path in the project that has never been run start to finish,
+   and it closes three things at once: whether Windows runs the Run value at
+   sign-in (the last open stage 6 item), whether the new running-app check
+   behaves as the real installer rather than as the harness it was tested
+   against, and restaging `IsoAPO.dll`, which happens for free. Do the upgrade
+   deliberately: leave the app running, run the installer, and it should ask
+   for it to be quit and offer Retry. Run
+   `isotone-devicetool machine-install --dry-run --dll "C:\Program Files\Isotone\IsoAPO.dll"`
+   first to read the plan.
+3. **Tag `v0.1.0`.**
+
+Not blocking, and each is written up where it belongs: pushing (the commits of
+2026-09-21 are local only), `gen_icons.py --check` not being in CI, and the
+VMs' and laptop's `~/Isotone` trees predating the rename. Settled and not to be
+reopened without a reason: `read_render_endpoint`, the QtQuick.Controls styles,
+the capture blocklist (0.2.0), and the one unexplained `ui_model_tests` flake,
+which did not recur once across every run of the 2026-09-21 pass on three
+platforms.
+
 ## Done
 
 | Stage | State | Evidence |
@@ -5638,7 +5665,9 @@ installed: 0.1.0, the daemon carries the one-at-a-time lock, and the unit no
 longer sets `PrivateDevices` (only the comment saying why remains;
 `systemctl --user show` reads `PrivateDevices=no`). Enabled, inactive, so it
 starts at his next sign-in. The Flatpak there is
-`io.github.jackwangxyw.Isotone` now.
+`io.github.jackwangxyw.Isotone` now. `~/Isotone-src`, a second tree synced and
+built there for that pass, was removed again; `~/Isotone` stays and is a copy
+of 2026-09-19, so it wants a resync before it is built.
 
 **State of the owner's machines.** Windows: Isotone installed at
 `C:\Program Files\Isotone` by the installer, on two outputs (below). Laptop: the
