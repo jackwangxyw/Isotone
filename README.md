@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="ui/res/isotone.svg">
-  <img src="linux/packaging/icons/hicolor/scalable/apps/io.github.jackwangxyw.Isotone.svg" width="112" alt="Isotone">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+  <img src=".github/assets/logo-light.svg" width="84" alt="Isotone">
 </picture>
 
 # Isotone
