@@ -3,6 +3,32 @@ import QtQuick.Shapes
 
 // An icon, scaled to `size`.
 //
+// The paths in `filled` below are Phosphor Icons, vendored unmodified:
+//
+//   Copyright (c) 2023 Phosphor Icons
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+//
+// The notice is here rather than in a file of its own because that is how this
+// repository already carries vendored code: core/tests/third_party/doctest.h
+// does the same. @phosphor-icons/core 2.1.1, the `bold` weight.
+//
 // Most of the set is Phosphor Bold (phosphoricons.com, MIT), used as published:
 // filled geometry on a 256 box, not hairline strokes on a 24 one. The owner's
 // reviewer called the old set generic and named the sidebar toggle as identical
