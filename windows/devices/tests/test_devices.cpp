@@ -889,13 +889,35 @@ TEST_CASE("endpoints, formats and engines match isotone-devicetool") {
     REQUIRE(list["ok"].b);
     size_t render = 0;
     size_t compared_formats = 0;
+    size_t hidden = 0;
     for (const Json& d : list["endpoints"].items) {
         if (d["flow"].s != "render") continue;
         ++render;
         const std::string guid = d["guid"].s;
         INFO("endpoint " << guid << " " << d["connection"].s);
-        const auto it = by_guid.find(isotone::win::canonical_endpoint_guid(std::wstring(guid.begin(), guid.end())));
-        REQUIRE_MESSAGE(it != by_guid.end(), "not enumerated");
+        const std::wstring wide_guid(guid.begin(), guid.end());
+        const auto it = by_guid.find(isotone::win::canonical_endpoint_guid(wide_guid));
+        if (it == by_guid.end()) {
+            // devicetool reads MMDevices\Render and the library asks the audio
+            // API, and Windows does not make the two agree: it keeps the
+            // registry key of an endpoint its enumeration no longer returns,
+            // with whatever DeviceState the key last had. The owner's AirPods do
+            // it every time they connect, and their Hands-Free render endpoint
+            // is stranger than a stale key (measured 2026-09-21):
+            // IMMDeviceEnumerator::GetDevice hands it over and GetState calls it
+            // active, while EnumAudioEndpoints(eRender, DEVICE_STATEMASK_ALL)
+            // leaves it out. Following the enumeration is what the app wants,
+            // since an endpoint Windows will not list is one nothing plays
+            // through, so this is a difference to report rather than a failure.
+            // What is still required is that the library's two entry points
+            // agree with each other.
+            Endpoint alone;
+            CHECK(read_render_endpoint(wide_guid, &alone) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+            MESSAGE("in the registry (state " << d["state"]["raw"].s
+                                              << ") and not enumerated by the audio API, skipped");
+            ++hidden;
+            continue;
+        }
         const Endpoint& e = *it->second;
 
         CHECK(narrow(e.id) == d["id"].s);
@@ -948,8 +970,13 @@ TEST_CASE("endpoints, formats and engines match isotone-devicetool") {
         }
         ++compared_formats;
     }
-    CHECK(render == mine.size());
-    MESSAGE(render << " render endpoints compared, " << compared_formats << " with a format");
+    // Every endpoint the library enumerated is one devicetool listed, and a
+    // library that enumerated nothing at all would leave every one of them
+    // hidden, which is a failure rather than a difference.
+    CHECK(render == mine.size() + hidden);
+    REQUIRE(hidden < render);
+    MESSAGE((render - hidden) << " render endpoints compared, " << compared_formats << " with a format, " << hidden
+                              << " in the registry only");
 }
 
 // ---------------------------------------------------------------------------
