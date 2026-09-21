@@ -101,7 +101,9 @@ public:
             return CLASS_E_NOAGGREGATION;
         }
 
-        IsoApo* apo = new (std::nothrow) IsoApo(outer);
+        // The class the caller asked for, so the instance reports that class's
+        // registration properties rather than always the post-mix one's.
+        IsoApo* apo = new (std::nothrow) IsoApo(outer, clsid_);
         if (apo == nullptr) {
             return E_OUTOFMEMORY;
         }

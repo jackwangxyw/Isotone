@@ -597,6 +597,32 @@ int main(int argc, char** argv) {
     // The factory's code lives in the DLL, so a held factory must keep it loaded.
     check(can_unload() == S_FALSE, "DllCanUnloadNow says no while a class factory is held");
 
+    // An instance answers for the class it was created as. Every instance used
+    // to be built with the post-mix properties, so a pre-mix one reported the
+    // post-mix CLSID to whoever asked what it was.
+    // {F1DFFD14-9A30-45C5-BAB2-C820C7EC718F}
+    const CLSID pre_mix = {0xf1dffd14, 0x9a30, 0x45c5,
+                           {0xba, 0xb2, 0xc8, 0x20, 0xc7, 0xec, 0x71, 0x8f}};
+    const auto registered_clsid = [&](const CLSID& asked, CLSID* got) {
+        IClassFactory* f = nullptr;
+        if (FAILED(get_class_object(asked, __uuidof(IClassFactory), reinterpret_cast<void**>(&f)))) return false;
+        Apo instance;
+        const bool made = create_apo(f, &instance);
+        APO_REG_PROPERTIES* properties = nullptr;
+        const bool read = made && SUCCEEDED(instance.apo->GetRegistrationProperties(&properties)) &&
+                          properties != nullptr;
+        if (read) *got = properties->clsid;
+        if (properties != nullptr) CoTaskMemFree(properties);
+        instance.release();
+        f->Release();
+        return read;
+    };
+    CLSID reported{};
+    check(registered_clsid(post_mix, &reported) && reported == post_mix,
+          "a post-mix instance reports the post-mix CLSID");
+    check(registered_clsid(pre_mix, &reported) && reported == pre_mix,
+          "a pre-mix instance reports the pre-mix CLSID");
+
     Apo first;
     check(create_apo(factory, &first), "CreateInstance and the configuration and RT interfaces");
     if (first.rt == nullptr) return 2;

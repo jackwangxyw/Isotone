@@ -121,7 +121,8 @@ constexpr bool kSelftest = false;
 
 }  // namespace
 
-IsoApo::IsoApo(IUnknown* outer) : CBaseAudioProcessingObject(regPostMixProperties) {
+IsoApo::IsoApo(IUnknown* outer, const CLSID& clsid)
+    : CBaseAudioProcessingObject(clsid == ISOAPO_PRE_MIX_GUID ? regPreMixProperties : regPostMixProperties) {
     outer_ = outer != nullptr
                  ? outer
                  : reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));

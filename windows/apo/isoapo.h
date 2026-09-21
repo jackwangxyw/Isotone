@@ -57,7 +57,10 @@ class IsoApo : public CBaseAudioProcessingObject,
                public IAudioSystemEffects,
                public INonDelegatingUnknown {
 public:
-    explicit IsoApo(IUnknown* outer);
+    // `clsid` is the class the factory was asked for: it picks the registration
+    // properties this instance reports, so a pre-mix instance does not answer
+    // GetRegistrationProperties with the post-mix class.
+    explicit IsoApo(IUnknown* outer, const CLSID& clsid = ISOAPO_POST_MIX_GUID);
     virtual ~IsoApo();
 
     // IUnknown
