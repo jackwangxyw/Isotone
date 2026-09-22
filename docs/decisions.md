@@ -5495,6 +5495,32 @@ and `tst_updatenotice.qml` (6) cover it, and five mutations (the window
 ignored, the pointer ignored, no fade, a textual version comparison, a
 pre-release accepted) each fail a test.
 
+## An upgrade could not replace the loaded engine (2026-09-21)
+
+The first upgrade trial, on the owner's machine, stopped at NSIS's "Error
+opening file for writing: C:\Program Files\Isotone\IsoAPO.dll". audiodg has
+the engine loaded on every output it is on, and Windows does not open a loaded
+image for writing. The running-app check only asks about `isotone.exe`, so it
+passed. The first install never met this because there was no old DLL.
+
+Measured with a DLL held by `LoadLibrary`: it cannot be opened for writing, it
+can be renamed, a new file can be written at its path, and the renamed one
+cannot be deleted until it is unloaded (error 5). So the installer now moves the
+old engine aside to a temporary name in `$INSTDIR` (`move_aside.nsh`), copies
+the tree, registers, and on an upgrade restarts Windows audio so the new engine
+is what plays, then deletes the old file or leaves it to the next boot. A first
+install moves nothing and restarts nothing.
+
+`windows/setup/tests/test_move_aside.py` builds a test installer around the same
+macro and runs it unelevated against a loaded DLL: 10 checks. With the macro
+made a no-op, 5 fail, and one of them shows a second defect the fix also
+closes: a silent install (`/S`) over a loaded engine exited 0 and kept the old
+DLL without a word. The test needs NSIS, so it is not in CI.
+
+The directory page loses its "Program Files only" sentence (owner): its top
+text is a single space, as the licence page's is, because an empty one makes
+NSIS show its own paragraph.
+
 # Where things stand (2026-09-19)
 
 ## What `v0.1.0` is waiting on (2026-09-21)

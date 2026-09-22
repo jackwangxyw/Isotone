@@ -56,6 +56,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 ${PUBLISHER}. GPL v2 or lat
 !include "FileFunc.nsh"
 !include "WinVer.nsh"
 !include "nsDialogs.nsh"
+!include "move_aside.nsh"
 
 ; ---------------------------------------------------------------- appearance
 
@@ -81,7 +82,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 ${PUBLISHER}. GPL v2 or lat
 !define MUI_LICENSEPAGE_TEXT_BOTTOM "Click I Agree to continue."
 !define MUI_LICENSEPAGE_BUTTON "I Agree"
 
-!define MUI_DIRECTORYPAGE_TEXT_TOP "Program Files only: Windows runs the engine as LOCAL SERVICE, which cannot read a user profile."
+!define MUI_DIRECTORYPAGE_TEXT_TOP " "
 
 !define MUI_FINISHPAGE_TITLE "${APPNAME} is installed"
 !define MUI_FINISHPAGE_TEXT "Saved presets are stored in %APPDATA%\${APPNAME}."
@@ -133,6 +134,7 @@ FunctionEnd
 ; -------------------------------------------------------------------- shared
 
 Var DeleteData
+Var OldEngine
 
 ; Isotone must not be running while its files are replaced or removed. Windows
 ; keeps a running image open for reading and deleting only, so its exe cannot be
@@ -197,6 +199,9 @@ Section "Isotone" SecMain
   Call CheckNotRunning
 
   SetOutPath "$INSTDIR"
+  ; An upgrade: audiodg has the old engine loaded, so it cannot be overwritten
+  ; (move_aside.nsh).
+  !insertmacro MoveAside "$INSTDIR\IsoAPO.dll" $OldEngine
   ; The whole staged tree: the app, the engine, the devicetool and the Qt
   ; runtime windeployqt put there (ui/CMakeLists.txt).
   File /r "${STAGE}\*.*"
@@ -204,6 +209,15 @@ Section "Isotone" SecMain
   DetailPrint "Registering the audio engine"
   !insertmacro Devicetool 'machine-install --dll "$INSTDIR\IsoAPO.dll"' \
                           "Setup could not register the audio engine."
+
+  ; audiodg runs the old engine until it restarts: restart it, so the new one is
+  ; what plays and the old file can go (or goes at the next boot).
+  ${If} $OldEngine != ""
+    DetailPrint "Restarting Windows audio"
+    nsExec::ExecToLog '"$INSTDIR\isotone-devicetool.exe" restart-audio'
+    Pop $0
+    Delete /REBOOTOK $OldEngine
+  ${EndIf}
 
   WriteRegStr HKLM "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\${APPNAME}" "Version" "${VERSION}"
