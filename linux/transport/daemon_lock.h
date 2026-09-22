@@ -17,12 +17,17 @@
 
 #pragma once
 
+#include <string>
+
 namespace isotone::transport {
 
 // Held for as long as the object lives. Not copyable: the lock is the fd.
 class DaemonLock {
 public:
-    DaemonLock() = default;
+    DaemonLock();
+    // A lock of another name, which contends only with itself: the tests use
+    // one, so that a daemon running on the same machine does not hold theirs.
+    explicit DaemonLock(std::string name);
     ~DaemonLock();
     DaemonLock(const DaemonLock&) = delete;
     DaemonLock& operator=(const DaemonLock&) = delete;
@@ -38,6 +43,7 @@ public:
     void release();
 
 private:
+    std::string name_;
     int fd_ = -1;
 };
 

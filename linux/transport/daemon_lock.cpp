@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <utility>
 
 namespace isotone::transport {
 
@@ -20,10 +21,13 @@ constexpr char kLockName[] = "/isotone. daemon";
 
 }  // namespace
 
+DaemonLock::DaemonLock() : name_(kLockName) {}
+DaemonLock::DaemonLock(std::string name) : name_(std::move(name)) {}
+
 bool DaemonLock::acquire(int* error) {
     if (fd_ >= 0) return true;
     // 0600: the lock is the user's, as the regions are.
-    const int fd = ::shm_open(kLockName, O_RDWR | O_CREAT, 0600);
+    const int fd = ::shm_open(name_.c_str(), O_RDWR | O_CREAT, 0600);
     if (fd < 0) {
         if (error != nullptr) *error = errno;
         return false;
