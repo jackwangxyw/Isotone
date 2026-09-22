@@ -11,10 +11,11 @@ own laptop (decisions.md, the entries of 2026-09-19).
 
 Packaging (stage 6) is built and measured on all three targets (2026-09-20): an
 NSIS installer, a `.deb` and a Flatpak, each run for real and measured against
-the analytic filter rather than declared working. **0.1.0 is not tagged yet.**
-Left in stage 6, and both need the owner: Windows' launch at sign-in wants one
-sign-out to confirm, and `v0.1.0` wants the repository public first, because the
-AppStream metadata points at it. Everything else in stage 6 is closed. GNOME and
+the analytic filter rather than declared working. **0.1.0 is released**
+(2026-09-21, tag `v0.1.0` on `ab557f2`, a full release so the update check sees
+it; every later release must be one too). Left in stage 6, and it needs the
+owner: Windows' launch at sign-in wants one sign-in to confirm. Everything else
+in stage 6 is closed. GNOME and
 KDE now have a VM each, on Wayland; the Flatpak starts at sign-in through the
 Background portal and starts its own daemon, and one daemon at a time is
 enforced by a lock rather than by luck. See decisions.md, "Where things stand".
@@ -208,7 +209,8 @@ command.
 The `.deb` built from this tree is installed there (2026-09-21) and enabled, so
 the daemon starts at his next sign-in; for a check, run one from a build
 directory instead and let the lock refuse the second. `~/Isotone` is a copy of
-the tree as of 2026-09-19 and wants a resync before it is built again.
+the tree as of 2026-09-19 and wants a resync before it is built again (it did not
+answer on 2026-09-21).
 
 ## The GNOME and KDE VMs (Wayland)
 
@@ -219,8 +221,9 @@ the tree in `~/Isotone`, a build in `~/build`, the daemon's user unit pointing
 at it, the rig's null sinks and the 0.1.0 Flatpak, which is
 `io.github.jackwangxyw.Isotone` since 2026-09-21 and has launch at sign-in on,
 so the app and its daemon are up as soon as either VM boots. `~/desk.sh <cmd>`
-runs a command in the logged-in session on either. Their `~/build` predates the
-rename and wants a resync before a build-tree check.
+runs a command in the logged-in session on either. Both trees were resynced to
+`v0.1.0` from `git archive` on 2026-09-21 and `~/build` rebuilt; resync the same
+way (a copy of the working tree carries CRLF from nine files here).
 
 Power them off with `VBoxManage controlvm <vm> acpipowerbutton`, and answer
 Plasma's confirmation with `keyboardputscancode 1c 9c`. Not `systemctl reboot`

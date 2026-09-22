@@ -5521,45 +5521,75 @@ The directory page loses its "Program Files only" sentence (owner): its top
 text is a single space, as the licence page's is, because an empty one makes
 NSIS show its own paragraph.
 
-# Where things stand (2026-09-19)
+## The lock tests took the daemon's own lock (2026-09-21)
 
-## What `v0.1.0` is waiting on (2026-09-21)
+Resyncing the GNOME VM after the release, `transport_posix_tests` failed there:
+all four `test_daemon_lock.cpp` cases at their first `acquire()`. The tests used
+the daemon's lock, `/isotone. daemon`, and the Flatpak's daemon, up since the
+VM's sign-in, held it. So they failed on every machine with a daemon running
+(the owner's laptop, both Wayland VMs) and passed only where none runs, which is
+CI. The product was fine; the tests were not isolated.
 
-Everything else in stage 6 is closed. In the order they have to happen:
+`DaemonLock` takes a name now (`explicit DaemonLock(std::string)`; the default
+constructor keeps the daemon's), the tests use `/isotone. daemon test`, and a
+fifth case checks that the two do not contend. Measured in WSL with the daemon's
+lock held by a live `flock` holder: 4 failures before, 0 after, and 0 with no
+holder; then on both VMs with their Flatpak daemons running, all 7 suites green.
 
-**2026-09-21, later:** 1 is done (the repository is public) and 2 is done: the
-first trial found the loaded engine could not be overwritten ("An upgrade could
-not replace the loaded engine"), and the fixed installer then upgraded the
-owner's machine cleanly, with Isotone running at the start. Afterwards the
-installed `IsoAPO.dll` and `isotone.exe` match the staged build, no moved-aside
-file was left in `$INSTDIR`, and `status` on CABLE Input reports the engine
-installed, registered and loadable with no warnings. Still open from 2: whether
-Windows ran the Run value at the sign-in after the restart of 17:53. Left: the
-release dates in the metainfo and the Debian changelog, the three packages
-rebuilt from the tagged commit, and the tag.
+# Where things stand (2026-09-21)
 
-1. **Make the repository public.** The only hard blocker.
-   `appstreamcli validate` fails on the two URLs in the AppStream metadata
-   until it is, and those URLs are what a store reads.
-2. **Trial the installer on a machine that already has Isotone.** This is the
-   one end-to-end path in the project that has never been run start to finish,
-   and it closes three things at once: whether Windows runs the Run value at
-   sign-in (the last open stage 6 item), whether the new running-app check
-   behaves as the real installer rather than as the harness it was tested
-   against, and restaging `IsoAPO.dll`, which happens for free. Do the upgrade
-   deliberately: leave the app running, run the installer, and it should ask
-   for it to be quit and offer Retry. Run
-   `isotone-devicetool machine-install --dry-run --dll "C:\Program Files\Isotone\IsoAPO.dll"`
-   first to read the plan.
-3. **Tag `v0.1.0`.**
+## 0.1.0 is released
 
-Not blocking, and each is written up where it belongs: pushing (the commits of
-2026-09-21 are local only), `gen_icons.py --check` not being in CI, and the
-VMs' and laptop's `~/Isotone` trees predating the rename. Settled and not to be
-reopened without a reason: `read_render_endpoint`, the QtQuick.Controls styles,
-the capture blocklist (0.2.0), and the one unexplained `ui_model_tests` flake,
-which did not recur once across every run of the 2026-09-21 pass on three
-platforms.
+`v0.1.0` is tagged on `ab557f2` and published as a full release (not a
+pre-release, so `releases/latest` returns it and the update check sees it):
+https://github.com/jackwangxyw/Isotone/releases/tag/v0.1.0. The three assets
+were downloaded back from GitHub and match what was built and tested:
+
+| Asset | SHA-256 |
+|---|---|
+| `isotone-0.1.0-setup.exe` | `fc0788aac13f5212ed3888ddaf7da0deca4739594d5bcdebe69671b32fe3fd3f` |
+| `isotone-0.1.0-Linux.deb` | `94498828a79fa9a7b887a356128e902bca172dd2f7a8d9942d83ccaa0f290469` |
+| `isotone-0.1.0.flatpak` | `8d0a956d6a0d2ec6bc38481ecd03e2bb8d063097cc7b551051044a9ffbd69077` |
+
+The installer is the one the owner upgraded his machine with, byte for byte
+(NSIS rebuilt it identically). The Flatpak's source copy matched `ab557f2` file
+for file apart from CRLF (below). `appstreamcli validate` passes; its one
+pedantic note is the uppercase letter in the application ID, which stays.
+Release notes are the owner's.
+
+Every release after this one has to be a full release too: the update check
+ignores pre-releases, so a 0.2.0 marked as one would not reach anyone on 0.1.0.
+
+## Open
+
+- **Windows launch at sign-in**, the one stage 6 item left: whether Windows runs
+  the Run value at a sign-in. The value is right (`"C:\Program
+  Files\Isotone\isotone.exe" --tray`). The owner checks at a later restart.
+- **The laptop's and the Mint VM's `~/Isotone`** still predate the rename. The
+  laptop did not answer over Tailscale on 2026-09-21; the Mint VM was not
+  started, because it takes 12 GB and 16.7 GB was free. GNOME and KDE were
+  resynced to `v0.1.0` that day (the rename's 12 stale files removed, the rest
+  replaced from `git archive`), plus the lock-test fix, and both build and pass
+  all 7 suites.
+- **Nine working-tree files on this machine are CRLF on disk** although
+  `.gitattributes` asks for LF: `CMakeLists.txt`, `core/CMakeLists.txt`,
+  `core/tests/test_audio_ring.cpp`, `core/tests/test_dynamics.cpp`,
+  `linux/daemon/daemon.cpp`, `linux/daemon/measure.py`, and the
+  `CMakeLists.txt` of `windows/compat`, `windows/devicetool` and
+  `windows/transport`. Git normalises them, so commits are LF and nothing builds
+  differently; a copy of the working tree (rather than `git archive`) carries the
+  CRLF.
+- **Qt 6.4 prints about 20 "Cyclic dependency detected" warnings** at every
+  start on Linux, between `GeneralSettings.qml` or `PresetActions.qml` and other
+  files of the module. Present at `181913a`, before this session's changes; not
+  investigated.
+- **Not in CI:** `gen_icons.py --check`, and `windows/setup/tests/
+  test_move_aside.py`, which needs NSIS.
+- **The capture blocklist** (excluding applications and outputs from the
+  daemon's capture) is 0.2.0.
+
+Settled and not to be reopened without a reason: `read_render_endpoint`, the
+QtQuick.Controls styles, and the one unexplained `ui_model_tests` flake.
 
 ## Done
 
