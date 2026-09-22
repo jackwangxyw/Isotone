@@ -5527,6 +5527,17 @@ NSIS show its own paragraph.
 
 Everything else in stage 6 is closed. In the order they have to happen:
 
+**2026-09-21, later:** 1 is done (the repository is public) and 2 is done: the
+first trial found the loaded engine could not be overwritten ("An upgrade could
+not replace the loaded engine"), and the fixed installer then upgraded the
+owner's machine cleanly, with Isotone running at the start. Afterwards the
+installed `IsoAPO.dll` and `isotone.exe` match the staged build, no moved-aside
+file was left in `$INSTDIR`, and `status` on CABLE Input reports the engine
+installed, registered and loadable with no warnings. Still open from 2: whether
+Windows ran the Run value at the sign-in after the restart of 17:53. Left: the
+release dates in the metainfo and the Debian changelog, the three packages
+rebuilt from the tagged commit, and the tag.
+
 1. **Make the repository public.** The only hard blocker.
    `appstreamcli validate` fails on the two URLs in the AppStream metadata
    until it is, and those URLs are what a store reads.
