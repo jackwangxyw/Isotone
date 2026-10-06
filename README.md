@@ -21,7 +21,7 @@ System-wide parametric EQ for Windows and Linux.
 
 A modern system-wide parametric EQ software for Windows and Linux. The DSP engine is built in C++ and the UI in Qt.
 
-**Status: 0.1.0, beta.**
+**Status: 0.1.1, beta.**
 
 ## Features
 
@@ -51,14 +51,14 @@ Downloads are on the [releases page](https://github.com/jackwangxyw/Isotone/rele
 
 ### Windows 10 or later
 
-Run `isotone-0.1.0-setup.exe`. On first run, pick the outputs to equalize.
+Run `isotone-0.1.1-setup.exe`. On first run, pick the outputs to equalize.
 Installing IsoAPO on an output asks for administrator rights and restarts the
 Windows audio service.
 
 ### Debian, Ubuntu, Mint
 
 ```sh
-sudo apt install ./isotone-0.1.0-Linux.deb
+sudo apt install ./isotone-0.1.1-Linux.deb
 ```
 
 The daemon is enabled as a systemd user unit and starts at your next sign-in.
@@ -67,7 +67,7 @@ Needs PipeWire and WirePlumber.
 ### Flatpak
 
 ```sh
-flatpak install --user isotone-0.1.0.flatpak
+flatpak install --user isotone-0.1.1.flatpak
 ```
 
 Needs the `org.kde.Platform` 6.11 runtime from Flathub. The Flatpak starts its

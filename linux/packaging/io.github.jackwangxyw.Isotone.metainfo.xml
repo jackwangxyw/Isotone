@@ -53,6 +53,11 @@
   </recommends>
 
   <releases>
+    <release version="0.1.1" date="2026-10-05">
+      <description>
+        <p>Windows setup no longer fails on a PC that has never had Isotone.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-21">
       <description>
         <p>First packaged release. Beta.</p>
