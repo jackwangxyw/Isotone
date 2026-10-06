@@ -3387,7 +3387,15 @@ int cmd_roundtrip(const Endpoint& e, std::optional<DeviceAPOInfo::InstallMode> m
                 install_here(false);
                 std::wstring child;
                 try_read_string(iso_record_key(e), L"PostMixChild", &child);
-                more(child == vendor, "the prepared install hosts the APO in its slot");
+                // Whatever the prepared device has in IsoAPO's slot: the simulated
+                // vendor, or with none the driver's own APO, which taking
+                // Equalizer APO off puts back from its record.
+                std::wstring expected;
+                for (size_t i = 0; i < device.size(); ++i) {
+                    if (std::string(kEffectSlots[i].label) == post_slot_label(chosen) && device[i] != L"(absent)")
+                        expected = device[i];
+                }
+                more(_wcsicmp(child.c_str(), expected.c_str()) == 0, "the prepared install hosts the APO in its slot");
             }
             bool ok = false;
             retick_json += std::string(retick_json.empty() ? "" : ",") +

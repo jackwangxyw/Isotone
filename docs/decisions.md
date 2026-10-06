@@ -5536,6 +5536,48 @@ fifth case checks that the two do not contend. Measured in WSL with the daemon's
 lock held by a live `flock` holder: 4 failures before, 0 after, and 0 with no
 holder; then on both VMs with their Flatpak daemons running, all 7 suites green.
 
+## The installer failed on the first machine that was not ours (2026-10-05)
+
+A tester's install of 0.1.0 stopped at "Setup could not register the audio
+engine". The log's reason: `the install record: Error while opening registry
+key HKEY_LOCAL_MACHINE\SOFTWARE\IsoAPO: The system cannot find the file
+specified.` `machine-install` wrote `ProtectedAudioDGSetByIsotone` with
+upstream's `writeDWORDValue`, which opens its key and never creates it. The key
+had existed on the owner's machine since devicetool's first install, and every
+installer run until then was on that machine. The dry run did not catch it
+either: it printed a plan and made no writes, and the dry-run registry accepted
+a value write into a key that does not exist.
+
+Fixed: the key is created first, and the record is written before
+`DisableProtectedAudioDG` rather than after. In the old order a run that failed
+between the two left the value set and unrecorded, the next run took it for
+Equalizer APO's, and `machine-uninstall` would then have left it behind. The
+tester has Equalizer APO, which set the value first, so their machine is not in
+that state.
+
+`machine-install --dry-run` now makes its registry writes against the dry-run
+registry, which refuses a value write into a missing key as the registry does,
+and `--simulate-fresh-machine` starts it without the key or the value. The new
+`devicetool_tests` case failed with the tester's reason before the fix, and
+each half of the fix reverted fails it again. Every existing dry run under the
+stricter registry, `roundtrip` on every present render endpoint of the owner's
+machine included, still passes.
+
+The log also says `IsoAPO.dll` was in `C:\Program Files\Isotone` before this
+run (`MoveAside` prints only when the file exists), although the tester ran
+setup once. Not explained. Their machine is left with the files and the CLSID
+registered but no uninstaller and no Add/Remove Programs entry; IsoAPO is on no
+output. Running a fixed installer over it completes the install.
+
+Running `roundtrip` across every endpoint for this turned up a second, older
+fault, in the check rather than the product: on the owner's AirPods hands-free
+output, which has Equalizer APO with the driver's own EFX APO (Microsoft Audio
+Proxy Discover Effects) in its record, "the prepared install hosts the APO in
+its slot" failed. The check expected no child when no vendor APO was simulated,
+but taking Equalizer APO off puts the driver's APO back, and the install
+rightly hosts it. The check now expects whatever the prepared device has in
+IsoAPO's slot. The shipped 0.1.0 devicetool fails it identically.
+
 # Where things stand (2026-09-21)
 
 ## 0.1.0 is released
@@ -5562,6 +5604,9 @@ ignores pre-releases, so a 0.2.0 marked as one would not reach anyone on 0.1.0.
 
 ## Open
 
+- **0.1.0's installer fails on a machine that has never had IsoAPO**
+  (2026-10-05, above). Fixed in the tree; not yet run on such a machine, not
+  yet released. Releases wait for the owner's approval.
 - **Windows launch at sign-in**, the one stage 6 item left: whether Windows runs
   the Run value at a sign-in. The value is right (`"C:\Program
   Files\Isotone\isotone.exe" --tray`). The owner checks at a later restart.
