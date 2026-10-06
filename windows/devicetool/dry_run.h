@@ -57,6 +57,10 @@ public:
 
     const std::vector<RegistryOperation>& operations() const { return operations_; }
 
+    // Treats `key` as absent, or with `valuename` only that value, as on a
+    // machine that has never had it. Not a write: nothing is recorded.
+    void assume_absent(const std::wstring& key, const std::wstring& valuename = L"");
+
 private:
     bool deleted(const std::wstring& normalized) const;
     bool really_exists(const std::wstring& key) const;

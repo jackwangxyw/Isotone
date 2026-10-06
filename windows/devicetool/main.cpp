@@ -212,7 +212,7 @@ int usage(const std::string& command, const std::string& reason) {
                  "  isotone-devicetool uninstall <endpoint> [--dry-run]\n"
                  "  isotone-devicetool repair    [<endpoint>] [--mode mfx|efx|gfx] [--dry-run]\n"
                  "  isotone-devicetool test      <endpoint>\n"
-                 "  isotone-devicetool machine-install   --dll <absolute path> [--dry-run]\n"
+                 "  isotone-devicetool machine-install   --dll <absolute path> [--dry-run [--simulate-fresh-machine]]\n"
                  "  isotone-devicetool machine-uninstall [--remove-data] [--dry-run]\n"
                  "  isotone-devicetool enable-enhancements <endpoint> [--dry-run]\n"
                  "  isotone-devicetool restart-audio [--dry-run]\n"
@@ -2339,7 +2339,41 @@ std::string check_json(const char* name, bool ok, std::vector<std::string>* fail
     return std::string("{\"check\":") + quote(std::string(name)) + ",\"ok\":" + boolean(ok) + "}";
 }
 
-int cmd_machine_install(const std::wstring& dll, bool dry_run) {
+// DisableProtectedAudioDG, and the record of whether this install set it.
+// The record first: a run that failed after setting the value would leave it
+// unrecorded, and the next run would take it for Equalizer APO's and record it
+// as not ours. Empty on success, else what went wrong.
+std::string write_protected_audio(bool already) {
+    const std::string recorded = error_text([&] {
+        // Absent on a machine that has never had IsoAPO, and a value write
+        // only opens its key.
+        RegistryHelper::createKey(kIsotoneKey);
+        RegistryHelper::writeDWORDValue(kIsotoneKey, kProtectedAudioOursValue, already ? 0 : 1);
+    });
+    if (!recorded.empty()) return "the install record: " + recorded;
+    if (!already) {
+        const std::string wrote = error_text([] {
+            RegistryHelper::writeDWORDValue(kAudioSettingsKey, kProtectedAudioValue, 1);
+        });
+        if (!wrote.empty()) return "DisableProtectedAudioDG: " + wrote;
+    }
+    return {};
+}
+
+int cmd_machine_install(const std::wstring& dll, bool dry_run, bool fresh_machine) {
+    // A dry run makes its registry writes against a DryRunRegistry, so a write
+    // the registry would refuse fails there too. --simulate-fresh-machine starts
+    // it from a machine that has never had IsoAPO or Equalizer APO.
+    DryRunRegistry dry;
+    std::optional<ScopedDryRun> dry_scope;
+    if (dry_run) {
+        if (fresh_machine) {
+            dry.assume_absent(kIsotoneKey);
+            dry.assume_absent(kAudioSettingsKey, kProtectedAudioValue);
+        }
+        dry_scope.emplace(&dry);
+    }
+
     // Everything this would do, worked out before anything is written, so a run
     // that stops at a bad DLL still reports the whole plan rather than only the
     // step it failed at. Recorded as ours only when this run is what sets
@@ -2375,9 +2409,12 @@ int cmd_machine_install(const std::wstring& dll, bool dry_run) {
     }
 
     if (dry_run) {
-        std::printf("{%s,\"ok\":true,\"would\":[\"call DllRegisterServer in the DLL\",%s%s]}\n", facts.c_str(),
+        const std::string error = write_protected_audio(already);
+        const std::string operations = ",\"operations\":" + operations_json(dry.operations());
+        if (!error.empty()) return fail("machine-install", error, "," + facts + operations);
+        std::printf("{%s,\"ok\":true,\"would\":[\"call DllRegisterServer in the DLL\",%s%s]%s}\n", facts.c_str(),
                     already ? "" : "\"set DisableProtectedAudioDG=1\",",
-                    "\"create the data directory and set its ACL\"");
+                    "\"create the data directory and set its ACL\"", operations.c_str());
         return 0;
     }
 
@@ -2386,16 +2423,8 @@ int cmd_machine_install(const std::wstring& dll, bool dry_run) {
     const std::string registered = call_dll_entry(dll, "DllRegisterServer");
     if (!registered.empty()) return fail("machine-install", registered, "," + facts);
 
-    if (!already) {
-        const std::string wrote = error_text([] {
-            RegistryHelper::writeDWORDValue(kAudioSettingsKey, kProtectedAudioValue, 1);
-        });
-        if (!wrote.empty()) return fail("machine-install", "DisableProtectedAudioDG: " + wrote, "," + facts);
-    }
-    const std::string recorded = error_text([&] {
-        RegistryHelper::writeDWORDValue(kIsotoneKey, kProtectedAudioOursValue, already ? 0 : 1);
-    });
-    if (!recorded.empty()) return fail("machine-install", "the install record: " + recorded, "," + facts);
+    const std::string wrote = write_protected_audio(already);
+    if (!wrote.empty()) return fail("machine-install", wrote, "," + facts);
 
     for (const std::wstring& dir : {data_dir, data_dir + L"\\devices", data_dir + L"\\backups"}) {
         const std::string error = apply_data_dir_acl(dir, sddl);
@@ -4045,7 +4074,7 @@ int dispatch(int argc, wchar_t** wargv) {
     }
 
     std::vector<std::string> args, flags;
-    bool dry_run = false, replace_eapo = false, remove_data = false;
+    bool dry_run = false, replace_eapo = false, remove_data = false, fresh_machine = false;
     std::optional<std::string> mode_text;
     std::optional<std::string> simulation_text;
     std::string pipe_text, parent_text;
@@ -4066,6 +4095,7 @@ int dispatch(int argc, wchar_t** wargv) {
         else if (a == "--layout") layout_text = argv_utf8[++i];
         else if (a == "--dll") dll_text = argv_utf8[++i];
         else if (a == "--remove-data") remove_data = true;
+        else if (a == "--simulate-fresh-machine") fresh_machine = true;
         else if (a == "--output") { ++i; ++outputs; continue; }
         else if (a.rfind("--", 0) == 0) return usage("", "unknown flag " + a);
         else { args.push_back(a); continue; }
@@ -4084,7 +4114,7 @@ int dispatch(int argc, wchar_t** wargv) {
         {"uninstall", {"--dry-run"}},
         {"repair", {"--mode", "--dry-run"}},
         {"roundtrip", {"--mode", "--replace-equalizerapo", "--simulate-equalizerapo"}},
-        {"machine-install", {"--dll", "--dry-run"}},
+        {"machine-install", {"--dll", "--dry-run", "--simulate-fresh-machine"}},
         {"machine-uninstall", {"--remove-data", "--dry-run"}},
         {"enable-enhancements", {"--dry-run"}},
         {"restart-audio", {"--dry-run"}},
@@ -4189,7 +4219,8 @@ int dispatch(int argc, wchar_t** wargv) {
 
     if (command == "machine-install") {
         if (!dll_text) return usage(command, "machine-install needs --dll");
-        return cmd_machine_install(wide(*dll_text), dry_run);
+        if (fresh_machine && !dry_run) return usage(command, "--simulate-fresh-machine needs --dry-run");
+        return cmd_machine_install(wide(*dll_text), dry_run, fresh_machine);
     }
     if (command == "machine-uninstall") return cmd_machine_uninstall(remove_data, dry_run);
     if (command == "list") return cmd_list();

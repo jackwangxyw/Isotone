@@ -821,6 +821,35 @@ TEST_CASE("machine-install --dry-run says what it would do and does none of it")
     CHECK(has(j["would"], "set DisableProtectedAudioDG=1") != j["protected_audiodg_already_disabled"].b);
 }
 
+TEST_CASE("machine-install --dry-run on a machine that has never had IsoAPO or Equalizer APO") {
+    // 0.1.0's installer failed on the first machine it met that was not ours
+    // (2026-10-05): HKLM\SOFTWARE\IsoAPO did not exist, and a value write opens
+    // its key rather than creating it. Here the dry run starts without the key
+    // or DisableProtectedAudioDG, whatever this machine has. Any DLL that passes
+    // the checks will do, since a dry run does not call into it.
+    wchar_t system[MAX_PATH];
+    REQUIRE(GetSystemDirectoryW(system, MAX_PATH) > 0);
+    const std::wstring dll = std::wstring(system) + L"\\kernel32.dll";
+    const Direct d = run_direct({L"machine-install", L"--dll", dll, L"--dry-run", L"--simulate-fresh-machine"});
+    INFO(d.out);
+    CHECK(d.exit == 0);
+    const Json j = parsed(d.out);
+    CHECK(j["ok"].b);
+    CHECK_FALSE(j["protected_audiodg_already_disabled"].b);
+
+    // The record before the value: a run that fails between them leaves a
+    // record saying the value is ours, not a value the next run would take for
+    // Equalizer APO's and machine-uninstall would then leave behind.
+    std::vector<std::string> ops;
+    for (const Json& o : j["operations"].items) ops.push_back(o["op"].s + " " + o["key"].s + "\\" + o["value"].s);
+    const std::vector<std::string> expected = {
+        "create key HKEY_LOCAL_MACHINE\\SOFTWARE\\IsoAPO\\",
+        "set REG_DWORD HKEY_LOCAL_MACHINE\\SOFTWARE\\IsoAPO\\ProtectedAudioDGSetByIsotone",
+        "set REG_DWORD HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio\\DisableProtectedAudioDG",
+    };
+    CHECK(ops == expected);
+}
+
 TEST_CASE("machine-uninstall --dry-run leaves DisableProtectedAudioDG that is not ours") {
     const Direct d = run_direct({L"machine-uninstall", L"--dry-run"});
     CHECK(d.exit == 0);

@@ -49,6 +49,12 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
         throw RegistryException(L"Error while creating registry key " + key +
                                 L": access denied (dry run: Administrators may not create subkeys here)");
     }
+    // A real value write opens the key and throws when it is not there:
+    // upstream's helpers never create it.
+    if ((operation.rfind(L"set ", 0) == 0 || operation == L"delete value") && !created_.count(k) &&
+        (deleted(k) || !really_exists(key))) {
+        throw RegistryException(L"Error while opening registry key " + key + L": not found (dry run)");
+    }
     if (operations_.size() == kill_at_) throw SimulatedKill{};
     if (const auto it = fail_at_.find(operations_.size()); it != fail_at_.end()) {
         fail_at_.erase(it);
@@ -80,6 +86,11 @@ void DryRunRegistry::write(const std::wstring& operation, const std::wstring& ke
         values_[value_id(key, valuename)] = Value{L"", true};
     }
     // Ownership, ACL and backup operations change nothing a later read sees.
+}
+
+void DryRunRegistry::assume_absent(const std::wstring& key, const std::wstring& valuename) {
+    if (valuename.empty()) deleted_.insert(normalize(key));
+    else values_[value_id(key, valuename)] = Value{L"", true};
 }
 
 bool DryRunRegistry::deleted(const std::wstring& normalized) const {
