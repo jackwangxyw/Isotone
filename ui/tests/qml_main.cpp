@@ -18,6 +18,7 @@
 #include <QtQuickTest>
 
 #include "eqsession.h"
+#include "presets.h"
 #include "qmlsingleton.h"
 
 #if defined(_WIN32)
@@ -93,8 +94,32 @@ public:
         return config.open(QIODevice::WriteOnly | QIODevice::Truncate) && config.write(text.toUtf8()) == text.toUtf8().size();
     }
 
+    // Presets: an output after the machine's, with no backend, so nothing is
+    // written to it. clearAddedOutputs() puts the machine's list back.
+    Q_INVOKABLE void addOutput(const QString& guid, const QString& name) {
+        auto* presets = isotoneSingleton<Presets>(engine_, "Presets");
+        if (!machine_) machine_ = presets->outputList();
+        added_.push_back(Presets::OutputInfo{
+            isotone::ui::OutputTarget{guid.toStdString(), isotone::ui::Backend::none,
+                                      isotone::ui::OutputLayout{2, 0x3, 48000.0}},
+            name});
+        presets->setOutputList([machine = machine_, added = added_] {
+            std::vector<Presets::OutputInfo> list = machine();
+            list.insert(list.end(), added.begin(), added.end());
+            return list;
+        });
+    }
+    Q_INVOKABLE void clearAddedOutputs() {
+        if (!machine_) return;
+        isotoneSingleton<Presets>(engine_, "Presets")->setOutputList(machine_);
+        machine_ = nullptr;
+        added_.clear();
+    }
+
 private:
     QQmlEngine* engine_;
+    Presets::OutputList machine_;
+    std::vector<Presets::OutputInfo> added_;
 };
 
 class Setup : public QObject {

@@ -49,6 +49,7 @@ Item {
         function cleanup() {
             menu.close()
             clearAll()
+            TestHooks.clearAddedOutputs()
         }
 
         function test_lists_every_preset_with_the_current_checked_and_assigned_outputs() {
@@ -91,6 +92,38 @@ Item {
             compare(r.forOutput, "")
             compare(Presets.presetOutput("Late night"), "")
             compare(r.height, height)
+        }
+
+        // With its outputs open, the current preset's check stays beside its name,
+        // not halfway down the list beside an output (2026-11-14).
+        function test_the_current_check_stays_on_the_name_line_while_picking() {
+            const r = row("HD 650 · tuned")
+            verify(r.current)
+            const check = child(r, "presetCurrentCheck")
+            const before = check.y + check.height / 2
+            hover(r)
+            mouseClick(child(r, "presetScope"))
+            verify(child(r, "presetScopeList").visible)
+            waitForItemPolished(r)
+            waitForRendering(menu)
+            verify(r.height > 44)
+            compare(check.y + check.height / 2, before)
+            compare(check.y + check.height / 2, 22)
+        }
+
+        // An output that appears after the menu is made (a device reinstalled after
+        // sign-in, 2026-11-14) is offered when the list opens.
+        function test_an_output_that_appears_later_is_offered() {
+            TestHooks.addOutput("{00000000-0000-4000-8000-0000000000a1}", "Headphones (Late USB)")
+            const r = row("Late night")
+            hover(r)
+            mouseClick(child(r, "presetScope"))
+            const list = child(r, "presetScopeList")
+            verify(list.visible)
+            const names = []
+            for (let i = 0; i < list.children.length; ++i)
+                if (list.children[i].modelData !== undefined) names.push(list.children[i].modelData.name)
+            verify(names.indexOf("Headphones (Late USB)") >= 0, names.join(", "))
         }
 
         // A preset for another output is listed, faded, and does not load when it is

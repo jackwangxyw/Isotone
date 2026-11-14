@@ -17,7 +17,6 @@ Popover {
     property string confirmingDelete: ""
     // The preset whose output is being picked (the row's speaker icon).
     property string scoping: ""
-    readonly property var outputs: Presets.outputChoices()
 
     onClosed: {
         renaming = ""
@@ -158,7 +157,8 @@ Popover {
                         Icon {
                             objectName: "presetCurrentCheck"
                             x: 12
-                            anchors.verticalCenter: parent.verticalCenter
+                            // On the name's line, as the labels are, while the outputs are open below it.
+                            y: ((row.scopingThis ? 44 : row.height) - height) / 2
                             visible: row.current && !row.renamingThis
                             name: "check"
                             size: 16
@@ -242,7 +242,8 @@ Popover {
                             y: 44
                             width: row.width - x - 10
                             Repeater {
-                                model: row.scopingThis ? [{ guid: "", name: "All outputs" }].concat(root.outputs) : []
+                                // Read each time the list opens: outputs come and go while the app runs.
+                                model: row.scopingThis ? [{ guid: "", name: "All outputs" }].concat(Presets.outputChoices()) : []
                                 delegate: Rectangle {
                                     required property var modelData
                                     width: scopeColumn.width

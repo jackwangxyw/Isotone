@@ -65,6 +65,9 @@ public:
 
     // The app's: presets under AppPaths::dataDir(), the EqSession and Outputs singletons.
     static Presets* create(QQmlEngine* qml, QJSEngine* js);
+    // Tests: the outputs Presets sees, swapped for a list of their own.
+    const OutputList& outputList() const { return outputs_; }
+    void setOutputList(OutputList outputs) { outputs_ = std::move(outputs); }
     // `outputs` lists the working outputs; other outputs are written through
 #if defined(_WIN32)
     // DeviceLinks on `region_namespace` and `compat_dir`, as EqSession's.
