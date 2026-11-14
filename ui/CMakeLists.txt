@@ -309,6 +309,8 @@ if(WIN32)
 
     # res/isotone.rc: the exe's icon.
     qt_add_executable(isotone WIN32 src/main.cpp res/isotone.rc)
+    # rc reports no dependencies, so without this a new isotone.ico never reaches the exe.
+    set_source_files_properties(res/isotone.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/res/isotone.ico)
     # And the version Explorer's properties page and Settings, About show.
     isotone_version_resource(isotone "Isotone")
 else()
