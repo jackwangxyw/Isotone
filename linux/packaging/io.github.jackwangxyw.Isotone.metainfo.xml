@@ -53,6 +53,11 @@
   </recommends>
 
   <releases>
+    <release version="0.1.2" date="2026-11-14">
+      <description>
+        <p>A preset can be set to an output that appeared after Isotone started.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-05">
       <description>
         <p>Windows setup no longer fails on a PC that has never had Isotone.</p>

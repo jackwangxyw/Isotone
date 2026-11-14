@@ -22,7 +22,7 @@ Item {
         function child(name) { return findChild(page, name) }
 
         function test_version_and_engines() {
-            compare(child("version").text, "Version 0.1.1")
+            compare(child("version").text, "Version 0.1.2")
             if (Qt.platform.os === "linux") {
                 // The daemon and PipeWire, whatever this machine runs.
                 verify(/^(Not running|Running · .+)$/.test(child("daemon").text), child("daemon").text)
@@ -42,7 +42,7 @@ Item {
             compare(button.icon, "check")
             paste.text = ""
             paste.paste()
-            verify(paste.text.startsWith("Isotone 0.1.1\n"), paste.text.slice(0, 80))
+            verify(paste.text.startsWith("Isotone 0.1.2\n"), paste.text.slice(0, 80))
             verify(paste.text.indexOf("\nQt ") > 0)
             if (Qt.platform.os === "linux") {
                 verify(paste.text.indexOf("\nPipeWire library ") > 0)

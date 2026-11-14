@@ -78,7 +78,7 @@ windeployqt, which stages the Qt runtime:
 ```powershell
 $stage = "$env:TEMP\isotone-stage"
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && `"$cm\CMake\bin\cmake.exe`" --install build-ui --prefix `"$stage`""
-& "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /DSTAGE="$stage" /DVERSION=0.1.1 windows\setup\isotone.nsi
+& "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /DSTAGE="$stage" /DVERSION=0.1.2 windows\setup\isotone.nsi
 ```
 
 - Run the app for checks only with `--data-dir <scratch> --compat-dir <scratch>
@@ -170,14 +170,14 @@ The `.deb` and the Flatpak, both built in WSL, both unelevated apart from the
 `.deb`'s install:
 
 ```bash
-cd ~/build-linux && cpack -G DEB && lintian --tag-display-limit 0 isotone-0.1.1-Linux.deb
+cd ~/build-linux && cpack -G DEB && lintian --tag-display-limit 0 isotone-0.1.2-Linux.deb
 # The Flatpak wants the source in the Linux filesystem: flatpak-builder copies
 # the tree, and doing that across /mnt/c is very slow.
 rm -rf ~/flat-src && mkdir ~/flat-src
 cd /mnt/c/Users/jackw/OneDrive/Documents/GitHub/Isotone && git ls-files -z | tar --null -T - -cf - | tar -xf - -C ~/flat-src
 cd ~/flat-src
 flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=$HOME/flat-repo \n    ~/flat-build linux/packaging/flatpak/io.github.jackwangxyw.Isotone.yml
-flatpak build-bundle $HOME/flat-repo $HOME/isotone-0.1.1.flatpak io.github.jackwangxyw.Isotone master
+flatpak build-bundle $HOME/flat-repo $HOME/isotone-0.1.2.flatpak io.github.jackwangxyw.Isotone master
 ```
 
 - `linux/spike` and `linux/daemon` are added only when pkg-config finds
